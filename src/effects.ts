@@ -151,6 +151,7 @@ export class Effects {
     this._updatePool(this._impacts, dt);
     this._updatePool(this._blood, dt);
     this._updatePool(this._flashes, dt);
+    if (this._expPoolsReady) this._updateExplosionPools(dt);
   }
 
   private _updatePool(pool: Particle[], dt: number): void {
@@ -300,5 +301,153 @@ export class Effects {
       mesh.visible = false;
     }
     this._decalIdx = 0;
+  }
+
+  // ---------------------------------------------------------------------------
+  // Explosion effect (appended — existing code untouched above)
+  // ---------------------------------------------------------------------------
+  // Pool sizes for explosion effects.
+  // ExpParticle is an extended Particle with scale interpolation data.
+  private _expFlash:  Particle[]    = [];
+  private _expFlashIdx = 0;
+  private _expSphere: Particle[]    = [];
+  private _expSphereIdx = 0;
+  private _expDebris: Particle[]    = [];
+  private _expDebrisIdx = 0;
+  private _expPoolsReady = false;
+
+  private _initExplosionPools(): void {
+    if (this._expPoolsReady) return;
+    this._expPoolsReady = true;
+
+    // Flash quad — large bright additive plane.
+    const flashGeo = new THREE.PlaneGeometry(1, 1);
+    const flashMat = new THREE.MeshBasicMaterial({
+      color: 0xffffff,
+      transparent: true,
+      depthWrite: false,
+      blending: THREE.AdditiveBlending,
+      side: THREE.DoubleSide,
+    });
+    for (let i = 0; i < 4; i++) {
+      const mesh = new THREE.Mesh(flashGeo, flashMat.clone());
+      mesh.visible = false;
+      this._scene.add(mesh);
+      this._expFlash.push({ mesh, life: -1, maxLife: 0.18 });
+    }
+
+    // Expanding sphere.
+    const sphereGeo = new THREE.SphereGeometry(1, 12, 8);
+    const sphereMat = new THREE.MeshBasicMaterial({
+      color: 0xff6600,
+      transparent: true,
+      depthWrite: false,
+      side: THREE.FrontSide,
+    });
+    for (let i = 0; i < 4; i++) {
+      const mesh = new THREE.Mesh(sphereGeo, sphereMat.clone());
+      mesh.visible = false;
+      this._scene.add(mesh);
+      this._expSphere.push({ mesh, life: -1, maxLife: 0.7 });
+    }
+
+    // Debris puffs — reuse impact-style quads.
+    const debrisGeo = new THREE.PlaneGeometry(0.3, 0.3);
+    const debrisMat = new THREE.MeshBasicMaterial({
+      color: IMPACT_COLOR,
+      transparent: true,
+      depthWrite: false,
+      side: THREE.DoubleSide,
+    });
+    for (let i = 0; i < 24; i++) {
+      const mesh = new THREE.Mesh(debrisGeo, debrisMat.clone());
+      mesh.visible = false;
+      this._scene.add(mesh);
+      this._expDebris.push({ mesh, life: -1, maxLife: 0.6 });
+    }
+  }
+
+  explosion(center: Vec3): void {
+    this._initExplosionPools();
+
+    // Flash quad — scale up fast.
+    {
+      const p = this._expFlash[this._expFlashIdx % this._expFlash.length];
+      this._expFlashIdx = (this._expFlashIdx + 1) % this._expFlash.length;
+      p.life    = 0.18;
+      p.maxLife = 0.18;
+      (p as Particle & { _startScale: number; _endScale: number })._startScale = 2;
+      (p as Particle & { _startScale: number; _endScale: number })._endScale   = 16;
+      p.mesh.visible = true;
+      p.mesh.position.set(center.x, center.y + 2, center.z);
+      p.mesh.scale.set(2, 2, 1);
+      (p.mesh.material as THREE.MeshBasicMaterial).opacity = 1;
+    }
+
+    // Expanding sphere.
+    {
+      const p = this._expSphere[this._expSphereIdx % this._expSphere.length];
+      this._expSphereIdx = (this._expSphereIdx + 1) % this._expSphere.length;
+      p.life    = 0.7;
+      p.maxLife = 0.7;
+      (p as Particle & { _startScale: number; _endScale: number })._startScale = 0.5;
+      (p as Particle & { _startScale: number; _endScale: number })._endScale   = 12;
+      p.mesh.visible = true;
+      p.mesh.position.set(center.x, center.y, center.z);
+      p.mesh.scale.set(0.5, 0.5, 0.5);
+      (p.mesh.material as THREE.MeshBasicMaterial).opacity = 0.75;
+    }
+
+    // Debris puffs.
+    for (let i = 0; i < 12; i++) {
+      const p = this._expDebris[this._expDebrisIdx % this._expDebris.length];
+      this._expDebrisIdx = (this._expDebrisIdx + 1) % this._expDebris.length;
+      p.life    = 0.3 + Math.random() * 0.3;
+      p.maxLife = p.life;
+      const angle  = Math.random() * Math.PI * 2;
+      const radius = 1.5 + Math.random() * 4;
+      p.mesh.visible = true;
+      p.mesh.position.set(
+        center.x + Math.cos(angle) * radius,
+        center.y + 0.5 + Math.random() * 3,
+        center.z + Math.sin(angle) * radius,
+      );
+      const s = 0.5 + Math.random() * 1.2;
+      p.mesh.scale.set(s, s, 1);
+      (p.mesh.material as THREE.MeshBasicMaterial).opacity = 0.9;
+    }
+  }
+
+  private _updateExplosionPools(dt: number): void {
+    // Flash.
+    for (const p of this._expFlash) {
+      if (p.life < 0) continue;
+      p.life -= dt;
+      if (p.life <= 0) { p.life = -1; p.mesh.visible = false; continue; }
+      const t  = p.life / p.maxLife; // 1→0
+      const ep = p as Particle & { _startScale: number; _endScale: number };
+      const s  = ep._endScale + (ep._startScale - ep._endScale) * t;
+      p.mesh.scale.set(s, s, 1);
+      (p.mesh.material as THREE.MeshBasicMaterial).opacity = t;
+    }
+    // Sphere.
+    for (const p of this._expSphere) {
+      if (p.life < 0) continue;
+      p.life -= dt;
+      if (p.life <= 0) { p.life = -1; p.mesh.visible = false; continue; }
+      const t  = p.life / p.maxLife;
+      const ep = p as Particle & { _startScale: number; _endScale: number };
+      const s  = ep._startScale + (ep._endScale - ep._startScale) * (1 - t);
+      p.mesh.scale.set(s, s, s);
+      (p.mesh.material as THREE.MeshBasicMaterial).opacity = t * 0.6;
+    }
+    // Debris.
+    for (const p of this._expDebris) {
+      if (p.life < 0) continue;
+      p.life -= dt;
+      if (p.life <= 0) { p.life = -1; p.mesh.visible = false; continue; }
+      const t = p.life / p.maxLife;
+      (p.mesh.material as THREE.MeshBasicMaterial).opacity = t;
+    }
   }
 }

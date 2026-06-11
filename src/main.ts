@@ -15,6 +15,9 @@ import { createCharacterMesh, updateCharacterMesh } from './characters';
 import { ViewModel } from './viewmodel';
 import { Effects } from './effects';
 import { audio } from './audio';
+import { Game } from './game';
+import type { MatchOptions } from './game';
+import { HUD } from './hud';
 
 // ---------------------------------------------------------------------------
 // Game-time clock (seconds) — advanced by fixed-step simulation.
@@ -23,70 +26,58 @@ import { audio } from './audio';
 export const clock = { now: 0 };
 
 // ---------------------------------------------------------------------------
-// Helpers
+// Helpers (kept local; Game owns the real createCombatant for bots)
 // ---------------------------------------------------------------------------
 
 function makeWeaponState(def: WeaponDef): WeaponState {
   return {
     def,
-    ammo:      def.magSize,
-    reserve:   def.reserveAmmo,
-    reloading: false,
-    reloadEnd: 0,
-    nextFire:  0,
+    ammo:       def.magSize,
+    reserve:    def.reserveAmmo,
+    reloading:  false,
+    reloadEnd:  0,
+    nextFire:   0,
     shotsFired: 0,
   };
 }
 
 function createCombatant(id: number, name: string, team: Team, isPlayer: boolean): Combatant {
-  const knife = makeWeaponState(WEAPONS.knife);
+  const knife     = makeWeaponState(WEAPONS.knife);
   const secondary = makeWeaponState(team === 'CT' ? WEAPONS.usp : WEAPONS.glock);
-
   const inventory: Inventory = {
     knife,
     secondary,
     primary: null,
     activeSlot: 'secondary',
   };
-
   return {
     id,
     name,
     team,
     isPlayer,
-    pos: { x: 0, y: 0, z: 0 },
-    vel: { x: 0, y: 0, z: 0 },
-    yaw: 0,
-    pitch: 0,
-    health: 100,
-    armor: 0,
-    helmet: false,
-    alive: true,
+    pos:       { x: 0, y: 0, z: 0 },
+    vel:       { x: 0, y: 0, z: 0 },
+    yaw:       0,
+    pitch:     0,
+    health:    100,
+    armor:     0,
+    helmet:    false,
+    alive:     true,
     crouching: false,
-    walking: false,
-    onGround: false,
+    walking:   false,
+    onGround:  false,
     inventory,
-    money: ECONOMY.START_MONEY,
-    kills: 0,
-    deaths: 0,
-    hasBomb: false,
+    money:        ECONOMY.START_MONEY,
+    kills:        0,
+    deaths:       0,
+    hasBomb:      false,
     hasDefuseKit: false,
     tagSlowUntil: 0,
   };
 }
 
 // ---------------------------------------------------------------------------
-// TEMP: dummy respawn state
-// ---------------------------------------------------------------------------
-interface DummyState {
-  combatant: Combatant;
-  mesh: THREE.Group;
-  spawnPos: { x: number; y: number; z: number };
-  respawnAt: number; // clock.now when to respawn, -1 = alive
-}
-
-// ---------------------------------------------------------------------------
-// Bootstrap (after DOM ready)
+// Bootstrap
 // ---------------------------------------------------------------------------
 
 function boot(): void {
@@ -115,59 +106,107 @@ function boot(): void {
   // --- Camera ---
   const camera = new THREE.PerspectiveCamera(73, window.innerWidth / window.innerHeight, 0.05, 300);
   camera.rotation.order = 'YXZ';
-  // Camera must be in scene so viewmodel (parented to camera) renders.
   scene.add(camera);
 
   // --- Input ---
   const input = new Input(renderer.domElement);
-  input.onLockChange = (locked) => {
-    const hint = document.getElementById('lock-hint');
-    if (hint) hint.style.display = locked ? 'none' : 'flex';
-  };
 
-  // --- Player ---
-  const spawn = DUST2.spawns.t[0];
-  const player = createCombatant(0, 'Player', 'T', true);
-  player.pos = {
-    x: spawn.x,
-    y: DUST2.legend[DUST2.grid[
-      Math.floor((spawn.z - DUST2.origin.z) / DUST2.cellSize)
-    ][Math.floor((spawn.x - DUST2.origin.x) / DUST2.cellSize)]]?.floor ?? 1.5,
-    z: spawn.z,
-  };
-  player.yaw = spawn.angle;
+  // --- Player combatant (owned by main; Game holds a reference) ---
+  const player = createCombatant(0, 'Player', 'CT', true);
+  {
+    const spawn = DUST2.spawns.ct[0];
+    const floorY = world.floorAt(spawn.x, spawn.z);
+    player.pos = { x: spawn.x, y: isFinite(floorY) ? floorY : 0, z: spawn.z };
+    player.yaw = spawn.angle;
+  }
 
-  // TEMP: give player knife + usp + ak47, activeSlot primary.
-  player.inventory.primary    = makeWeaponState(WEAPONS.ak47);
-  player.inventory.activeSlot = 'primary';
+  // --- Game ---
+  const game = new Game(world, scene);
+  game.player = player;
 
-  // --- Eye height smooth ---
-  let eyeY = player.pos.y + MOVEMENT.EYE_STAND;
-
-  // --- Noclip (TEMP debug) ---
-  let noclip = false;
+  // --- HUD ---
+  const hud = new HUD(document.body, game);
 
   // --- Effects ---
   const effects = new Effects(scene);
 
   // --- ViewModel ---
   const viewmodel = new ViewModel(camera);
-  {
-    const initSlot = player.inventory.activeSlot;
-    const initWs =
-      initSlot === 'primary'   ? player.inventory.primary :
-      initSlot === 'secondary' ? player.inventory.secondary :
-      player.inventory.knife;
-    viewmodel.setWeapon(initWs?.def.id ?? 'usp');
-  }
+  viewmodel.setWeapon(player.inventory.secondary?.def.id ?? 'usp');
 
-  // --- Footstep accumulator ---
-  let stepAccum = 0;
+  // --- State ---
+  let eyeY        = player.pos.y + MOVEMENT.EYE_STAND;
+  let noclip      = false;
+  let debugVisible = false;
+  let paused       = false;
+  let stepAccum   = 0;
+  let currentFov  = 73;
+  let prevKeyR    = false;
+  let lastMatchOpts: MatchOptions | null = null;
 
-  // --- FOV scope state ---
-  let currentFov = 73;
+  // Death cam state.
+  let deathCamPos: THREE.Vector3 | null = null;
+  let deathCamTilt = 0; // accumulated downward tilt
 
-  // TEMP: subscribe to reload to trigger viewmodel animation.
+  // --- Lock / unlock handling ---
+  input.onLockChange = (locked) => {
+    const hint = document.getElementById('lock-hint');
+    if (hint) hint.style.display = locked ? 'none' : 'flex';
+
+    if (!locked && game.phase !== 'menu') {
+      // Pointer lost while in-game → pause.
+      paused = true;
+      hud.showMenu('pause');
+    }
+    if (locked && paused) {
+      paused = false;
+      hud.hideMenus();
+    }
+  };
+
+  // --- HUD callbacks ---
+  hud.onStart = (opts) => {
+    lastMatchOpts = opts;
+    // Reset player to chosen team default loadout (Game will reassign on round start).
+    player.team = opts.playerTeam;
+    game.startMatch(opts);
+    hud.hideMenus();
+    input.requestLock();
+    audio.unlock();
+  };
+
+  hud.onResume = () => {
+    paused = false;
+    hud.hideMenus();
+    input.requestLock();
+  };
+
+  hud.onRestart = () => {
+    if (lastMatchOpts) {
+      game.restart(lastMatchOpts);
+      paused = false;
+      hud.hideMenus();
+      input.requestLock();
+    }
+  };
+
+  hud.setSensitivityHook(
+    () => input.sensitivity,
+    (v) => { input.sensitivity = v; },
+  );
+
+  // --- Audio buy events ---
+  document.body.addEventListener('hud-buy-success', () => {
+    audio.buyClick();
+    const slot = player.inventory.activeSlot;
+    const ws   = player.inventory[slot];
+    viewmodel.setWeapon(ws?.def.id ?? 'usp');
+  });
+  document.body.addEventListener('hud-buy-fail', () => {
+    audio.cantBuy();
+  });
+
+  // --- Reload event ---
   gameEvents.on('reload', (ev) => {
     if (ev.who === player) {
       const ws = player.inventory[player.inventory.activeSlot];
@@ -176,54 +215,100 @@ function boot(): void {
     }
   });
 
-  // --- UI: lock hint ---
+  // --- Kill / damage events ---
+  gameEvents.on('kill', (ev) => {
+    if (ev.attacker === player) {
+      hud.notifyHit(true, ev.headshot);
+    }
+    // Player death.
+    if (ev.victim === player) {
+      game.onPlayerDied();
+      deathCamPos = new THREE.Vector3(player.pos.x, eyeY, player.pos.z);
+      deathCamTilt = 0;
+    }
+  });
+
+  gameEvents.on('damage', (ev) => {
+    if (ev.victim === player && ev.attacker !== null) {
+      const attacker = ev.attacker;
+      // Compute bearing from attacker to player (yaw delta).
+      const dx = player.pos.x - attacker.pos.x;
+      const dz = player.pos.z - attacker.pos.z;
+      const attackerBearing = Math.atan2(-dx, -dz);
+      const delta = attackerBearing - player.yaw;
+      hud.notifyDamageFrom(delta);
+      audio.hitmarker(); // damage feedback tick
+    }
+    if (ev.attacker === player && ev.victim !== player) {
+      hud.notifyHit(false, ev.hitGroup === 'head');
+    }
+  });
+
+  // --- Bomb events ---
+  gameEvents.on('bombPlanted', (_ev) => {
+    audio.bombPlant();
+  });
+
+  gameEvents.on('bombDefused', (_ev) => {
+    audio.bombDefused();
+  });
+
+  gameEvents.on('bombExploded', (_ev) => {
+    const center = game.bomb.pos;
+    audio.explosion(center);
+    effects.explosion(center);
+  });
+
+  gameEvents.on('roundEnd', (ev) => {
+    const win = (ev.winner === player.team);
+    audio.roundEnd(win);
+  });
+
+  // --- Lock hint ---
   const lockHint = document.createElement('div');
   lockHint.id = 'lock-hint';
   lockHint.textContent = 'Click to play';
   Object.assign(lockHint.style, {
-    position:       'fixed',
-    top:            '50%',
-    left:           '50%',
-    transform:      'translate(-50%, -50%)',
-    color:          '#ffffff',
-    fontSize:       '24px',
-    fontFamily:     'sans-serif',
-    background:     'rgba(0,0,0,0.5)',
-    padding:        '16px 32px',
-    borderRadius:   '8px',
-    pointerEvents:  'auto',
-    display:        'flex',
-    cursor:         'pointer',
-    zIndex:         '10',
-  });
-  lockHint.addEventListener('click', () => {
-    input.requestLock();
-    audio.unlock();
+    position:      'fixed',
+    top:           '50%',
+    left:          '50%',
+    transform:     'translate(-50%, -50%)',
+    color:         '#ffffff',
+    fontSize:      '24px',
+    fontFamily:    'sans-serif',
+    background:    'rgba(0,0,0,0.5)',
+    padding:       '16px 32px',
+    borderRadius:  '8px',
+    pointerEvents: 'auto',
+    display:       'flex',
+    cursor:        'pointer',
+    zIndex:        '10',
   });
   document.body.appendChild(lockHint);
 
   renderer.domElement.addEventListener('click', () => {
-    if (!input.locked) {
+    if (!input.locked && game.phase !== 'menu') {
       input.requestLock();
       audio.unlock();
     }
   });
 
-  // --- Debug div ---
+  // --- Debug div (hidden by default; F3 to toggle) ---
   const debugDiv = document.createElement('div');
   debugDiv.id = 'debug';
   Object.assign(debugDiv.style, {
-    position:   'fixed',
-    top:        '8px',
-    left:       '8px',
-    color:      '#ffffff',
-    fontSize:   '12px',
-    fontFamily: 'monospace',
-    background: 'rgba(0,0,0,0.4)',
-    padding:    '6px 10px',
-    borderRadius: '4px',
+    position:      'fixed',
+    top:           '8px',
+    left:          '8px',
+    color:         '#ffffff',
+    fontSize:      '12px',
+    fontFamily:    'monospace',
+    background:    'rgba(0,0,0,0.4)',
+    padding:       '6px 10px',
+    borderRadius:  '4px',
     pointerEvents: 'none',
-    zIndex:     '9',
+    zIndex:        '9',
+    display:       'none', // hidden by default
   });
   document.body.appendChild(debugDiv);
 
@@ -234,35 +319,11 @@ function boot(): void {
     renderer.setSize(window.innerWidth, window.innerHeight);
   });
 
-  // --- TEMP: Dummy combatants (CT opponents) ---
-  // Three static CT dummies at known Dust2 positions. Feet snapped to floor.
-  const DUMMY_SPAWNS: Array<{ x: number; z: number }> = [
-    { x: -1,  z: 8  }, // mid
-    { x: 26,  z: -10 }, // top of long
-    { x: -30, z: -34 }, // B site
-  ];
-
-  const dummies: DummyState[] = DUMMY_SPAWNS.map((sp, i) => {
-    const floorY = world.floorAt(sp.x, sp.z);
-    const y = isFinite(floorY) ? floorY : 0;
-
-    const c = createCombatant(100 + i, `Bot${i}`, 'CT', false);
-    c.pos = { x: sp.x, y, z: sp.z };
-    c.onGround = true;
-
-    const mesh = createCharacterMesh('CT');
-    scene.add(mesh);
-
-    return {
-      combatant: c,
-      mesh,
-      spawnPos: { x: sp.x, y, z: sp.z },
-      respawnAt: -1,
-    };
-  });
+  // --- Start with menu ---
+  hud.showMenu('start');
 
   // --- Fixed timestep loop ---
-  const FIXED_DT = 1 / 128;
+  const FIXED_DT  = 1 / 128;
   let accumulator = 0;
   let lastTime    = performance.now() / 1000;
   let frameCount  = 0;
@@ -270,16 +331,13 @@ function boot(): void {
   let displayFps  = 0;
   let debugTimer  = 0;
 
-  // Edge tracking for reload key.
-  let prevKeyR = false;
-
   function frame(): void {
     requestAnimationFrame(frame);
 
     const now = performance.now() / 1000;
     let frameDt = now - lastTime;
     lastTime = now;
-    if (frameDt > 0.1) frameDt = 0.1; // clamp
+    if (frameDt > 0.1) frameDt = 0.1;
 
     accumulator += frameDt;
     fpsTimer    += frameDt;
@@ -292,11 +350,17 @@ function boot(): void {
       fpsTimer   = 0;
     }
 
-    // --- Noclip toggle (TEMP) ---
+    // F3: debug toggle.
+    if (input.wasPressed('F3')) {
+      debugVisible = !debugVisible;
+      debugDiv.style.display = debugVisible ? 'block' : 'none';
+    }
+
+    // Noclip (debug, N key).
     if (input.wasPressed('KeyN')) noclip = !noclip;
 
-    // --- Slot switching (outside fixed step for responsiveness) ---
-    {
+    // Slot switching — outside fixed step for responsiveness.
+    if (game.phase !== 'menu' && player.alive) {
       let slotChanged = false;
       if (input.wasPressed('Digit1') && player.inventory.primary) {
         slotChanged = switchSlot(player, 'primary', clock.now);
@@ -305,33 +369,40 @@ function boot(): void {
       } else if (input.wasPressed('Digit3')) {
         slotChanged = switchSlot(player, 'knife', clock.now);
       } else if (input.wheelDelta !== 0) {
-        // Cycle slots.
         const order: Array<'primary' | 'secondary' | 'knife'> = ['primary', 'secondary', 'knife'];
         const cur  = order.indexOf(player.inventory.activeSlot);
         const next = ((cur + (input.wheelDelta > 0 ? 1 : -1)) + order.length) % order.length;
         const tgt  = order[next];
-        if ((tgt === 'primary' && player.inventory.primary) ||
-            (tgt === 'secondary' && player.inventory.secondary) ||
-            tgt === 'knife') {
+        if (
+          (tgt === 'primary'   && player.inventory.primary)   ||
+          (tgt === 'secondary' && player.inventory.secondary) ||
+          tgt === 'knife'
+        ) {
           slotChanged = switchSlot(player, tgt, clock.now);
         }
       }
-
       if (slotChanged) {
         const activeWs = player.inventory[player.inventory.activeSlot];
         viewmodel.setWeapon(activeWs?.def.id ?? player.inventory.activeSlot);
       }
     }
 
-    // Mouse delta for viewmodel sway (accumulated before fixed step).
+    // Mouse delta for viewmodel sway.
     const { dx: mouseDxRaw, dy: mouseDyRaw } = input.consumeMouseDelta();
 
     // Fixed-step ticks.
     while (accumulator >= FIXED_DT) {
       accumulator -= FIXED_DT;
-      clock.now += FIXED_DT;
+      clock.now   += FIXED_DT;
 
-      // Mouse look.
+      // Skip simulation when paused or in menu.
+      if (paused || game.phase === 'menu') {
+        // Still consume the tick but don't advance simulation.
+        game.update(FIXED_DT, clock.now);
+        continue;
+      }
+
+      // Mouse look (player alive or freeze/live phase for look).
       if (input.locked) {
         const scopedSensScale = isScoped(player) ? 0.4 : 1.0;
         player.yaw   -= mouseDxRaw * input.sensitivity * scopedSensScale;
@@ -340,45 +411,43 @@ function boot(): void {
           -Math.PI / 2 * 89 / 90,
           Math.PI / 2 * 89 / 90,
         );
-        // Normalize yaw to [-PI, PI].
         player.yaw = ((player.yaw + Math.PI) % (Math.PI * 2) + Math.PI * 2) % (Math.PI * 2) - Math.PI;
       }
 
-      if (noclip) {
-        // TEMP: fly mode — move along view dir at 12 m/s.
+      const isFreeze   = game.phase === 'freeze';
+      const playerAlive = player.alive;
+
+      if (noclip && playerAlive) {
         const NOCLIP_SPEED = 12;
         const sinY = Math.sin(player.yaw);
         const cosY = Math.cos(player.yaw);
-        const fwdX = -sinY;
-        const fwdZ = -cosY;
-
         let mx = 0, my = 0, mz = 0;
-        if (input.isDown('KeyW')) { mx += fwdX; mz += fwdZ; }
-        if (input.isDown('KeyS')) { mx -= fwdX; mz -= fwdZ; }
+        if (input.isDown('KeyW')) { mx -= sinY; mz -= cosY; }
+        if (input.isDown('KeyS')) { mx += sinY; mz += cosY; }
         if (input.isDown('KeyA')) { mx -= cosY; mz += sinY; }
         if (input.isDown('KeyD')) { mx += cosY; mz -= sinY; }
-        if (input.isDown('Space'))        my += 1;
-        if (input.isDown('ControlLeft'))  my -= 1;
+        if (input.isDown('Space'))       my += 1;
+        if (input.isDown('ControlLeft')) my -= 1;
         const ml = Math.sqrt(mx * mx + my * my + mz * mz);
         if (ml > 1e-8) { mx /= ml; my /= ml; mz /= ml; }
         player.pos.x += mx * NOCLIP_SPEED * FIXED_DT;
         player.pos.y += my * NOCLIP_SPEED * FIXED_DT;
         player.pos.z += mz * NOCLIP_SPEED * FIXED_DT;
-      } else {
-        // Normal movement.
+      } else if (playerAlive && !isFreeze) {
+        // Normal movement (freeze: no movement, look only).
         const forward = (input.isDown('KeyW') ? 1 : 0) - (input.isDown('KeyS') ? 1 : 0);
         const strafe  = (input.isDown('KeyD') ? 1 : 0) - (input.isDown('KeyA') ? 1 : 0);
         const intent: MoveIntent = {
           forward,
           strafe,
-          jump:    input.isDown('Space'),
-          crouch:  input.isDown('ControlLeft'),
-          walk:    input.isDown('ShiftLeft'),
+          jump:   input.isDown('Space'),
+          crouch: input.isDown('ControlLeft'),
+          walk:   input.isDown('ShiftLeft'),
         };
         const moveEv = simulateMovement(player, intent, world, FIXED_DT, clock.now);
 
-        // --- Footstep audio ---
-        if (!player.walking) { // silent walking if walk key held
+        // Footstep audio (player).
+        if (!player.walking) {
           stepAccum += moveEv.stepDistance;
           const stepThreshold = Math.sqrt(player.vel.x ** 2 + player.vel.z ** 2) > 3.5 ? 1.7 : 2.4;
           if (stepAccum >= stepThreshold) {
@@ -386,95 +455,95 @@ function boot(): void {
             audio.footstep();
           }
         }
-
         if (moveEv.landed) {
           audio.land();
           stepAccum = 0;
         }
       }
 
-      // --- Weapon input ---
+      // E key: plant / defuse.
+      const eHeld = input.isDown('KeyE');
+      const bombInProgress =
+        (game.bomb.state === 'carried' && game.bomb.plantProgress >= 0 && game.bomb.planter === player) ||
+        (game.bomb.state === 'planted' && game.bomb.defuseProgress > 0  && game.bomb.defuser === player);
+
+      if (playerAlive && !isFreeze) {
+        game.useHeld(player, eHeld, clock.now, FIXED_DT);
+      }
+
+      // Weapon input.
       const activeSlot = player.inventory.activeSlot;
       const activeWs   = player.inventory[activeSlot];
       const def        = activeWs?.def;
 
-      // Trigger: autos — hold LMB; semi — edge only.
       const keyRDown   = input.isDown('KeyR');
       const reloadEdge = keyRDown && !prevKeyR;
       prevKeyR = keyRDown;
 
-      const scopeEdge = input.mouse2Pressed; // RMB edge from Input
+      const scopeEdge = input.mouse2Pressed;
 
       let trigger: boolean;
       if (def && def.auto) {
         trigger = input.mouseDown;
       } else {
-        // Semi: use mousePressed (edge) from Input.
         trigger = input.mousePressed;
       }
 
-      const weapInput = {
-        trigger,
-        reloadPressed: reloadEdge,
-        scopePressed:  scopeEdge,
-      };
+      // Block firing while plant/defuse in progress.
+      if (bombInProgress) trigger = false;
 
-      // TEMP: collect alive dummies as targets.
-      const aliveTargets = dummies.map(d => d.combatant);
+      const targets = game.combatants;
 
-      const shotResult = updateWeapon(player, world, aliveTargets, weapInput, clock.now, FIXED_DT);
+      let shotResult = null;
+      if (playerAlive && !isFreeze) {
+        shotResult = updateWeapon(player, world, targets, {
+          trigger,
+          reloadPressed: reloadEdge,
+          scopePressed:  scopeEdge,
+        }, clock.now, FIXED_DT);
+      }
 
       if (shotResult !== null) {
         const muzzlePos = viewmodel.getMuzzleWorldPos();
-
-        // Viewmodel fire kick.
         viewmodel.onFire();
-
-        // Muzzle flash.
         effects.muzzleFlash(muzzlePos);
-
-        // Tracer.
         effects.tracer(muzzlePos, shotResult.endPoint);
-
-        // Gunshot audio (non-positional for self).
         if (def) audio.gunshot(def.id);
 
         if (shotResult.target !== null) {
-          // Blood + hit effects.
           effects.blood(shotResult.endPoint);
           audio.hitmarker();
           if (shotResult.headshot) audio.headshot();
         } else if (shotResult.surface !== null && shotResult.normal !== null) {
-          // World impact + decal.
           effects.impact(shotResult.endPoint, shotResult.normal, 'world');
           effects.addDecal(shotResult.endPoint, shotResult.normal);
         }
       }
 
-      // TEMP: respawn dummies after 3 s.
-      for (const ds of dummies) {
-        if (!ds.combatant.alive && ds.respawnAt < 0) {
-          ds.respawnAt = clock.now + 3;
-        }
-        if (ds.respawnAt > 0 && clock.now >= ds.respawnAt) {
-          ds.respawnAt = -1;
-          ds.combatant.alive   = true;
-          ds.combatant.health  = 100;
-          ds.combatant.deaths  = ds.combatant.deaths; // keep
-          ds.combatant.pos     = { ...ds.spawnPos };
-          ds.combatant.vel     = { x: 0, y: 0, z: 0 };
-        }
+      // Game state machine.
+      game.update(FIXED_DT, clock.now);
+
+      // Bomb beep.
+      if (game.shouldBeep(clock.now)) {
+        audio.bombBeep(game.bomb.pos);
       }
     }
 
     // --- Smooth eye height ---
-    const targetEyeY = player.pos.y + (player.crouching ? MOVEMENT.EYE_CROUCH : MOVEMENT.EYE_STAND);
-    const eyeSpeed = 10;
-    eyeY = eyeY + (targetEyeY - eyeY) * Math.min(1, eyeSpeed * frameDt);
+    let targetEyeY: number;
+    if (!player.alive && deathCamPos) {
+      // Death cam: fixed at death position, slight downward tilt.
+      deathCamTilt = Math.min(deathCamTilt + frameDt * 0.3, 0.25);
+    } else {
+      deathCamPos = null;
+      deathCamTilt = 0;
+      targetEyeY = player.pos.y + (player.crouching ? MOVEMENT.EYE_CROUCH : MOVEMENT.EYE_STAND);
+      eyeY = eyeY + (targetEyeY - eyeY) * Math.min(1, 10 * frameDt);
+    }
 
-    // --- Scope FOV lerp ---
-    const scoped     = isScoped(player);
-    const targetFov  = scoped ? 30 : 73;
+    // --- Scope FOV ---
+    const scoped    = isScoped(player);
+    const targetFov = scoped ? 30 : 73;
     currentFov += (targetFov - currentFov) * Math.min(1, 12 * frameDt);
     if (Math.abs(currentFov - targetFov) < 0.1) currentFov = targetFov;
     if (camera.fov !== currentFov) {
@@ -482,18 +551,21 @@ function boot(): void {
       camera.updateProjectionMatrix();
     }
 
-    // --- Camera placement: yaw/pitch from player + view punch ---
+    // --- Camera placement ---
     const punch = getViewPunch(player);
-    camera.position.set(player.pos.x, eyeY, player.pos.z);
-    camera.rotation.set(player.pitch + punch.pitch, player.yaw + punch.yaw, 0, 'YXZ');
-
-    // --- Update effects ---
-    effects.update(frameDt);
-
-    // --- Update dummy character meshes ---
-    for (const ds of dummies) {
-      updateCharacterMesh(ds.mesh, ds.combatant, frameDt);
+    if (!player.alive && deathCamPos) {
+      camera.position.copy(deathCamPos);
+      camera.rotation.set(-deathCamTilt + punch.pitch, player.yaw + punch.yaw, 0, 'YXZ');
+    } else {
+      camera.position.set(player.pos.x, eyeY, player.pos.z);
+      camera.rotation.set(player.pitch + punch.pitch, player.yaw + punch.yaw, 0, 'YXZ');
     }
+
+    // --- Update systems ---
+    effects.update(frameDt);
+    game.updateVisuals(frameDt);
+    hud.update(clock.now, frameDt);
+    audio.updateListener(camera);
 
     // --- Update viewmodel ---
     viewmodel.update(frameDt, {
@@ -504,17 +576,11 @@ function boot(): void {
       scoped,
     });
 
-    // --- Audio listener ---
-    audio.updateListener(camera);
-
-    // --- Debug readout every 250ms ---
-    if (debugTimer >= 0.25) {
+    // --- Debug readout ---
+    if (debugVisible && debugTimer >= 0.25) {
       debugTimer = 0;
-      const horizSpeed = Math.sqrt(player.vel.x ** 2 + player.vel.z ** 2);
+      const horizSpeed  = Math.sqrt(player.vel.x ** 2 + player.vel.z ** 2);
       const activeWsDbg = player.inventory[player.inventory.activeSlot];
-      const spreadDeg   = activeWsDbg
-        ? (activeWsDbg.def.spreadBase * (180 / Math.PI)).toFixed(2)
-        : '—';
       debugDiv.textContent =
         `FPS: ${displayFps}  ` +
         `pos: (${player.pos.x.toFixed(1)}, ${player.pos.y.toFixed(2)}, ${player.pos.z.toFixed(1)})  ` +
@@ -522,7 +588,7 @@ function boot(): void {
         `gnd: ${player.onGround}  ` +
         `wpn: ${activeWsDbg?.def.id ?? '—'}  ` +
         `ammo: ${activeWsDbg?.ammo ?? 0}/${activeWsDbg?.reserve ?? 0}  ` +
-        `spread: ${spreadDeg}°` +
+        `phase: ${game.phase}  ` +
         (noclip ? '  [NOCLIP]' : '');
     }
 

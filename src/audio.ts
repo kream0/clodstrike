@@ -312,6 +312,212 @@ export class GameAudio {
       panner.connect(master);
     }
   }
+
+  // ---------------------------------------------------------------------------
+  // Bomb / round-end / buy audio (appended — existing code untouched above)
+  // ---------------------------------------------------------------------------
+
+  /** Short 1.05 kHz square blip for bomb beep. */
+  bombBeep(pos?: Vec3): void {
+    const ctx    = this._ctx;
+    const master = this._master;
+    if (!ctx || !master || !this._unlocked) return;
+
+    const now = ctx.currentTime;
+    const osc = ctx.createOscillator();
+    osc.type            = 'square';
+    osc.frequency.value = 1050;
+
+    const gain = ctx.createGain();
+    gain.gain.setValueAtTime(0.18, now);
+    gain.gain.setValueAtTime(0.18, now + 0.055);
+    gain.gain.exponentialRampToValueAtTime(0.001, now + 0.08);
+
+    osc.connect(gain);
+
+    if (pos) {
+      const panner = ctx.createPanner();
+      panner.panningModel  = 'HRTF';
+      panner.distanceModel = 'inverse';
+      panner.refDistance   = 8;
+      panner.maxDistance   = 80;
+      panner.positionX.setValueAtTime(pos.x, now);
+      panner.positionY.setValueAtTime(pos.y, now);
+      panner.positionZ.setValueAtTime(pos.z, now);
+      gain.connect(panner);
+      panner.connect(master);
+    } else {
+      gain.connect(master);
+    }
+
+    osc.start(now);
+    osc.stop(now + 0.09);
+  }
+
+  /** Rising-pitch zip for bomb plant confirmation. */
+  bombPlant(): void {
+    const ctx    = this._ctx;
+    const master = this._master;
+    if (!ctx || !master || !this._unlocked) return;
+
+    const now = ctx.currentTime;
+    const osc = ctx.createOscillator();
+    osc.type = 'sawtooth';
+    osc.frequency.setValueAtTime(400, now);
+    osc.frequency.exponentialRampToValueAtTime(1200, now + 0.22);
+
+    const gain = ctx.createGain();
+    gain.gain.setValueAtTime(0.25, now);
+    gain.gain.exponentialRampToValueAtTime(0.001, now + 0.25);
+
+    osc.connect(gain);
+    gain.connect(master);
+    osc.start(now);
+    osc.stop(now + 0.27);
+  }
+
+  /** Descending-pitch resolve for bomb defuse. */
+  bombDefused(): void {
+    const ctx    = this._ctx;
+    const master = this._master;
+    if (!ctx || !master || !this._unlocked) return;
+
+    const now = ctx.currentTime;
+    // Two tones descending.
+    const freqs = [880, 660];
+    freqs.forEach((f, i) => {
+      const osc = ctx.createOscillator();
+      osc.type            = 'sine';
+      osc.frequency.value = f;
+      const g = ctx.createGain();
+      g.gain.setValueAtTime(0.22, now + i * 0.14);
+      g.gain.exponentialRampToValueAtTime(0.001, now + i * 0.14 + 0.18);
+      osc.connect(g);
+      g.connect(master);
+      osc.start(now + i * 0.14);
+      osc.stop(now + i * 0.14 + 0.2);
+    });
+  }
+
+  /** Loud low-noise boom with sub-sine drop for explosion. */
+  explosion(pos?: Vec3): void {
+    const ctx    = this._ctx;
+    const master = this._master;
+    if (!ctx || !master || !this._unlocked) return;
+
+    const now = ctx.currentTime;
+    const dur = 1.6;
+
+    // Noise burst (long, low).
+    const bufLen = Math.ceil(ctx.sampleRate * dur);
+    const buffer = ctx.createBuffer(1, bufLen, ctx.sampleRate);
+    const data   = buffer.getChannelData(0);
+    for (let i = 0; i < bufLen; i++) data[i] = Math.random() * 2 - 1;
+
+    const src = ctx.createBufferSource();
+    src.buffer = buffer;
+
+    const lp = ctx.createBiquadFilter();
+    lp.type            = 'lowpass';
+    lp.frequency.value = 350;
+
+    const gain = ctx.createGain();
+    gain.gain.setValueAtTime(1.4, now);
+    gain.gain.exponentialRampToValueAtTime(0.001, now + dur);
+
+    src.connect(lp);
+    lp.connect(gain);
+
+    if (pos) {
+      const panner = ctx.createPanner();
+      panner.distanceModel = 'inverse';
+      panner.refDistance   = 20;
+      panner.maxDistance   = 200;
+      panner.positionX.setValueAtTime(pos.x, now);
+      panner.positionY.setValueAtTime(pos.y, now);
+      panner.positionZ.setValueAtTime(pos.z, now);
+      gain.connect(panner);
+      panner.connect(master);
+    } else {
+      gain.connect(master);
+    }
+    src.start(now);
+    src.stop(now + dur + 0.05);
+
+    // Sub-sine drop.
+    const sub = ctx.createOscillator();
+    sub.type = 'sine';
+    sub.frequency.setValueAtTime(90, now);
+    sub.frequency.exponentialRampToValueAtTime(25, now + 0.8);
+    const subGain = ctx.createGain();
+    subGain.gain.setValueAtTime(0.7, now);
+    subGain.gain.exponentialRampToValueAtTime(0.001, now + 0.9);
+    sub.connect(subGain);
+    subGain.connect(master);
+    sub.start(now);
+    sub.stop(now + 0.95);
+  }
+
+  /** Two-note sting for round end. */
+  roundEnd(win: boolean): void {
+    const ctx    = this._ctx;
+    const master = this._master;
+    if (!ctx || !master || !this._unlocked) return;
+
+    const now   = ctx.currentTime;
+    const notes = win
+      ? [440, 660]   // up — win
+      : [440, 330];  // down — loss
+
+    notes.forEach((f, i) => {
+      const osc  = ctx.createOscillator();
+      osc.type            = 'triangle';
+      osc.frequency.value = f;
+      const g = ctx.createGain();
+      g.gain.setValueAtTime(0.3, now + i * 0.2);
+      g.gain.exponentialRampToValueAtTime(0.001, now + i * 0.2 + 0.3);
+      osc.connect(g);
+      g.connect(master);
+      osc.start(now + i * 0.2);
+      osc.stop(now + i * 0.2 + 0.35);
+    });
+  }
+
+  /** Quick click for buy success. */
+  buyClick(): void {
+    this._click(0);
+    this._click(0.06);
+  }
+
+  /** Dull thud for buy failure / can't buy. */
+  cantBuy(): void {
+    const ctx    = this._ctx;
+    const master = this._master;
+    if (!ctx || !master || !this._unlocked) return;
+
+    const now    = ctx.currentTime;
+    const bufLen = Math.ceil(ctx.sampleRate * 0.08);
+    const buffer = ctx.createBuffer(1, bufLen, ctx.sampleRate);
+    const data   = buffer.getChannelData(0);
+    for (let i = 0; i < bufLen; i++) data[i] = Math.random() * 2 - 1;
+
+    const src = ctx.createBufferSource();
+    src.buffer = buffer;
+
+    const lp = ctx.createBiquadFilter();
+    lp.type            = 'lowpass';
+    lp.frequency.value = 200;
+
+    const gain = ctx.createGain();
+    gain.gain.setValueAtTime(0.15, now);
+    gain.gain.exponentialRampToValueAtTime(0.001, now + 0.08);
+
+    src.connect(lp);
+    lp.connect(gain);
+    gain.connect(master);
+    src.start(now);
+    src.stop(now + 0.1);
+  }
 }
 
 export const audio = new GameAudio();
