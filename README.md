@@ -4,6 +4,8 @@ A Counter-Strike 2–style single-player FPS — bots, bomb defusal, and a low-p
 
 > Built collaboratively with Claude Code using a multi-agent workflow (contract types.ts → scoped sequential/parallel sonnet implementers per domain → integration → read-only reviewer → fixer; reviewer caught 5 pre-runtime P0s). See [`CLAUDE.md`](./CLAUDE.md) for the full process.
 
+**▶ Play it in your browser:** [kream0.github.io/clodstrike](https://kream0.github.io/clodstrike/)
+
 ---
 
 ## Current features
