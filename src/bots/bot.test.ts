@@ -7,6 +7,7 @@ import { BotManager } from './bot';
 import { DUST2 } from '../maps/dust2';
 import { RULES, ECONOMY, WEAPONS } from '../constants';
 import { gameEvents } from '../combat';
+import { isScoped } from '../weapons';
 import type { Combatant, Inventory } from '../types';
 
 // ---------------------------------------------------------------------------
@@ -352,5 +353,136 @@ describe('Hearing', () => {
     const newState = mgr.getBrainState(ctBot.id);
     // Should have transitioned to hunt (or engage if somehow saw them).
     expect(newState === 'hunt' || newState === 'engage').toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// AWP scope-pulse logic
+// ---------------------------------------------------------------------------
+
+describe('AWP scope-pulse', () => {
+  /**
+   * Build a minimal scenario: one CT bot holds AWP, is in 'engage' state with
+   * a live target. Run a few ticks and verify the bot scopes in.
+   * We drive the bot brain directly (not through tickBrains) for precise control.
+   */
+  /**
+   * Place bot and target in open mid for reliable LOS.
+   * Verified positions (no walls, clear LOS, both on valid floor cells):
+   *   bot  : x=0, z=-28, floor=0      (CTMid area)
+   *   target: x=0, z=-33, floor=0.375  (MidDoors area, 5 m in front)
+   */
+  function setupAwpScenario(game: Game, mgr: BotManager) {
+    const bot = game.combatants.find(c => c.team === 'CT' && !c.isPlayer && c.alive)!;
+    // Equip AWP.
+    bot.inventory.primary = makeWeaponState(WEAPONS.awp);
+    bot.inventory.activeSlot = 'primary';
+    bot.pos = { x: 0, y: 0, z: -28 };       // floor=0
+    bot.yaw = 0;                               // facing -Z
+    bot.onGround = true;
+
+    // Pick a non-player T bot as the target so killing the player doesn't kill it.
+    const target = game.combatants.find(c => c.team === 'T' && !c.isPlayer && c.alive)!;
+    target.pos = { x: 0, y: 0.375, z: -33 }; // floor=0.375, 5 m in front
+    target.alive = true;
+    target.health = 100;
+    target.onGround = true;
+
+    // Kill everyone else to prevent interference.
+    for (const c of game.combatants) {
+      if (c !== bot && c !== target) {
+        c.alive = false; c.health = 0;
+      }
+    }
+
+    return { bot, target };
+  }
+
+  test('bot with AWP in engage state scopes in (isScoped becomes true)', () => {
+    const { game, mgr } = freshSetup({ playerTeam: 'T', difficulty: 'hard' });
+    const now0 = advanceFreeze(game);
+
+    const { bot } = setupAwpScenario(game, mgr);
+
+    // Run up to 3 s for perception + reaction + scope toggle.
+    const TICKS = Math.ceil(3.0 / (1 / 128));
+    let now = now0;
+    for (let i = 0; i < TICKS; i++) {
+      now += 1 / 128;
+      const brain = game.botBrains.get(bot.id);
+      if (brain) brain(bot, 1 / 128, now);
+      if (isScoped(bot)) break;
+    }
+
+    expect(isScoped(bot)).toBe(true);
+  });
+
+  test('scope is not re-toggled within cooldown period (no rapid re-toggle)', () => {
+    const { game, mgr } = freshSetup({ playerTeam: 'T', difficulty: 'hard' });
+    const now0 = advanceFreeze(game);
+
+    const { bot } = setupAwpScenario(game, mgr);
+
+    // Run 3 s to let the bot scope in.
+    let now = now0;
+    const TICKS_ENGAGE = Math.ceil(3.0 / (1 / 128));
+    for (let i = 0; i < TICKS_ENGAGE; i++) {
+      now += 1 / 128;
+      const brain = game.botBrains.get(bot.id);
+      if (brain) brain(bot, 1 / 128, now);
+      if (isScoped(bot)) break;
+    }
+
+    // Bot should be scoped by now.
+    expect(isScoped(bot)).toBe(true);
+
+    // Count scope-toggle events within one more second.
+    // With cooldown 0.4 s, at most floor(1/0.4) = 2 additional toggles possible.
+    let toggleCount = 0;
+    let prevScoped = isScoped(bot);
+    const TICKS_WATCH = Math.ceil(1.0 / (1 / 128));
+    for (let i = 0; i < TICKS_WATCH; i++) {
+      now += 1 / 128;
+      const brain = game.botBrains.get(bot.id);
+      if (brain) brain(bot, 1 / 128, now);
+      const scopedNow = isScoped(bot);
+      if (scopedNow !== prevScoped) { toggleCount++; prevScoped = scopedNow; }
+    }
+
+    // Cooldown ensures we don't get more than 2 toggles in 1 s.
+    expect(toggleCount).toBeLessThanOrEqual(2);
+  });
+
+  test('bot un-scopes when target is lost (engage → hunt transition)', () => {
+    const { game, mgr } = freshSetup({ playerTeam: 'T', difficulty: 'hard' });
+    const now0 = advanceFreeze(game);
+
+    const { bot, target } = setupAwpScenario(game, mgr);
+
+    // Run 3 s to scope in.
+    let now = now0;
+    const TICKS_ENGAGE = Math.ceil(3.0 / (1 / 128));
+    for (let i = 0; i < TICKS_ENGAGE; i++) {
+      now += 1 / 128;
+      const brain = game.botBrains.get(bot.id);
+      if (brain) brain(bot, 1 / 128, now);
+      if (isScoped(bot)) break;
+    }
+    expect(isScoped(bot)).toBe(true);
+
+    // Kill the target → bot loses engage state after SIGHT_LOSE_TIME.
+    target.alive  = false;
+    target.health = 0;
+
+    // Run enough ticks for SIGHT_LOSE_TIME (1.5 s) + scope-toggle cooldown (0.4 s).
+    const TICKS_DISENGAGE = Math.ceil(2.5 / (1 / 128));
+    for (let i = 0; i < TICKS_DISENGAGE; i++) {
+      now += 1 / 128;
+      const brain = game.botBrains.get(bot.id);
+      if (brain) brain(bot, 1 / 128, now);
+      if (!isScoped(bot)) break;
+    }
+
+    expect(isScoped(bot)).toBe(false);
   });
 });

@@ -17,7 +17,7 @@ import { gameEvents } from '../combat';
 import { BOT_DIFFICULTY } from '../constants';
 import { simulateMovement } from '../movement';
 import type { MoveIntent } from '../movement';
-import { updateWeapon, getViewPunch, switchSlot } from '../weapons';
+import { updateWeapon, getViewPunch, switchSlot, isScoped } from '../weapons';
 import { NavGrid } from './nav';
 import { DUST2 } from '../maps/dust2';
 import {
@@ -144,6 +144,9 @@ interface BotBrain {
 
   // Perception stagger.
   nextPerceptAt:    number;
+
+  // Scope pulse tracking (AWP bots).
+  scopeLastToggleAt: number;
 }
 
 // ---------------------------------------------------------------------------
@@ -282,6 +285,8 @@ export class BotManager {
       stepAccum:         0,
       // Stagger perception by bot id to spread CPU across bots.
       nextPerceptAt:     (bot.id % 12) * (PERCEPTION_INTERVAL / 12),
+
+      scopeLastToggleAt: -999,
     };
   }
 
@@ -290,19 +295,20 @@ export class BotManager {
   // ---------------------------------------------------------------------------
 
   private _roundStart(br: BotBrain): void {
-    br.state            = 'objective';
-    br.target           = null;
-    br.firstSeenAt      = -1;
-    br.targetVisibleAt  = -1;
-    br.lastKnownPos     = null;
-    br.currentPath      = [];
-    br.pathIdx          = 0;
-    br.lastReplanAt     = -999;
-    br.burstRemaining   = 0;
-    br.shouldCrouch     = false;
-    br.stuckMoveWanted  = false;
-    br.stuckStartAt     = 0;
-    br.stuckJumpPending = false;
+    br.state              = 'objective';
+    br.target             = null;
+    br.firstSeenAt        = -1;
+    br.targetVisibleAt    = -1;
+    br.lastKnownPos       = null;
+    br.currentPath        = [];
+    br.pathIdx            = 0;
+    br.lastReplanAt       = -999;
+    br.burstRemaining     = 0;
+    br.shouldCrouch       = false;
+    br.stuckMoveWanted    = false;
+    br.stuckStartAt       = 0;
+    br.stuckJumpPending   = false;
+    br.scopeLastToggleAt  = -999;
 
     if (br.bot.team === 'T') {
       this._assignT(br);
@@ -967,14 +973,44 @@ export class BotManager {
       }
     }
 
+    // AWP scope pulse: runs after the reload early-return (scope never toggles mid-reload,
+    // which is intentional) and before the accuracy gate (so the bot can scope in even
+    // while still swinging toward the target).
+    // scopePressed is an edge (rising): one tick only, then returns false.
+    // Cooldown of 0.4 s between toggles prevents rapid re-toggling.
+    const SCOPE_COOLDOWN = 0.4; // seconds between scope-toggle pulses
+    let scopePressed = false;
+
+    const activeWs2 = bot.inventory[bot.inventory.activeSlot];
+    const holdsAwp  = (
+      bot.inventory.activeSlot === 'primary' &&
+      activeWs2 !== null &&
+      activeWs2.def.id === 'awp'
+    );
+
+    if (holdsAwp && now - br.scopeLastToggleAt >= SCOPE_COOLDOWN) {
+      const currentlyScoped = isScoped(bot);
+      const inEngage        = br.state === 'engage' && br.target !== null && br.target.alive;
+
+      if (inEngage && !currentlyScoped) {
+        // Toggle scope ON.
+        scopePressed          = true;
+        br.scopeLastToggleAt  = now;
+      } else if (!inEngage && currentlyScoped) {
+        // Toggle scope OFF (leaving engage or target lost).
+        scopePressed          = true;
+        br.scopeLastToggleAt  = now;
+      }
+    }
+
     // Only fire in engage state with a live target.
     if (br.state !== 'engage' || br.target === null || !br.target.alive) {
-      return { trigger: false, reloadPressed: false, scopePressed: false };
+      return { trigger: false, reloadPressed: false, scopePressed };
     }
 
     const target   = br.target;
     const activeWs = bot.inventory[bot.inventory.activeSlot];
-    if (!activeWs) return { trigger: false, reloadPressed: false, scopePressed: false };
+    if (!activeWs) return { trigger: false, reloadPressed: false, scopePressed };
 
     // Angular accuracy gate.
     const botEye  = eyePos(bot);
@@ -993,7 +1029,7 @@ export class BotManager {
 
     const maxErr = Math.max(1.5, diff.aimErrorDeg);
     if (angErr > maxErr) {
-      return { trigger: false, reloadPressed: false, scopePressed: false };
+      return { trigger: false, reloadPressed: false, scopePressed };
     }
 
     // Fire decision.
@@ -1018,7 +1054,7 @@ export class BotManager {
       trigger = true;
     }
 
-    return { trigger, reloadPressed: false, scopePressed: false };
+    return { trigger, reloadPressed: false, scopePressed };
   }
 
   // ---------------------------------------------------------------------------

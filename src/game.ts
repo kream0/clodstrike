@@ -14,6 +14,57 @@ import { resetAim, switchSlot } from './weapons';
 export type GamePhase = 'menu' | 'freeze' | 'live' | 'planted' | 'roundEnd' | 'matchEnd';
 export type Difficulty = 'easy' | 'normal' | 'hard';
 
+// ---------------------------------------------------------------------------
+// Bot buy strategy — pure, testable decision function
+// ---------------------------------------------------------------------------
+
+export type BuyStrategy = 'eco' | 'force' | 'full' | 'awp';
+
+export interface BuyDecisionInput {
+  money:         number;
+  team:          Team;
+  hasPrimary:    boolean;
+  teamAvgMoney:  number;
+  lossStreak:    number;
+  /** 0..1 random roll — pass Math.random() at the call site; tests inject fixed values. */
+  roll:          number;
+  /** AWP team quota not yet consumed this round (max 1 AWP per team). */
+  awpAllowed:    boolean;
+}
+
+/**
+ * Decide the buy strategy for a single bot.
+ *
+ * Thresholds (tuned values):
+ *   awp  : awpAllowed && !hasPrimary && money ≥ 5750 && roll < 0.35
+ *   full : T money ≥ 3700 (ak47 2700 + armor 1000);  CT ≥ 3900 (m4a4 2900 + armor 1000)
+ *   force: can't full-buy AND (lossStreak ≥ 2 OR teamAvgMoney ≥ 2000) AND money ≥ 1300
+ *   eco  : otherwise
+ */
+export function decideBuyStrategy(inp: BuyDecisionInput): BuyStrategy {
+  const { money, team, hasPrimary, awpAllowed, roll, lossStreak, teamAvgMoney } = inp;
+
+  // AWP check: occasional; requires large budget (AWP 4750 + vest+helmet 1000 = 5750).
+  // Requires !hasPrimary so a survivor already holding a weapon cannot claim the AWP slot.
+  const AWP_BUDGET = 5750; // AWP 4750 + vest+helmet 1000
+  if (awpAllowed && !hasPrimary && money >= AWP_BUDGET && roll < 0.35) {
+    return 'awp';
+  }
+
+  // Full-buy check.
+  const fullThreshold = team === 'T' ? 3700 : 3900;
+  if (money >= fullThreshold) {
+    return 'full';
+  }
+
+  // Force-buy check.
+  if (money >= 1300 && (lossStreak >= 2 || teamAvgMoney >= 2000)) {
+    return 'force';
+  }
+
+  return 'eco';
+}
+
 export interface MatchOptions {
   playerTeam: Team;
   difficulty: Difficulty;
@@ -325,43 +376,125 @@ export class Game {
 
     // Bot auto-buy (round 2+; round 1 has only 800 start money).
     if (this.roundNumber > 1) {
-      for (const c of this.combatants) {
-        if (!c.isPlayer) {
-          this._botAutoBuy(c, now);
-        }
-      }
+      this._botTeamBuy(now);
     }
 
     gameEvents.emit('roundStart', { roundNumber: this.roundNumber });
   }
 
   // ---------------------------------------------------------------------------
-  // _botAutoBuy
+  // _botTeamBuy — economy-aware team buy pass (round 2+)
   // ---------------------------------------------------------------------------
 
-  private _botAutoBuy(c: Combatant, now: number): void {
-    // ArmorHelmet if ≥1000 and not owned.
-    if (c.money >= ECONOMY.ARMOR_HELMET_PRICE && c.armor === 0) {
-      c.money  -= ECONOMY.ARMOR_HELMET_PRICE;
-      c.armor   = 100;
-      c.helmet  = true;
+  private _botTeamBuy(now: number): void {
+    const teams: Team[] = ['CT', 'T'];
+
+    for (const team of teams) {
+      const teamBots = this.combatants.filter(c => !c.isPlayer && c.team === team);
+      if (teamBots.length === 0) continue;
+
+      const teamAvgMoney =
+        teamBots.reduce((sum, c) => sum + c.money, 0) / teamBots.length;
+      const streak = this.lossStreak[team];
+
+      // One AWP allowed per team per round.
+      let awpAllowed = true;
+
+      for (const c of teamBots) {
+        const hasPrimary = c.inventory.primary !== null;
+        const strategy = decideBuyStrategy({
+          money:        c.money,
+          team:         c.team,
+          hasPrimary,
+          teamAvgMoney,
+          lossStreak:   streak,
+          roll:         Math.random(),
+          awpAllowed,
+        });
+
+        // Consume the AWP slot as soon as one bot takes it.
+        if (strategy === 'awp') awpAllowed = false;
+
+        this._executeBotBuy(c, strategy, now);
+      }
     }
-    // Team rifle if no primary and affordable.
-    const rifleId = c.team === 'T' ? 'ak47' : 'm4a4';
-    const rifle   = WEAPONS[rifleId];
-    if (!c.inventory.primary && rifle && c.money >= rifle.price) {
-      c.inventory.primary = makeWeaponState(rifle);
-      c.money -= rifle.price;
-      switchSlot(c, 'primary', now);
-    } else if (!c.inventory.primary && c.money >= WEAPONS.deagle.price) {
-      // Deagle if no primary and ≥700.
-      c.inventory.secondary = makeWeaponState(WEAPONS.deagle);
-      c.money -= WEAPONS.deagle.price;
-    }
-    // CT kit.
-    if (c.team === 'CT' && !c.hasDefuseKit && c.money >= ECONOMY.DEFUSE_KIT_PRICE) {
-      c.hasDefuseKit = true;
-      c.money -= ECONOMY.DEFUSE_KIT_PRICE;
+  }
+
+  /** Apply purchases for the given strategy onto a single bot. */
+  private _executeBotBuy(c: Combatant, strategy: BuyStrategy, now: number): void {
+    switch (strategy) {
+      case 'awp': {
+        // Buy AWP.
+        const awp = WEAPONS['awp'];
+        if (awp && !c.inventory.primary && c.money >= awp.price) {
+          c.inventory.primary = makeWeaponState(awp);
+          c.money -= awp.price;
+          switchSlot(c, 'primary', now);
+        }
+        // Armor: vest+helmet if affordable, else vest.
+        if (c.armor === 0) {
+          if (c.money >= ECONOMY.ARMOR_HELMET_PRICE) {
+            c.money -= ECONOMY.ARMOR_HELMET_PRICE;
+            c.armor  = 100;
+            c.helmet = true;
+          } else if (c.money >= ECONOMY.ARMOR_PRICE) {
+            c.money -= ECONOMY.ARMOR_PRICE;
+            c.armor  = 100;
+          }
+        }
+        // CT kit on leftover.
+        if (c.team === 'CT' && !c.hasDefuseKit && c.money >= ECONOMY.DEFUSE_KIT_PRICE) {
+          c.hasDefuseKit = true;
+          c.money -= ECONOMY.DEFUSE_KIT_PRICE;
+        }
+        break;
+      }
+
+      case 'full': {
+        // Armor + helmet first.
+        if (c.armor === 0 && c.money >= ECONOMY.ARMOR_HELMET_PRICE) {
+          c.money -= ECONOMY.ARMOR_HELMET_PRICE;
+          c.armor  = 100;
+          c.helmet = true;
+        }
+        // Team rifle.
+        const rifleId = c.team === 'T' ? 'ak47' : 'm4a4';
+        const rifle   = WEAPONS[rifleId];
+        if (rifle && !c.inventory.primary && c.money >= rifle.price) {
+          c.inventory.primary = makeWeaponState(rifle);
+          c.money -= rifle.price;
+          switchSlot(c, 'primary', now);
+        }
+        // CT kit.
+        if (c.team === 'CT' && !c.hasDefuseKit && c.money >= ECONOMY.DEFUSE_KIT_PRICE) {
+          c.hasDefuseKit = true;
+          c.money -= ECONOMY.DEFUSE_KIT_PRICE;
+        }
+        break;
+      }
+
+      case 'force': {
+        // Vest (no helmet on force).
+        if (c.armor === 0 && c.money >= ECONOMY.ARMOR_PRICE) {
+          c.money -= ECONOMY.ARMOR_PRICE;
+          c.armor  = 100;
+        }
+        // Deagle if no primary and affordable.
+        if (!c.inventory.primary && c.money >= WEAPONS.deagle.price) {
+          c.inventory.secondary = makeWeaponState(WEAPONS.deagle);
+          c.money -= WEAPONS.deagle.price;
+        }
+        // CT kit only if well-funded leftovers.
+        if (c.team === 'CT' && !c.hasDefuseKit && c.money >= 1000) {
+          c.hasDefuseKit = true;
+          c.money -= ECONOMY.DEFUSE_KIT_PRICE;
+        }
+        break;
+      }
+
+      case 'eco':
+        // Buy nothing — save for next round.
+        break;
     }
   }
 
