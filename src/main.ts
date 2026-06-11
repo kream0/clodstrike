@@ -12,7 +12,7 @@ import { clamp, yawPitchToDir, normalize } from './math';
 import { updateWeapon, getViewPunch, isScoped, switchSlot } from './weapons';
 import { gameEvents } from './combat';
 import type { ShotResult } from './combat';
-import { createCharacterMesh, updateCharacterMesh } from './characters';
+import { createCharacterMesh, updateCharacterMesh, CHARACTER_MODEL_PATHS, setCharacterModels } from './characters';
 import { ViewModel } from './viewmodel';
 import type { WeaponId } from './viewmodel';
 import { WEAPON_MODEL_PATHS } from './viewmodel';
@@ -95,7 +95,7 @@ function createCombatant(id: number, name: string, team: Team, isPlayer: boolean
 // Loading overlay helpers
 // ---------------------------------------------------------------------------
 
-const TOTAL_ASSETS = 22; // 8 color textures + 8 normals + 6 GLBs
+const TOTAL_ASSETS = 24; // 8 color textures + 8 normals + 6 weapon GLBs + 2 character GLBs
 
 function createLoadingOverlay(): {
   overlay: HTMLDivElement;
@@ -201,7 +201,7 @@ async function boot(): Promise<void> {
 
   // ---------------------------------------------------------------------------
   // Asset loading — three groups in parallel, each independent
-  // Total progress units: 8 color + 8 normals + 6 GLBs = 22
+  // Total progress units: 8 color + 8 normals + 6 weapon GLBs + 2 character GLBs = 24
   // ---------------------------------------------------------------------------
   let loadedCount = 0;
   function onAssetLoaded(n: number): void {
@@ -212,9 +212,11 @@ async function boot(): Promise<void> {
   let textures: LoadedTextures | undefined;
   let normals: Partial<Record<TextureSlot, THREE.Texture>> | undefined;
   let loadedModels: Partial<Record<WeaponId, THREE.Object3D>> = {};
+  let ctModelResult: THREE.Object3D | undefined;
+  let tModelResult: THREE.Object3D | undefined;
 
   try {
-    const [texResult, normResult, modelResults] = await Promise.allSettled([
+    const [texResult, normResult, modelResults, ctResult, tResult] = await Promise.allSettled([
       // Group 1: 8 color textures — callback fires once per loaded texture
       loadAllTextures((_loaded, _total) => {
         onAssetLoaded(1);
@@ -233,6 +235,18 @@ async function boot(): Promise<void> {
           },
         ),
       ),
+      // Group 4: CT character GLB (1 progress unit)
+      (async () => {
+        const gltf = await loadGLB(CHARACTER_MODEL_PATHS.ct);
+        onAssetLoaded(1);
+        return gltf.scene;
+      })(),
+      // Group 5: T character GLB (1 progress unit)
+      (async () => {
+        const gltf = await loadGLB(CHARACTER_MODEL_PATHS.t);
+        onAssetLoaded(1);
+        return gltf.scene;
+      })(),
     ]);
 
     // --- Color textures ---
@@ -273,6 +287,18 @@ async function boot(): Promise<void> {
         }
       }
     }
+
+    // --- Character GLBs ---
+    if (ctResult.status === 'fulfilled') {
+      ctModelResult = ctResult.value;
+    } else {
+      console.warn('[boot] CT character GLB failed to load — using procedural mesh:', ctResult.reason);
+    }
+    if (tResult.status === 'fulfilled') {
+      tModelResult = tResult.value;
+    } else {
+      console.warn('[boot] T character GLB failed to load — using procedural mesh:', tResult.reason);
+    }
   } finally {
     // Overlay is always removed — even on catastrophic failure
     removeOverlay();
@@ -307,6 +333,11 @@ async function boot(): Promise<void> {
     const floorY = world.floorAt(spawn.x, spawn.z);
     player.pos = { x: spawn.x, y: isFinite(floorY) ? floorY : 0, z: spawn.z };
     player.yaw = spawn.angle;
+  }
+
+  // --- Character models (must be set before Game so bot mesh creation picks them up) ---
+  if (ctModelResult !== undefined || tModelResult !== undefined) {
+    setCharacterModels({ ct: ctModelResult, t: tModelResult });
   }
 
   // --- Game ---

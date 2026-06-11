@@ -35,3 +35,14 @@ All weapon GLBs in `models/weapons/` are from the **CC0 Flat Guns** packs by **P
 | awp.glb | Sniper_Rifle_West.glb | CC0 Flat Guns West | https://opengameart.org/content/cc0-flat-guns-west | CC0 1.0 | 2026-06-11 |
 
 Note: The knife weapon slot remains procedural (no style-matched CC0 knife model available in these packs).
+
+## Character Models
+
+All character GLBs in `models/characters/` are from **Kenney Blocky Characters 2.0** by **Kenney** (www.kenney.nl), published under CC0 1.0 Universal (Public Domain Dedication).
+
+| File | Source File | Pack | Pack Page | License | Downloaded |
+|---|---|---|---|---|---|
+| character-ct.glb | character-b.glb | Kenney Blocky Characters 2.0 | https://kenney.nl/assets/blocky-characters | CC0 1.0 | 2026-06-11 |
+| character-t.glb | character-d.glb | Kenney Blocky Characters 2.0 | https://kenney.nl/assets/blocky-characters | CC0 1.0 | 2026-06-11 |
+
+Note: Each GLB references an external texture PNG in `models/characters/Textures/`. Textures `texture-b.png` (CT) and `texture-d.png` (T) are included from the same pack and are also CC0 1.0.
