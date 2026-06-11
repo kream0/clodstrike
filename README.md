@@ -101,7 +101,8 @@ Seven weapons across three slots with individually tuned stats:
 - **Radar**: pre-rendered from the same ASCII grid as the world. Teammates always visible; enemies appear when within hearing range or near a recently heard shot. Bomb marker shown when dropped or planted. Player position + yaw arrow updates every frame.
 - **Tab scoreboard**: kills / deaths / money per player, team totals.
 - **Buy menu** (B key): nine keycap digit shortcuts — 1 USP-S · 2 Glock-18 · 3 Desert Eagle · 4 AK-47 · 5 M4A4 · 6 AWP · 7 Vest · 8 Vest+Helmet · 9 Defuse Kit. Items greyed out when unaffordable or wrong team. Digit keys 1–3 suppressed for weapon switching while the buy menu is open.
-- **Start menu**: pick CT or T side, choose difficulty. **Pause menu**: resume, restart, sensitivity slider. **Banners** for round win/loss and match end.
+- **Start menu**: pick CT or T side, choose difficulty. **Pause menu**: resume, restart, sensitivity slider. **Banners** for round win/loss.
+- **Match-end stats screen**: full-screen panel on match end with winner headline, final score, and per-team tables — kills, deaths, headshot %, damage dealt, MVP rounds (defuser > planter > top fragger), money spent — plus a Play Again button. Stats accumulate silently all match via the `gameEvents` bus.
 - **Plant / defuse progress bar** overlaid on-screen while holding E.
 - All HUD is DOM with CSS injected from `hud.ts` at construction — no external `.css` files.
 
@@ -138,7 +139,6 @@ Seven weapons across three slots with individually tuned stats:
 
 ### Medium term
 
-- **Match-end stats screen** — full scoreboard with K/D, headshot %, MVP rounds, money spent.
 - **Wallbang penetration** — raycast continues through thin surfaces with reduced damage.
 - **A second map** reusing the same ASCII grid format and `MapData` contract — the navgrid, renderer, and collision system all accept any conforming `MapData`.
 - **Replay / demo** — serialize `clock.now`, player inputs, and bot FSM state per tick for round playback.
