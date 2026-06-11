@@ -181,6 +181,13 @@ const HUD_CSS = `
 @keyframes fail-flash { 0%,100%{background:transparent} 50%{background:rgba(200,0,0,0.4)} }
 .buy-price { color: #ffe277; font-size: 11px; }
 .buy-money-label { text-align: center; font-size: 16px; color: #ffe277; margin-top: 12px; font-weight: 600; }
+.buy-key {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 16px; height: 16px; border-radius: 2px; margin-right: 6px;
+  border: 1px solid rgba(255,255,255,0.35); background: rgba(255,255,255,0.08);
+  font-size: 10px; font-weight: 700; color: rgba(255,255,255,0.7);
+  flex-shrink: 0;
+}
 
 /* ── Banners / HUD overlays ─── */
 #hud-banner {
@@ -715,23 +722,23 @@ export class HUD {
     buy.innerHTML = `
       <div class="buy-panel">
         <h3>Pistols</h3>
-        ${_buyRow('usp',    'USP-S',         200)}
-        ${_buyRow('glock',  'Glock-18',       200)}
-        ${_buyRow('deagle', 'Desert Eagle',   700)}
+        ${_buyRow('usp',    'USP-S',         200, 1)}
+        ${_buyRow('glock',  'Glock-18',       200, 2)}
+        ${_buyRow('deagle', 'Desert Eagle',   700, 3)}
         <div class="buy-money-label">$—</div>
       </div>
       <div class="buy-panel">
         <h3>Rifles</h3>
-        ${_buyRow('ak47',  'AK-47',  2700)}
-        ${_buyRow('m4a4',  'M4A4',   2900)}
-        ${_buyRow('awp',   'AWP',    4750)}
+        ${_buyRow('ak47',  'AK-47',  2700, 4)}
+        ${_buyRow('m4a4',  'M4A4',   2900, 5)}
+        ${_buyRow('awp',   'AWP',    4750, 6)}
         <div class="buy-money-label">$—</div>
       </div>
       <div class="buy-panel">
         <h3>Gear</h3>
-        ${_buyRow('armor',       'Vest',          650)}
-        ${_buyRow('armorHelmet', 'Vest + Helmet', 1000)}
-        ${_buyRow('kit',         'Defuse Kit',     400)}
+        ${_buyRow('armor',       'Vest',          650,  7)}
+        ${_buyRow('armorHelmet', 'Vest + Helmet', 1000, 8)}
+        ${_buyRow('kit',         'Defuse Kit',     400, 9)}
         <div class="buy-money-label">$—</div>
       </div>
     `;
@@ -917,6 +924,11 @@ export class HUD {
     }
   }
 
+  // Public getter so main.ts can suppress slot switching while buy menu is open.
+  get buyMenuOpen(): boolean {
+    return this._buyVisible;
+  }
+
   private _bindInput(): void {
     window.addEventListener('keydown', (e) => {
       // Tab: scoreboard.
@@ -925,9 +937,26 @@ export class HUD {
         this._sbVisible = true;
         this._scoreboard.classList.add('visible');
       }
-      // B: buy menu.
+      // B: buy menu toggle.
       if (e.code === 'KeyB' && this._game.canBuy(performance.now() / 1000)) {
         this._setBuyVisible(!this._buyVisible);
+      }
+      // Escape: close buy menu (pointer-lock exit / pause handled by main.ts separately).
+      if (e.code === 'Escape' && this._buyVisible) {
+        this._setBuyVisible(false);
+      }
+      // Digit1–9 / Numpad1–9: buy shortcut while menu is open.
+      if (this._buyVisible) {
+        const digitMatch = e.code.match(/^(?:Digit|Numpad)([1-9])$/);
+        if (digitMatch) {
+          e.preventDefault();
+          const key = parseInt(digitMatch[1], 10);
+          // Map key 1-9 to item data-key attributes.
+          const item = this._buyMenu.querySelector<HTMLElement>(`.buy-item[data-key="${key}"]`);
+          if (item) {
+            item.click();
+          }
+        }
       }
     });
     window.addEventListener('keyup', (e) => {
@@ -1238,9 +1267,9 @@ function _formatTime(seconds: number): string {
   return `${m}:${String(r).padStart(2, '0')}`;
 }
 
-function _buyRow(id: string, label: string, price: number): string {
-  return `<div class="buy-item" data-id="${id}" data-price="${price}">
-    <span>${label}</span>
+function _buyRow(id: string, label: string, price: number, key: number): string {
+  return `<div class="buy-item" data-id="${id}" data-price="${price}" data-key="${key}">
+    <span><span class="buy-key">${key}</span>${label}</span>
     <span class="buy-price">$${price}</span>
   </div>`;
 }

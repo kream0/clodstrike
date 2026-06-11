@@ -411,13 +411,14 @@ function boot(): void {
     if (input.wasPressed('KeyN')) noclip = !noclip;
 
     // Slot switching — outside fixed step for responsiveness.
+    // Digit1/2/3 are suppressed while the buy menu is open (HUD consumes them).
     if (game.phase !== 'menu' && player.alive) {
       let slotChanged = false;
-      if (input.wasPressed('Digit1') && player.inventory.primary) {
+      if (!hud.buyMenuOpen && input.wasPressed('Digit1') && player.inventory.primary) {
         slotChanged = switchSlot(player, 'primary', clock.now);
-      } else if (input.wasPressed('Digit2') && player.inventory.secondary) {
+      } else if (!hud.buyMenuOpen && input.wasPressed('Digit2') && player.inventory.secondary) {
         slotChanged = switchSlot(player, 'secondary', clock.now);
-      } else if (input.wasPressed('Digit3')) {
+      } else if (!hud.buyMenuOpen && input.wasPressed('Digit3')) {
         slotChanged = switchSlot(player, 'knife', clock.now);
       } else if (input.wheelDelta !== 0) {
         const order: Array<'primary' | 'secondary' | 'knife'> = ['primary', 'secondary', 'knife'];
