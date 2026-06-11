@@ -9,7 +9,9 @@ import { buildMapScene, setupEnvironment } from './builder';
 import { simulateMovement } from './movement';
 import type { MoveIntent } from './movement';
 import { clamp, yawPitchToDir, normalize } from './math';
-import { updateWeapon, getViewPunch, isScoped, switchSlot } from './weapons';
+import { updateWeapon, getViewPunch, isScoped, switchSlot, updateGrenadeEquip, isGrenadeEquipped, cancelGrenadeEquip } from './weapons';
+import type { GrenadeControlInput } from './weapons';
+import { GrenadeManager } from './grenades';
 import { gameEvents } from './combat';
 import type { ShotResult } from './combat';
 import { createCharacterMesh, updateCharacterMesh, CHARACTER_MODEL_PATHS, setCharacterModels } from './characters';
@@ -350,10 +352,22 @@ async function boot(): Promise<void> {
   // --- Effects ---
   const effects = new Effects(scene);
 
+  // --- GrenadeManager ---
+  const grenadeManager = new GrenadeManager(scene, world);
+
   // --- ViewModel ---
   const viewmodel = new ViewModel(camera);
   viewmodel.setWeaponModels(loadedModels);
   viewmodel.setWeapon(player.inventory.secondary?.def.id ?? 'usp');
+
+  // --- GrenadeManager callbacks ---
+  grenadeManager.onBounce = (pos, speed) => {
+    effects.grenadeBounceDust(pos);
+    audio.grenadeBounce(pos, speed);
+  };
+  grenadeManager.onExplosionDamage = (victim, dmg, thrower) => {
+    game.applyExplosionDamage(victim, dmg, thrower, 'he');
+  };
 
   // --- BotManager (created/replaced on each match start) ---
   let botManager: BotManager | null = null;
@@ -394,6 +408,8 @@ async function boot(): Promise<void> {
   let currentFov  = 73;
   let prevKeyR    = false;
   let lastMatchOpts: MatchOptions | null = null;
+  // Track the previously equipped grenade type to detect changes for viewmodel sync.
+  let prevEquippedGrenade: import('./types').GrenadeType | null = null;
 
   // Death cam state.
   let deathCamPos: THREE.Vector3 | null = null;
@@ -425,6 +441,9 @@ async function boot(): Promise<void> {
     botManager?.dispose();
     botManager = new BotManager(game, world, navGrid, onBotShot);
     botManager.attach();
+    botManager.setSmokeQuery((a, b) => grenadeManager.isSegmentSmoked(a, b));
+    grenadeManager.reset();
+    prevEquippedGrenade = null;
     hud.hideMenus();
     input.requestLock();
     audio.unlock();
@@ -443,6 +462,9 @@ async function boot(): Promise<void> {
       botManager?.dispose();
       botManager = new BotManager(game, world, navGrid, onBotShot);
       botManager.attach();
+      botManager.setSmokeQuery((a, b) => grenadeManager.isSegmentSmoked(a, b));
+      grenadeManager.reset();
+      prevEquippedGrenade = null;
       paused = false;
       hud.hideMenus();
       input.requestLock();
@@ -487,6 +509,8 @@ async function boot(): Promise<void> {
       game.onPlayerDied();
       deathCamPos = new THREE.Vector3(player.pos.x, eyeY, player.pos.z);
       deathCamTilt = 0;
+      viewmodel.setGrenadeView(null);
+      prevEquippedGrenade = null;
     }
   });
 
@@ -514,6 +538,28 @@ async function boot(): Promise<void> {
   });
 
   // --- Bomb events ---
+  // --- Grenade detonation effects ---
+  gameEvents.on('grenadeDetonated', (ev) => {
+    const pos = ev.pos;
+    if (ev.type === 'he') {
+      effects.heExplosion(pos);
+      audio.heBoom(pos);
+    } else if (ev.type === 'flash') {
+      effects.flashBurst(pos);
+      audio.flashPop(pos);
+    } else {
+      // smoke
+      audio.smokePop(pos);
+    }
+  });
+
+  // --- Flash effect on player ---
+  gameEvents.on('combatantFlashed', (ev) => {
+    if (ev.victim === player) {
+      audio.flashRing(ev.intensity);
+    }
+  });
+
   gameEvents.on('bombPlanted', (_ev) => {
     audio.bombPlant();
   });
@@ -538,6 +584,9 @@ async function boot(): Promise<void> {
     const slot = player.inventory.activeSlot;
     const ws   = player.inventory[slot];
     viewmodel.setWeapon(ws?.def.id ?? 'usp');
+    viewmodel.setGrenadeView(null);
+    prevEquippedGrenade = null;
+    grenadeManager.reset();
   });
 
   // --- Lock hint ---
@@ -638,6 +687,8 @@ async function boot(): Promise<void> {
 
     // Slot switching — outside fixed step for responsiveness.
     // Digit1/2/3 are suppressed while the buy menu is open (HUD consumes them).
+    // Track whether a slot switch fired this frame for grenade cancel logic.
+    let slotSwitchThisFrame = false;
     if (game.phase !== 'menu' && player.alive) {
       let slotChanged = false;
       if (!hud.buyMenuOpen && input.wasPressed('Digit1') && player.inventory.primary) {
@@ -660,6 +711,9 @@ async function boot(): Promise<void> {
         }
       }
       if (slotChanged) {
+        slotSwitchThisFrame = true;
+        cancelGrenadeEquip(player);
+        viewmodel.setGrenadeView(null);
         const activeWs = player.inventory[player.inventory.activeSlot];
         viewmodel.setWeapon(activeWs?.def.id ?? player.inventory.activeSlot);
       }
@@ -684,6 +738,7 @@ async function boot(): Promise<void> {
     // Capture edge flags before the loop; only honour them on the first tick.
     const mousePressed0  = input.mousePressed;
     const mouse2Pressed0 = input.mouse2Pressed;
+    const digit4Pressed0 = input.wasPressed('Digit4');
     let edgesConsumed    = false;
 
     // When unpausing: clamp the accumulator to avoid a giant catch-up burst.
@@ -769,6 +824,42 @@ async function boot(): Promise<void> {
       // Edge flags must only fire on the first tick of this frame.
       const scopeEdge = !edgesConsumed && mouse2Pressed0;
 
+      // --- Grenade equip / throw (first tick only) ---
+      let throwRequest = null;
+      if (playerAlive && !isFreeze && !edgesConsumed) {
+        const grenadeEquipped = isGrenadeEquipped(player);
+        // LMB goes to grenade machine when equipped; gun trigger gets false in that case.
+        const grenadeInp: GrenadeControlInput = {
+          equipPressed:      digit4Pressed0,
+          firePressed:       grenadeEquipped ? mousePressed0 : false,
+          slotSwitchPressed: slotSwitchThisFrame,
+        };
+        throwRequest = updateGrenadeEquip(player, grenadeInp, clock.now);
+
+        // Sync viewmodel grenade view on equip state change.
+        const currentEquipped = player.equippedGrenade ?? null;
+        if (currentEquipped !== prevEquippedGrenade) {
+          viewmodel.setGrenadeView(currentEquipped);
+          prevEquippedGrenade = currentEquipped;
+        }
+
+        if (throwRequest !== null) {
+          // Compute eye position + throw origin nudged 0.3 m along view dir.
+          const eyeHeight = player.crouching ? MOVEMENT.EYE_CROUCH : MOVEMENT.EYE_STAND;
+          const throwDir = yawPitchToDir(player.yaw, player.pitch);
+          const origin = {
+            x: player.pos.x + throwDir.x * 0.3,
+            y: player.pos.y + eyeHeight + throwDir.y * 0.3,
+            z: player.pos.z + throwDir.z * 0.3,
+          };
+          grenadeManager.throwGrenade(player, throwRequest.type, origin, throwDir, clock.now);
+          viewmodel.playThrowAnim(clock.now);
+          viewmodel.setGrenadeView(null);
+          prevEquippedGrenade = null;
+          audio.grenadeThrowWhoosh();
+        }
+      }
+
       let trigger: boolean;
       if (def && def.auto) {
         trigger = input.mouseDown;
@@ -776,6 +867,9 @@ async function boot(): Promise<void> {
         trigger = !edgesConsumed && mousePressed0;
       }
       edgesConsumed = true;
+
+      // Block gun fire while grenade is equipped (LMB routed to grenade machine above).
+      if (isGrenadeEquipped(player)) trigger = false;
 
       // Block firing while plant/defuse in progress.
       if (bombInProgress) trigger = false;
@@ -810,6 +904,9 @@ async function boot(): Promise<void> {
 
       // Game state machine.
       game.update(FIXED_DT, clock.now);
+
+      // Grenade physics + detonation (after player + bot sim updates).
+      grenadeManager.update(FIXED_DT, clock.now, game.combatants);
 
       // Bomb beep.
       if (game.shouldBeep(clock.now)) {

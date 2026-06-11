@@ -1,7 +1,7 @@
 import { describe, expect, test, beforeEach } from 'bun:test';
 import { Game, decideBuyStrategy } from './game';
 import type { MatchOptions, BuyDecisionInput } from './game';
-import { RULES, ECONOMY, WEAPONS } from './constants';
+import { RULES, ECONOMY, WEAPONS, GRENADES } from './constants';
 import { World } from './world';
 import { DUST2 } from './maps/dust2';
 import { gameEvents } from './combat';
@@ -599,5 +599,279 @@ describe('Bot team buy executor', () => {
       expect(c.armor).toBe(100);
       expect(c.helmet).toBe(true);
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Grenade buy
+// ---------------------------------------------------------------------------
+
+describe('buy grenades', () => {
+  test('buy he once succeeds, money deducted', () => {
+    game = freshGame();
+    game.startMatch(DEFAULT_OPTS);
+    game.player.money = 2000;
+
+    const ok = game.buy(game.player, 'he', 0);
+    expect(ok).toBe(true);
+    expect(game.player.grenades?.he).toBe(1);
+    expect(game.player.money).toBe(2000 - GRENADES.he.price);
+  });
+
+  test('buy he twice is rejected (maxCarry 1)', () => {
+    game = freshGame();
+    game.startMatch(DEFAULT_OPTS);
+    game.player.money = 2000;
+
+    game.buy(game.player, 'he', 0);
+    const ok2 = game.buy(game.player, 'he', 0);
+    expect(ok2).toBe(false);
+    expect(game.player.grenades?.he).toBe(1);
+    expect(game.player.money).toBe(2000 - GRENADES.he.price); // only deducted once
+  });
+
+  test('buy flash twice succeeds (maxCarry 2), third rejected', () => {
+    game = freshGame();
+    game.startMatch(DEFAULT_OPTS);
+    game.player.money = 2000;
+
+    const ok1 = game.buy(game.player, 'flash', 0);
+    expect(ok1).toBe(true);
+    const ok2 = game.buy(game.player, 'flash', 0);
+    expect(ok2).toBe(true);
+    expect(game.player.grenades?.flash).toBe(2);
+    const ok3 = game.buy(game.player, 'flash', 0);
+    expect(ok3).toBe(false);
+    expect(game.player.grenades?.flash).toBe(2);
+    expect(game.player.money).toBe(2000 - GRENADES.flash.price * 2);
+  });
+
+  test('buy smoke money deducted correctly', () => {
+    game = freshGame();
+    game.startMatch(DEFAULT_OPTS);
+    game.player.money = 2000;
+
+    const ok = game.buy(game.player, 'smoke', 0);
+    expect(ok).toBe(true);
+    expect(game.player.grenades?.smoke).toBe(1);
+    expect(game.player.money).toBe(2000 - GRENADES.smoke.price);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// vest_helmet upgrade path
+// ---------------------------------------------------------------------------
+
+describe('buy vest_helmet upgrade', () => {
+  test('armor > 0 && !helmet charges ARMOR_UPGRADE_PRICE (350)', () => {
+    game = freshGame();
+    game.startMatch(DEFAULT_OPTS);
+    game.player.money = 2000;
+
+    // First buy vest only.
+    const ok1 = game.buy(game.player, 'armor', 0);
+    expect(ok1).toBe(true);
+    expect(game.player.armor).toBe(100);
+    expect(game.player.helmet).toBe(false);
+    const moneyAfterVest = game.player.money;
+
+    // Now upgrade to vest+helmet — should cost ARMOR_UPGRADE_PRICE.
+    const ok2 = game.buy(game.player, 'armorHelmet', 0);
+    expect(ok2).toBe(true);
+    expect(game.player.helmet).toBe(true);
+    expect(game.player.armor).toBe(100);
+    expect(game.player.money).toBe(moneyAfterVest - ECONOMY.ARMOR_UPGRADE_PRICE);
+  });
+
+  test('fresh buy armorHelmet (no vest) charges full ARMOR_HELMET_PRICE', () => {
+    game = freshGame();
+    game.startMatch(DEFAULT_OPTS);
+    game.player.money = 2000;
+
+    const ok = game.buy(game.player, 'armorHelmet', 0);
+    expect(ok).toBe(true);
+    expect(game.player.armor).toBe(100);
+    expect(game.player.helmet).toBe(true);
+    expect(game.player.money).toBe(2000 - ECONOMY.ARMOR_HELMET_PRICE);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Round start blind and grenade resets
+// ---------------------------------------------------------------------------
+
+describe('round start resets', () => {
+  function advanceToRound2(): { game: Game; afterPause: number } {
+    const g = freshGame();
+    g.startMatch(DEFAULT_OPTS);
+
+    const freeze = RULES.FREEZE_TIME + 0.1;
+    g.update(freeze, freeze);
+
+    for (const c of g.combatants) {
+      if (c.team === 'T') { c.alive = false; c.health = 0; }
+    }
+    g.update(0.016, freeze + 0.1);
+
+    const afterPause = freeze + RULES.ROUND_END_PAUSE + 1;
+    g.update(RULES.ROUND_END_PAUSE + 1, afterPause);
+
+    expect(g.phase).toBe('freeze');
+    expect(g.roundNumber).toBe(2);
+    return { game: g, afterPause };
+  }
+
+  test('blind fields are cleared on round start for all combatants', () => {
+    const { game: g } = advanceToRound2();
+
+    // All combatants should have cleared blind state after round start.
+    for (const c of g.combatants) {
+      expect(c.blindUntil ?? 0).toBe(0);
+      expect(c.blindIntensity ?? 0).toBe(0);
+      expect(c.equippedGrenade ?? null).toBeNull();
+    }
+  });
+
+  test('dead combatant loses grenades on round start, survivor keeps them', () => {
+    game = freshGame();
+    game.startMatch(DEFAULT_OPTS);
+
+    // Give player (CT, alive) some grenades.
+    game.player.money = 5000;
+    game.buy(game.player, 'he', 0);
+    game.buy(game.player, 'flash', 0);
+    expect(game.player.grenades?.he).toBe(1);
+    expect(game.player.grenades?.flash).toBe(1);
+
+    // Find a T bot, give it grenades, then kill it.
+    const tBot = game.combatants.find(c => !c.isPlayer && c.team === 'T')!;
+    tBot.grenades = { he: 1, flash: 2, smoke: 1 };
+
+    // Force freeze → live.
+    const freeze = RULES.FREEZE_TIME + 0.1;
+    game.update(freeze, freeze);
+
+    // Kill the T bot (player CT survives).
+    tBot.alive = false;
+    tBot.health = 0;
+
+    // Kill all OTHER Ts to end the round.
+    for (const c of game.combatants) {
+      if (c.team === 'T') { c.alive = false; c.health = 0; }
+    }
+    game.update(0.016, freeze + 0.1);
+
+    const afterPause = freeze + RULES.ROUND_END_PAUSE + 1;
+    game.update(RULES.ROUND_END_PAUSE + 1, afterPause);
+
+    expect(game.phase).toBe('freeze');
+
+    // Survivor (player) keeps grenades.
+    expect(game.player.grenades?.he).toBe(1);
+    expect(game.player.grenades?.flash).toBe(1);
+
+    // Dead T bot lost grenades.
+    expect(tBot.grenades?.he).toBe(0);
+    expect(tBot.grenades?.flash).toBe(0);
+    expect(tBot.grenades?.smoke).toBe(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// applyExplosionDamage
+// ---------------------------------------------------------------------------
+
+describe('applyExplosionDamage', () => {
+  test('armor reduces damage (HE, applyArmor=true)', () => {
+    game = freshGame();
+    game.startMatch(DEFAULT_OPTS);
+    const victim = game.player;
+    victim.health = 100;
+    victim.armor  = 100;
+    victim.helmet = false;
+
+    game.applyExplosionDamage(victim, 50, null, 'he', true);
+
+    // With ARMOR_DAMAGE_MULT = 0.775, 50 dmg → ~39 to health; victim should survive.
+    expect(victim.health).toBeLessThan(100);
+    expect(victim.health).toBeGreaterThan(0);
+    expect(victim.alive).toBe(true);
+    // Armor should be reduced.
+    expect(victim.armor).toBeLessThan(100);
+  });
+
+  test('bomb damage ignores armor (applyArmor=false)', () => {
+    game = freshGame();
+    game.startMatch(DEFAULT_OPTS);
+    const victim = game.player;
+    victim.health = 100;
+    victim.armor  = 100;
+    victim.helmet = true;
+
+    // 100 raw damage with applyArmor=false must kill a 100 hp victim regardless of armor.
+    game.applyExplosionDamage(victim, 100, null, 'bomb', false);
+
+    expect(victim.health).toBe(0);
+    expect(victim.alive).toBe(false);
+    // Armor must be untouched — bomb does raw damage.
+    expect(victim.armor).toBe(100);
+  });
+
+  test('lethal damage kills victim and credits attacker with kill + reward', () => {
+    game = freshGame();
+    game.startMatch(DEFAULT_OPTS);
+
+    const thrower = game.combatants.find(c => !c.isPlayer && c.team === 'T')!;
+    const victim  = game.player;
+    victim.health = 10;
+    victim.armor  = 0;
+    thrower.kills = 0;
+    const moneyBefore = thrower.money;
+
+    const kills: Array<{ attacker: unknown; victim: unknown; weaponId: string }> = [];
+    const unsub = gameEvents.on('kill', (ev) => kills.push(ev));
+
+    game.applyExplosionDamage(victim, 200, thrower, 'he');
+
+    expect(victim.alive).toBe(false);
+    expect(victim.health).toBe(0);
+    expect(thrower.kills).toBe(1);
+    expect(thrower.money).toBeGreaterThan(moneyBefore);
+    expect(kills.length).toBe(1);
+    expect(kills[0]!.weaponId).toBe('he');
+
+    // Clean up.
+    (unsub as unknown as { off: () => void })?.off?.();
+  });
+
+  test('no kill credit on self-damage (thrower === victim)', () => {
+    game = freshGame();
+    game.startMatch(DEFAULT_OPTS);
+
+    const victim = game.player;
+    victim.health = 10;
+    victim.armor  = 0;
+    victim.kills  = 0;
+    const moneyBefore = victim.money;
+
+    game.applyExplosionDamage(victim, 200, victim, 'he');
+
+    // Dies but thrower === victim: no kill credit, no money reward.
+    expect(victim.alive).toBe(false);
+    expect(victim.kills).toBe(0);
+    expect(victim.money).toBe(moneyBefore);
+  });
+
+  test('skip dead victims gracefully', () => {
+    game = freshGame();
+    game.startMatch(DEFAULT_OPTS);
+
+    const victim = game.player;
+    victim.alive  = false;
+    victim.health = 0;
+
+    // Should not throw or mutate.
+    game.applyExplosionDamage(victim, 200, null, 'he');
+    expect(victim.health).toBe(0);
   });
 });

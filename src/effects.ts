@@ -152,6 +152,7 @@ export class Effects {
     this._updatePool(this._blood, dt);
     this._updatePool(this._flashes, dt);
     if (this._expPoolsReady) this._updateExplosionPools(dt);
+    if (this._grnPoolsReady) this._updateGrenadePool(dt);
   }
 
   private _updatePool(pool: Particle[], dt: number): void {
@@ -435,6 +436,229 @@ export class Effects {
       if (p.life <= 0) { p.life = -1; p.mesh.visible = false; continue; }
       const t = p.life / p.maxLife;
       (p.mesh.material as THREE.MeshBasicMaterial).opacity = t;
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Grenade effects (appended — existing code untouched above)
+  // ---------------------------------------------------------------------------
+  // Lazy-initialised pools; allocated on first use to keep constructor fast.
+
+  private _grnFlash:  Particle[] = [];
+  private _grnFlashIdx = 0;
+  private _grnSphere: Particle[] = [];
+  private _grnSphereIdx = 0;
+  private _grnDebris: Particle[] = [];
+  private _grnDebrisIdx = 0;
+  private _grnWhiteFlash: Particle[] = [];
+  private _grnWhiteFlashIdx = 0;
+  private _grnPoolsReady = false;
+
+  private _initGrenadePool(): void {
+    if (this._grnPoolsReady) return;
+    this._grnPoolsReady = true;
+
+    // HE flash quad — additive, scales up and fades (~0.55× bomb flash).
+    const heFlashGeo = new THREE.PlaneGeometry(1, 1);
+    const heFlashMat = new THREE.MeshBasicMaterial({
+      color: 0xffffff,
+      transparent: true,
+      depthWrite: false,
+      blending: THREE.AdditiveBlending,
+      side: THREE.DoubleSide,
+    });
+    for (let i = 0; i < 4; i++) {
+      const mesh = new THREE.Mesh(heFlashGeo, heFlashMat.clone());
+      mesh.visible = false;
+      this._scene.add(mesh);
+      this._grnFlash.push({ mesh, life: -1, maxLife: 0.10 });
+    }
+
+    // HE expanding sphere — smaller/faster than bomb (~0.55× scale).
+    const heSphereGeo = new THREE.SphereGeometry(1, 12, 8);
+    const heSphereMat = new THREE.MeshBasicMaterial({
+      color: 0xff7700,
+      transparent: true,
+      depthWrite: false,
+      side: THREE.FrontSide,
+    });
+    for (let i = 0; i < 4; i++) {
+      const mesh = new THREE.Mesh(heSphereGeo, heSphereMat.clone());
+      mesh.visible = false;
+      this._scene.add(mesh);
+      this._grnSphere.push({ mesh, life: -1, maxLife: 0.38 });
+    }
+
+    // HE debris puffs — same style as bomb debris.
+    const debrisGeo = new THREE.PlaneGeometry(0.22, 0.22);
+    const debrisMat = new THREE.MeshBasicMaterial({
+      color: IMPACT_COLOR,
+      transparent: true,
+      depthWrite: false,
+      side: THREE.DoubleSide,
+    });
+    for (let i = 0; i < 16; i++) {
+      const mesh = new THREE.Mesh(debrisGeo, debrisMat.clone());
+      mesh.visible = false;
+      this._scene.add(mesh);
+      this._grnDebris.push({ mesh, life: -1, maxLife: 0.4 });
+    }
+
+    // Flash-bang white burst — expanding point-light-style additive sprite.
+    const wfGeo = new THREE.PlaneGeometry(1, 1);
+    const wfMat = new THREE.MeshBasicMaterial({
+      color: 0xffffff,
+      transparent: true,
+      depthWrite: false,
+      blending: THREE.AdditiveBlending,
+      side: THREE.DoubleSide,
+    });
+    for (let i = 0; i < 4; i++) {
+      const mesh = new THREE.Mesh(wfGeo, wfMat.clone());
+      mesh.visible = false;
+      this._scene.add(mesh);
+      this._grnWhiteFlash.push({ mesh, life: -1, maxLife: 0.25 });
+    }
+  }
+
+  /**
+   * HE grenade detonation visual — ~0.55× scale of the bomb explosion.
+   * Reuses the same flash-quad + expanding-sphere + debris-puff pattern.
+   */
+  heExplosion(pos: Vec3): void {
+    this._initGrenadePool();
+
+    // Flash quad.
+    {
+      const p = this._grnFlash[this._grnFlashIdx % this._grnFlash.length];
+      this._grnFlashIdx = (this._grnFlashIdx + 1) % this._grnFlash.length;
+      p.life    = 0.10;
+      p.maxLife = 0.10;
+      (p as Particle & { _startScale: number; _endScale: number })._startScale = 1.1;
+      (p as Particle & { _startScale: number; _endScale: number })._endScale   = 8.8;
+      p.mesh.visible = true;
+      p.mesh.position.set(pos.x, pos.y + 1.1, pos.z);
+      p.mesh.scale.set(1.1, 1.1, 1);
+      (p.mesh.material as THREE.MeshBasicMaterial).opacity = 1;
+    }
+
+    // Expanding sphere.
+    {
+      const p = this._grnSphere[this._grnSphereIdx % this._grnSphere.length];
+      this._grnSphereIdx = (this._grnSphereIdx + 1) % this._grnSphere.length;
+      p.life    = 0.38;
+      p.maxLife = 0.38;
+      (p as Particle & { _startScale: number; _endScale: number })._startScale = 0.28;
+      (p as Particle & { _startScale: number; _endScale: number })._endScale   = 6.6;
+      p.mesh.visible = true;
+      p.mesh.position.set(pos.x, pos.y, pos.z);
+      p.mesh.scale.set(0.28, 0.28, 0.28);
+      (p.mesh.material as THREE.MeshBasicMaterial).opacity = 0.75;
+    }
+
+    // Debris puffs.
+    for (let i = 0; i < 8; i++) {
+      const p = this._grnDebris[this._grnDebrisIdx % this._grnDebris.length];
+      this._grnDebrisIdx = (this._grnDebrisIdx + 1) % this._grnDebris.length;
+      p.life    = 0.18 + Math.random() * 0.22;
+      p.maxLife = p.life;
+      const angle  = Math.random() * Math.PI * 2;
+      const radius = 0.8 + Math.random() * 2.2;
+      p.mesh.visible = true;
+      p.mesh.position.set(
+        pos.x + Math.cos(angle) * radius,
+        pos.y + 0.3 + Math.random() * 1.65,
+        pos.z + Math.sin(angle) * radius,
+      );
+      const s = 0.3 + Math.random() * 0.66;
+      p.mesh.scale.set(s, s, 1);
+      (p.mesh.material as THREE.MeshBasicMaterial).opacity = 0.9;
+    }
+
+    // Scorch decal on floor plane (normal pointing up).
+    this.addDecal({ x: pos.x, y: pos.y + 0.02, z: pos.z }, { x: 0, y: 1, z: 0 });
+  }
+
+  /**
+   * Flash-bang detonation visual — expanding white point-light burst, ~0.25 s.
+   */
+  flashBurst(pos: Vec3): void {
+    this._initGrenadePool();
+
+    const p = this._grnWhiteFlash[this._grnWhiteFlashIdx % this._grnWhiteFlash.length];
+    this._grnWhiteFlashIdx = (this._grnWhiteFlashIdx + 1) % this._grnWhiteFlash.length;
+    p.life    = 0.25;
+    p.maxLife = 0.25;
+    (p as Particle & { _startScale: number; _endScale: number })._startScale = 0.5;
+    (p as Particle & { _startScale: number; _endScale: number })._endScale   = 6;
+    p.mesh.visible = true;
+    p.mesh.position.set(pos.x, pos.y + 0.5, pos.z);
+    p.mesh.scale.set(0.5, 0.5, 1);
+    (p.mesh.material as THREE.MeshBasicMaterial).opacity = 1;
+  }
+
+  /**
+   * Grenade bounce dust puff — tiny impact-style quad from the impact pool.
+   */
+  grenadeBounceDust(pos: Vec3): void {
+    const p = this._impacts[this._impactIdx % this._impacts.length];
+    this._impactIdx = (this._impactIdx + 1) % this._impacts.length;
+
+    p.life    = IMPACT_LIFE * 0.6;
+    p.maxLife = p.life;
+
+    const mesh = p.mesh;
+    mesh.visible = true;
+    mesh.position.set(pos.x, pos.y + 0.05, pos.z);
+    mesh.rotation.set(0, 0, Math.random() * Math.PI * 2);
+    const scale = 0.35 + Math.random() * 0.25;
+    mesh.scale.set(scale, scale, 1);
+
+    const m = mesh.material as THREE.MeshBasicMaterial;
+    m.opacity = 0.7;
+  }
+
+  private _updateGrenadePool(dt: number): void {
+    // HE flash.
+    for (const p of this._grnFlash) {
+      if (p.life < 0) continue;
+      p.life -= dt;
+      if (p.life <= 0) { p.life = -1; p.mesh.visible = false; continue; }
+      const t  = p.life / p.maxLife;
+      const ep = p as Particle & { _startScale: number; _endScale: number };
+      const s  = ep._endScale + (ep._startScale - ep._endScale) * t;
+      p.mesh.scale.set(s, s, 1);
+      (p.mesh.material as THREE.MeshBasicMaterial).opacity = t;
+    }
+    // HE sphere.
+    for (const p of this._grnSphere) {
+      if (p.life < 0) continue;
+      p.life -= dt;
+      if (p.life <= 0) { p.life = -1; p.mesh.visible = false; continue; }
+      const t  = p.life / p.maxLife;
+      const ep = p as Particle & { _startScale: number; _endScale: number };
+      const s  = ep._startScale + (ep._endScale - ep._startScale) * (1 - t);
+      p.mesh.scale.set(s, s, s);
+      (p.mesh.material as THREE.MeshBasicMaterial).opacity = t * 0.6;
+    }
+    // HE debris.
+    for (const p of this._grnDebris) {
+      if (p.life < 0) continue;
+      p.life -= dt;
+      if (p.life <= 0) { p.life = -1; p.mesh.visible = false; continue; }
+      const t = p.life / p.maxLife;
+      (p.mesh.material as THREE.MeshBasicMaterial).opacity = t;
+    }
+    // White flash burst.
+    for (const p of this._grnWhiteFlash) {
+      if (p.life < 0) continue;
+      p.life -= dt;
+      if (p.life <= 0) { p.life = -1; p.mesh.visible = false; continue; }
+      const t  = p.life / p.maxLife;
+      const ep = p as Particle & { _startScale: number; _endScale: number };
+      const s  = ep._startScale + (ep._endScale - ep._startScale) * (1 - t);
+      p.mesh.scale.set(s, s, 1);
+      (p.mesh.material as THREE.MeshBasicMaterial).opacity = t * 0.85;
     }
   }
 }

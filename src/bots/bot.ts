@@ -147,6 +147,11 @@ interface BotBrain {
 
   // Scope pulse tracking (AWP bots).
   scopeLastToggleAt: number;
+
+  // Flash blindness state.
+  // wasBlind: true if the bot was blinded on the previous tick. Used to detect
+  // the transition from blind→not-blind so we can trigger a fresh reaction.
+  wasBlind: boolean;
 }
 
 // ---------------------------------------------------------------------------
@@ -186,6 +191,10 @@ export class BotManager {
   private _unsubs:  Array<() => void>     = [];
   private _lastNow: number                = 0;
 
+  // Optional smoke-segment query: returns true when the segment a→b is obscured
+  // by a smoke volume. Null = no smoke system available (all segments clear).
+  private _smokeQuery: ((a: Vec3, b: Vec3) => boolean) | null = null;
+
   private readonly _mapData: MapData = DUST2;
 
   constructor(
@@ -200,9 +209,29 @@ export class BotManager {
     this._onBotShot = onBotShot;
   }
 
+  /**
+   * Inject (or remove) the smoke-segment query used by bot perception and
+   * engage-state LOS revalidation. Pass null to disable smoke checks.
+   * Integration: call this from main.ts after BotManager construction, e.g.:
+   *   botManager.setSmokeQuery((a, b) => isSegmentSmoked(a, b));
+   */
+  setSmokeQuery(q: ((a: Vec3, b: Vec3) => boolean) | null): void {
+    this._smokeQuery = q;
+  }
+
   // Expose brain state for tests.
   getBrainState(botId: number): BotState | undefined {
     return this._brains.get(botId)?.state;
+  }
+
+  // Expose current aim error (degrees) for tests (partial-blind verification).
+  getBrainAimErrorDeg(botId: number): number | undefined {
+    return this._brains.get(botId)?.aimErrorDeg;
+  }
+
+  // Expose current target for tests.
+  getBrainTarget(botId: number): Combatant | null | undefined {
+    return this._brains.get(botId)?.target;
   }
 
   // ---------------------------------------------------------------------------
@@ -287,6 +316,8 @@ export class BotManager {
       nextPerceptAt:     (bot.id % 12) * (PERCEPTION_INTERVAL / 12),
 
       scopeLastToggleAt: -999,
+
+      wasBlind:          false,
     };
   }
 
@@ -309,6 +340,7 @@ export class BotManager {
     br.stuckStartAt       = 0;
     br.stuckJumpPending   = false;
     br.scopeLastToggleAt  = -999;
+    br.wasBlind           = false;
 
     if (br.bot.team === 'T') {
       this._assignT(br);
@@ -441,10 +473,39 @@ export class BotManager {
 
     const diff = BOT_DIFFICULTY[game.difficulty];
 
+    // ----- Flash-blindness gate -----
+    const blind          = now < (bot.blindUntil ?? 0);
+    const blindIntensity = bot.blindIntensity ?? 0;
+    const fullBlind      = blind && blindIntensity >= 0.6;
+
+    // When a full-blind bot transitions back to sighted, reset firstSeenAt so
+    // the reaction-time machinery fires a fresh "first contact" window.
+    if (!blind && br.wasBlind) {
+      // Only reset if there is still a visible target (recheck happens in
+      // _perceive below). If the target is gone, perception will clear it.
+      if (br.target !== null) {
+        br.firstSeenAt = now;  // treat it like the first time we see this target
+      }
+    }
+    br.wasBlind = blind;
+
+    // Full-blind: drop any current target immediately and skip perception.
+    if (fullBlind) {
+      br.target        = null;
+      br.targetVisibleAt = -1;
+      // Transition out of engage (no visible target).
+      if (br.state === 'engage') {
+        br.state = br.lastKnownPos !== null ? 'hunt' : 'objective';
+      }
+    }
+
     // 1. Perception (staggered).
-    if (now >= br.nextPerceptAt) {
+    if (!fullBlind && now >= br.nextPerceptAt) {
       br.nextPerceptAt = now + PERCEPTION_INTERVAL;
       this._perceive(br, now, diff);
+    } else if (fullBlind && now >= br.nextPerceptAt) {
+      // Advance the timer even when blinded so we don't spam checks on unblind.
+      br.nextPerceptAt = now + PERCEPTION_INTERVAL;
     }
 
     // 2. FSM — build move intent and handle useHeld.
@@ -476,10 +537,10 @@ export class BotManager {
     this._detectStuck(br, dt, now, intent);
 
     // 8. Aim.
-    this._aimAt(br, dt, now, diff);
+    this._aimAt(br, dt, now, diff, blind ? blindIntensity : 0);
 
     // 9. Weapon update.
-    const weapInput = this._weaponInput(br, now, diff);
+    const weapInput = this._weaponInput(br, now, diff, fullBlind, blind ? blindIntensity : 0);
     const shotResult = updateWeapon(bot, this._world, game.combatants, weapInput, now, dt);
     if (shotResult !== null && this._onBotShot) {
       this._onBotShot(bot, shotResult);
@@ -513,10 +574,16 @@ export class BotManager {
       const da  = Math.abs(angleDiff(bot.yaw, Math.atan2(-dx, -dz)));
       if (da > VISION_FOV_HALF_RAD) continue;
 
-      // LOS.
+      // LOS: a sample is visible when geometry LOS passes AND it is not smoked.
+      // The enemy is visible if EITHER sample survives both checks.
       const botEye = eyePos(bot);
-      if (!world.lineOfSight(botEye, eyePos(c)) &&
-          !world.lineOfSight(botEye, chestPos(c))) continue;
+      const eyeGeo   = world.lineOfSight(botEye, eyePos(c));
+      const chestGeo = world.lineOfSight(botEye, chestPos(c));
+      const eyeSmoked   = this._smokeQuery !== null && this._smokeQuery(botEye, eyePos(c));
+      const chestSmoked = this._smokeQuery !== null && this._smokeQuery(botEye, chestPos(c));
+      const eyeVisible   = eyeGeo   && !eyeSmoked;
+      const chestVisible = chestGeo && !chestSmoked;
+      if (!eyeVisible && !chestVisible) continue;
 
       const dSq = distanceSq(bot.pos, c.pos);
       if (dSq < nearestDSq) { nearestDSq = dSq; nearest = c; }
@@ -876,6 +943,9 @@ export class BotManager {
     dt: number,
     now: number,
     diff: { reactionMs: number; aimErrorDeg: number; recoilControl: number; visionRange: number },
+    // Partial blind intensity (0 = not blind, 0..0.59 = partial, capped at 0.59 here).
+    // Full-blind (>= 0.6) bots have no target so this method returns early anyway.
+    partialBlindIntensity: number,
   ): void {
     const bot      = br.bot;
     const game     = this._game;
@@ -910,6 +980,10 @@ export class BotManager {
       if (br.aimOnTargetSince >= 0 && now - br.aimOnTargetSince > AIM_LOCK_TIME) {
         err *= AIM_LOCK_SHRINK;
       }
+      // Partial blind: scale aim error up by (1 + 3*intensity).
+      if (partialBlindIntensity > 0) {
+        err *= (1 + 3 * partialBlindIntensity);
+      }
       br.aimErrorDeg = err;
     }
 
@@ -917,9 +991,12 @@ export class BotManager {
     const aimPt  = br.aimHeadEngagement ? headPos(target) : chestPos(target);
     const errRad = randSpread(br.aimErrorDeg) * (Math.PI / 180);
 
-    // Recoil compensation.
+    // Recoil compensation. Partial blind: halve recoil control.
     const punch     = getViewPunch(bot);
-    const recoilAdj = punch.pitch * diff.recoilControl;
+    const recoilControl = partialBlindIntensity > 0
+      ? diff.recoilControl * 0.5
+      : diff.recoilControl;
+    const recoilAdj = punch.pitch * recoilControl;
 
     const botEye = eyePos(bot);
     const dx     = aimPt.x - botEye.x;
@@ -949,9 +1026,17 @@ export class BotManager {
     br: BotBrain,
     now: number,
     diff: { reactionMs: number; aimErrorDeg: number; recoilControl: number; visionRange: number },
+    // fullBlind: suppress all firing; partialBlindIntensity > 0: bot may still fire.
+    fullBlind: boolean,
+    _partialBlindIntensity: number,
   ): { trigger: boolean; reloadPressed: boolean; scopePressed: boolean } {
     const bot  = br.bot;
     const game = this._game;
+
+    // Full blind: do not fire at all (target already dropped before this call).
+    if (fullBlind) {
+      return { trigger: false, reloadPressed: false, scopePressed: false };
+    }
 
     // Reload logic.
     const slot = bot.inventory.activeSlot;

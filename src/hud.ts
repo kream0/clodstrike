@@ -1,8 +1,9 @@
 import type { Game, GamePhase, MatchOptions } from './game';
-import { RULES } from './constants';
+import { RULES, GRENADES, ECONOMY } from './constants';
 import { gameEvents } from './combat';
 import { isScoped, currentSpread } from './weapons';
 import { DUST2 } from './maps/dust2';
+import type { GrenadeType } from './types';
 
 // ---------------------------------------------------------------------------
 // CSS injected once
@@ -519,7 +520,42 @@ const HUD_CSS = `
   display: inline-block; min-width: 130px;
   font-weight: 600; color: #c9a06a; opacity: 1;
 }
+
+/* ── Flash whiteout overlay ─────────────────────────────────────── */
+#hud-flash {
+  position: fixed; inset: 0;
+  pointer-events: none;
+  background: #ffffff;
+  opacity: 0;
+  z-index: 150;
+}
+
+/* ── Grenade pips (next to ammo plate) ─────────────────────────── */
+#hud-grenades {
+  position: absolute; bottom: 24px; right: 24px;
+  display: flex; gap: 4px; align-items: flex-end;
+  /* sits directly left of the ammo plate (margin-right = ammo plate width + gap) */
+  margin-right: 158px;
+}
+.gren-pip {
+  display: inline-flex; align-items: center; justify-content: center;
+  min-width: 28px; height: 22px;
+  border-radius: 3px;
+  border: 1px solid rgba(255,255,255,0.18);
+  background: rgba(8,10,12,0.65);
+  backdrop-filter: blur(4px);
+  font-size: 9px; font-weight: 700; letter-spacing: 0.06em;
+  text-transform: uppercase; color: rgba(232,230,225,0.70);
+  font-variant-numeric: tabular-nums;
+  gap: 2px;
+}
+.gren-pip.equipped {
+  border-color: #c9a06a;
+  color: #c9a06a;
+  background: rgba(201,160,106,0.12);
+}
 `;
+
 
 // ---------------------------------------------------------------------------
 // Radar constants
@@ -571,6 +607,8 @@ export class HUD {
   private _spectating!:   HTMLElement;
   private _startMenu!:    HTMLElement;
   private _pauseMenu!:    HTMLElement;
+  private _flashOverlay!: HTMLElement;
+  private _grenPips!:     HTMLElement;
 
   // State.
   private _hitmarkerTimer   = 0;
@@ -593,7 +631,9 @@ export class HUD {
   private _sbLastRenderTime = -1;
 
   // Buy menu.
-  private _buyVisible = false;
+  private _buyVisible  = false;
+  // Cached team used to build current buy menu DOM (detects team change for rebuild).
+  private _buyMenuTeam: 'CT' | 'T' | null = null;
 
   // Callbacks.
   onStart?:   (opts: MatchOptions) => void;
@@ -772,22 +812,34 @@ export class HUD {
       this._setBuyVisible(false);
     }
 
-    // Update buy menu money display.
+    // Update buy menu affordability display each frame while open.
     if (this._buyVisible) {
-      const moneyLabels = this._buyMenu.querySelectorAll<HTMLElement>('.buy-money-label');
-      for (const el of moneyLabels) {
-        el.textContent = `$${player.money}`;
+      this._refreshBuyAffordability();
+    }
+
+    // ── Grenade pips ──
+    this._updateGrenPips(player.grenades, player.equippedGrenade ?? null);
+
+    // ── Flash whiteout overlay ──
+    const blindUntil    = player.blindUntil    ?? 0;
+    const blindIntensity = player.blindIntensity ?? 1;
+    if (blindUntil > now) {
+      const FULL_DURATION = 4.0; // max blindness = 0.6 + 3.4*1.0 = 4.0 s
+      const remaining    = blindUntil - now;
+      const holdThresh   = FULL_DURATION * 0.60;
+      let opacity: number;
+      if (remaining >= holdThresh) {
+        opacity = blindIntensity;
+      } else {
+        opacity = (remaining / holdThresh) * blindIntensity;
       }
-      // Refresh can-afford state.
-      const buyItems = this._buyMenu.querySelectorAll<HTMLElement>('.buy-item');
-      for (const item of buyItems) {
-        const price = parseInt(item.dataset.price ?? '0', 10);
-        if (price > player.money) {
-          item.classList.add('cant');
-        } else {
-          item.classList.remove('cant');
-        }
-      }
+      // clamp 0..1
+      opacity = Math.min(1, Math.max(0, opacity));
+      this._flashOverlay.style.opacity = String(opacity);
+      this._flashOverlay.style.display = '';
+    } else {
+      this._flashOverlay.style.display = 'none';
+      this._flashOverlay.style.opacity = '0';
     }
 
     // Scoreboard — rebuild DOM at most once per 0.25 s of game time.
@@ -967,31 +1019,9 @@ export class HUD {
     // ── Buy menu ──
     const buy = document.createElement('div');
     buy.id = 'hud-buy';
-    buy.innerHTML = `
-      <div class="buy-panel">
-        <h3>Pistols</h3>
-        ${_buyRow('usp',    'USP-S',         200, 1)}
-        ${_buyRow('glock',  'Glock-18',       200, 2)}
-        ${_buyRow('deagle', 'Desert Eagle',   700, 3)}
-        <div class="buy-money-label">$—</div>
-      </div>
-      <div class="buy-panel">
-        <h3>Rifles</h3>
-        ${_buyRow('ak47',  'AK-47',  2700, 4)}
-        ${_buyRow('m4a4',  'M4A4',   2900, 5)}
-        ${_buyRow('awp',   'AWP',    4750, 6)}
-        <div class="buy-money-label">$—</div>
-      </div>
-      <div class="buy-panel">
-        <h3>Gear</h3>
-        ${_buyRow('armor',       'Vest',          650,  7)}
-        ${_buyRow('armorHelmet', 'Vest + Helmet', 1000, 8)}
-        ${_buyRow('kit',         'Defuse Kit',     400, 9)}
-        <div class="buy-money-label">$—</div>
-      </div>
-    `;
     root.appendChild(buy);
     this._buyMenu = buy;
+    // DOM content built lazily on first open via _rebuildBuyMenu().
 
     // ── Banner ──
     const banner = document.createElement('div');
@@ -1026,6 +1056,18 @@ export class HUD {
     spec.textContent = 'You are dead — spectating';
     root.appendChild(spec);
     this._spectating = spec;
+
+    // ── Flash whiteout overlay ──
+    const flashDiv = document.createElement('div');
+    flashDiv.id = 'hud-flash';
+    root.appendChild(flashDiv);
+    this._flashOverlay = flashDiv;
+
+    // ── Grenade pips ──
+    const grenDiv = document.createElement('div');
+    grenDiv.id = 'hud-grenades';
+    root.appendChild(grenDiv);
+    this._grenPips = grenDiv;
 
     // ── Start menu ──
     const startMenu = document.createElement('div');
@@ -1143,30 +1185,169 @@ export class HUD {
   }
 
   private _wireBuyMenu(): void {
-    const menu = this._buyMenu;
-    menu.querySelectorAll<HTMLElement>('.buy-item').forEach(item => {
-      item.addEventListener('click', () => {
-        const id    = item.dataset.id!;
-        const game  = this._game;
-        const now   = this.getNow();
-        const ok    = game.buy(game.player, id, now);
-        if (ok) {
-          // Buy click handled by main.ts audio hook (notified via buyClick callback).
-          // Emit a small DOM event that main.ts can listen to.
-          item.dispatchEvent(new CustomEvent('hud-buy-success', { bubbles: true, detail: { id } }));
-        } else {
-          item.classList.add('flash-fail');
-          setTimeout(() => item.classList.remove('flash-fail'), 300);
-          item.dispatchEvent(new CustomEvent('hud-buy-fail', { bubbles: true }));
-        }
-      });
+    // Use event delegation so the listener survives buy menu DOM rebuilds.
+    this._buyMenu.addEventListener('click', (e) => {
+      const item = (e.target as HTMLElement).closest<HTMLElement>('.buy-item');
+      if (!item) return;
+      const id   = item.dataset.id!;
+      const game = this._game;
+      const now  = this.getNow();
+      const ok   = game.buy(game.player, id, now);
+      if (ok) {
+        item.dispatchEvent(new CustomEvent('hud-buy-success', { bubbles: true, detail: { id } }));
+        // Refresh affordability + grenade maxCarry states after purchase.
+        this._refreshBuyAffordability();
+      } else {
+        item.classList.add('flash-fail');
+        setTimeout(() => item.classList.remove('flash-fail'), 300);
+        item.dispatchEvent(new CustomEvent('hud-buy-fail', { bubbles: true }));
+      }
     });
+  }
+
+  /**
+   * Build or rebuild the buy menu inner HTML for the given player team.
+   * Called on open and on team change. Does NOT re-attach the delegated listener
+   * (that is wired once in _wireBuyMenu and survives innerHTML replacement).
+   */
+  private _rebuildBuyMenu(): void {
+    const player = this._game.player;
+    if (!player) return;
+    const team = player.team;
+    this._buyMenuTeam = team;
+
+    const isCT = team === 'CT';
+
+    // Slot 1: team pistol.
+    const pistolId    = isCT ? 'usp' : 'glock';
+    const pistolLabel = isCT ? 'USP-S' : 'Glock-18';
+
+    // Slot 3: team rifle.
+    const rifleId    = isCT ? 'm4a4' : 'ak47';
+    const rifleLabel = isCT ? 'M4A4' : 'AK-47';
+    const riflePrice = isCT ? 2900 : 2700;
+
+    // Slot 5: armor — context-sensitive.
+    const hasArmor  = player.armor > 0;
+    const hasHelmet = player.helmet;
+    let armorId: string;
+    let armorLabel: string;
+    let armorPrice: number;
+    let armorDisabled = false;
+    if (!hasArmor) {
+      armorId    = 'armor';
+      armorLabel = 'Vest';
+      armorPrice = ECONOMY.ARMOR_PRICE;
+    } else if (!hasHelmet) {
+      armorId    = 'armorHelmet';
+      armorLabel = 'Helmet upgrade';
+      armorPrice = ECONOMY.ARMOR_UPGRADE_PRICE;
+    } else {
+      armorId      = 'armorHelmet';
+      armorLabel   = 'Armored';
+      armorPrice   = 0;
+      armorDisabled = true;
+    }
+
+    // Slot 6: defuse kit — CT only; greyed for T.
+    const kitDisabledForT = !isCT;
+
+    // Grenade owned counts (default 0 each).
+    const grens = player.grenades ?? { he: 0, flash: 0, smoke: 0 };
+
+    // Row 7: HE — disable when owned >= maxCarry.
+    const heDisabled  = grens.he  >= GRENADES.he.maxCarry;
+    // Row 8: Flashbang — disable when owned >= maxCarry.
+    const fbDisabled  = grens.flash >= GRENADES.flash.maxCarry;
+    // Row 9: Smoke — disable when owned >= maxCarry.
+    const smDisabled  = grens.smoke >= GRENADES.smoke.maxCarry;
+
+    // Flash label shows owned/max.
+    const fbLabel = `Flashbang (${grens.flash}/${GRENADES.flash.maxCarry})`;
+
+    this._buyMenu.innerHTML = `
+      <div class="buy-panel">
+        <h3>Weapons</h3>
+        ${_buyRow(pistolId,  pistolLabel,     200,              1)}
+        ${_buyRow('deagle', 'Desert Eagle',   700,              2)}
+        ${_buyRow(rifleId,   rifleLabel,      riflePrice,       3)}
+        ${_buyRow('awp',    'AWP',            4750,             4)}
+        <div class="buy-money-label">$—</div>
+      </div>
+      <div class="buy-panel">
+        <h3>Gear</h3>
+        ${_buyRow(armorId,  armorLabel,       armorPrice,  5, armorDisabled)}
+        ${_buyRow('kit',    'Defuse Kit',      400,         6, kitDisabledForT)}
+        ${_buyRow('he',     'HE Grenade',      GRENADES.he.price,    7, heDisabled)}
+        ${_buyRow('flash',  fbLabel,           GRENADES.flash.price, 8, fbDisabled)}
+        ${_buyRow('smoke',  'Smoke',           GRENADES.smoke.price, 9, smDisabled)}
+        <div class="buy-money-label">$—</div>
+      </div>
+    `;
+  }
+
+  /** Refresh .cant class on all buy items based on current money + grenade maxCarry. */
+  private _refreshBuyAffordability(): void {
+    const player = this._game.player;
+    if (!player) return;
+    const grens = player.grenades ?? { he: 0, flash: 0, smoke: 0 };
+    const items = this._buyMenu.querySelectorAll<HTMLElement>('.buy-item');
+    for (const item of items) {
+      if (item.dataset.staticDisabled === '1') continue; // permanently disabled items
+      const price     = parseInt(item.dataset.price ?? '0', 10);
+      const grenType  = item.dataset.grenType as GrenadeType | undefined;
+      const maxCarry  = grenType ? GRENADES[grenType].maxCarry : undefined;
+      const ownedCount = grenType ? (grens[grenType] ?? 0) : 0;
+      const tooMany   = maxCarry !== undefined && ownedCount >= maxCarry;
+      const cantAfford = price > player.money;
+      if (cantAfford || tooMany) {
+        item.classList.add('cant');
+      } else {
+        item.classList.remove('cant');
+      }
+    }
+    // Also refresh money display.
+    const moneyLabels = this._buyMenu.querySelectorAll<HTMLElement>('.buy-money-label');
+    for (const el of moneyLabels) {
+      el.textContent = `$${player.money}`;
+    }
+  }
+
+  private _updateGrenPips(
+    grenades: Partial<Record<GrenadeType, number>> | undefined,
+    equipped: GrenadeType | null,
+  ): void {
+    const g = grenades ?? {};
+    const he    = g['he']    ?? 0;
+    const flash = g['flash'] ?? 0;
+    const smoke = g['smoke'] ?? 0;
+
+    let html = '';
+    if (he > 0) {
+      const cls = equipped === 'he' ? 'gren-pip equipped' : 'gren-pip';
+      html += `<span class="${cls}">HE${he > 1 ? ` \xD7${he}` : ''}</span>`;
+    }
+    if (flash > 0) {
+      const cls = equipped === 'flash' ? 'gren-pip equipped' : 'gren-pip';
+      html += `<span class="${cls}">FB${flash > 1 ? ` \xD7${flash}` : ''}</span>`;
+    }
+    if (smoke > 0) {
+      const cls = equipped === 'smoke' ? 'gren-pip equipped' : 'gren-pip';
+      html += `<span class="${cls}">SM${smoke > 1 ? ` \xD7${smoke}` : ''}</span>`;
+    }
+    this._grenPips.innerHTML = html;
   }
 
   private _setBuyVisible(v: boolean): void {
     this._buyVisible = v;
     if (v) {
+      // Rebuild menu if first open or team changed since last build.
+      const currentTeam = this._game.player?.team ?? null;
+      if (this._buyMenuTeam !== currentTeam) {
+        this._rebuildBuyMenu();
+      }
       this._buyMenu.classList.add('visible');
+      this._refreshBuyAffordability();
     } else {
       this._buyMenu.classList.remove('visible');
     }
@@ -1472,9 +1653,10 @@ export class HUD {
       const attackerName = ev.attacker?.name ?? '[Bomb]';
       const victimClass  = ev.victim === this._game?.player ? 'kf-victim' : '';
       const hs = ev.headshot ? '<span class="kf-hs">⦿</span>' : '';
+      const wLabel = KILLFEED_WEAPON_LABELS[ev.weaponId] ?? ev.weaponId.toUpperCase();
       entry.innerHTML = `
         <span>${attackerName}</span>
-        <span class="kf-weapon">[${ev.weaponId}]</span>
+        <span class="kf-weapon">[${wLabel}]</span>
         ${hs}
         <span class="${victimClass}">${ev.victim.name}</span>
       `;
@@ -1516,9 +1698,42 @@ function _formatTime(seconds: number): string {
   return `${m}:${String(r).padStart(2, '0')}`;
 }
 
-function _buyRow(id: string, label: string, price: number, key: number): string {
-  return `<div class="buy-item" data-id="${id}" data-price="${price}" data-key="${key}">
+/**
+ * Grenade weapon IDs that carry a `data-gren-type` attribute so
+ * `_refreshBuyAffordability` can check maxCarry constraints.
+ */
+const GRENADE_BUY_IDS: Readonly<Record<string, 'he' | 'flash' | 'smoke'>> = {
+  he: 'he',
+  flash: 'flash',
+  smoke: 'smoke',
+};
+
+/**
+ * Human-readable killfeed labels for weapon IDs that aren't in WEAPONS.
+ * Grenade kills arrive with weaponId = grenade type string ('he', 'flash', 'smoke').
+ * Unknown IDs fall through to the raw id display — no crash.
+ */
+const KILLFEED_WEAPON_LABELS: Readonly<Record<string, string>> = {
+  he:    'HE',
+  flash: 'FLASH',
+  smoke: 'SMOKE',
+  bomb:  'BOMB',
+};
+
+function _buyRow(
+  id: string,
+  label: string,
+  price: number,
+  key: number,
+  staticDisabled = false,
+): string {
+  const grenType    = GRENADE_BUY_IDS[id];
+  const grenAttr    = grenType ? ` data-gren-type="${grenType}"` : '';
+  const disabledAttr = staticDisabled ? ' data-static-disabled="1"' : '';
+  const cantClass   = staticDisabled ? ' cant' : '';
+  const priceDisplay = price > 0 ? `$${price}` : '';
+  return `<div class="buy-item${cantClass}" data-id="${id}" data-price="${price}" data-key="${key}"${grenAttr}${disabledAttr}>
     <span><span class="buy-key">${key}</span>${label}</span>
-    <span class="buy-price">$${price}</span>
+    <span class="buy-price">${priceDisplay}</span>
   </div>`;
 }

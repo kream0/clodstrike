@@ -1,4 +1,4 @@
-import type { Team, WeaponDef } from './types';
+import type { Team, WeaponDef, GrenadeType } from './types';
 
 export const WEAPONS: Record<string, WeaponDef> = {
   knife: {
@@ -98,6 +98,8 @@ export const ECONOMY = {
   ARMOR_PRICE: 650,
   ARMOR_HELMET_PRICE: 1000,
   DEFUSE_KIT_PRICE: 400,
+  /** Cost to upgrade vest-only armor to vest+helmet (650 already paid → pay 350 more). */
+  ARMOR_UPGRADE_PRICE: 350,
 };
 
 export const RULES = {
@@ -131,4 +133,81 @@ export const BOT_DIFFICULTY: Record<
   easy: { reactionMs: 550, aimErrorDeg: 3.2, recoilControl: 0.3, visionRange: 45 },
   normal: { reactionMs: 350, aimErrorDeg: 1.7, recoilControl: 0.6, visionRange: 60 },
   hard: { reactionMs: 220, aimErrorDeg: 0.8, recoilControl: 0.85, visionRange: 80 },
+};
+
+export interface GrenadeDef {
+  /** Buy-menu price in dollars. */
+  price: number;
+  /** Maximum number of this type a combatant can carry simultaneously. */
+  maxCarry: number;
+  /**
+   * Fuse duration in seconds from throw to detonation.
+   * Smoke grenades use 0 (pop immediately on coming to rest);
+   * the projectile system should treat fuse=0 as "detonate on bounce-rest".
+   */
+  fuseSeconds: number;
+  /** Initial speed of the projectile along the throw vector (m/s). */
+  throwSpeed: number;
+  /** Additive upward velocity component applied at throw time (m/s). */
+  upwardBoost: number;
+  /**
+   * Effect radius in meters:
+   * - he: damage falloff radius (0 damage at edge, heMaxDamage at center).
+   * - flash: maximum range at which full-blind can be applied.
+   * - smoke: visual / LOS blocking radius of the smoke cloud.
+   */
+  radius: number;
+  /** HE only: maximum damage at point-blank (center of explosion). */
+  heMaxDamage?: number;
+  /** Smoke only: how many seconds the smoke cloud persists before dissipating. */
+  smokeDurationSeconds?: number;
+  /** Coefficient of restitution for bouncing off walls/floor (0 = no bounce, 1 = perfect). */
+  restitution: number;
+  /** Per-bounce friction multiplier applied to lateral velocity on floor contact. */
+  groundFriction: number;
+  /** Collision sphere radius of the projectile itself (meters). */
+  projectileRadius: number;
+  /** Gravity scale relative to MOVEMENT.GRAVITY (1 = full gravity). */
+  gravityScale: number;
+}
+
+export const GRENADES: Record<GrenadeType, GrenadeDef> = {
+  he: {
+    price: 300,
+    maxCarry: 1,
+    fuseSeconds: 1.6,
+    throwSpeed: 18,
+    upwardBoost: 2.5,
+    radius: 10,
+    heMaxDamage: 98,
+    restitution: 0.45,
+    groundFriction: 0.7,
+    projectileRadius: 0.07,
+    gravityScale: 1,
+  },
+  flash: {
+    price: 200,
+    maxCarry: 2,
+    fuseSeconds: 1.5,
+    throwSpeed: 18,
+    upwardBoost: 2.5,
+    radius: 22,
+    restitution: 0.45,
+    groundFriction: 0.7,
+    projectileRadius: 0.07,
+    gravityScale: 1,
+  },
+  smoke: {
+    price: 300,
+    maxCarry: 1,
+    fuseSeconds: 0,
+    throwSpeed: 17,
+    upwardBoost: 2.5,
+    radius: 3.5,
+    smokeDurationSeconds: 15,
+    restitution: 0.45,
+    groundFriction: 0.7,
+    projectileRadius: 0.07,
+    gravityScale: 1,
+  },
 };

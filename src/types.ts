@@ -30,6 +30,30 @@ export interface MapData {
   areas: NamedArea[];
 }
 
+// ----- Grenades -----
+export type GrenadeType = 'he' | 'flash' | 'smoke';
+
+/** One live grenade projectile in flight or at rest. */
+export interface GrenadeProjectile {
+  id: number;
+  type: GrenadeType;
+  pos: Vec3;
+  vel: Vec3;
+  thrower: Combatant;
+  /** game-time seconds at which this grenade detonates */
+  detonatesAt: number;
+  /** set to true once detonation logic has run */
+  detonated: boolean;
+}
+
+/** A live smoke volume produced after a smoke grenade pops. */
+export interface SmokeVolume {
+  center: Vec3;
+  radius: number;
+  /** game-time seconds at which the smoke dissipates */
+  expiresAt: number;
+}
+
 // ----- Combat -----
 export type HitGroup = 'head' | 'body' | 'legs';
 export type WeaponSlot = 'primary' | 'secondary' | 'knife';
@@ -63,6 +87,15 @@ export interface Combatant {
   money: number; kills: number; deaths: number;
   hasBomb: boolean; hasDefuseKit: boolean;
   tagSlowUntil: number; // game-time seconds; movement slowed while now < this
+  // ----- Grenade inventory & status (optional: existing construction sites are outside types.ts) -----
+  /** Counts of each grenade type currently carried. */
+  grenades?: Record<GrenadeType, number>;
+  /** Which grenade type is currently "equipped" (ready to throw). null = none. */
+  equippedGrenade?: GrenadeType | null;
+  /** game-time seconds until which this combatant is blinded; 0 = not blind. */
+  blindUntil?: number;
+  /** Blind intensity at the moment blindness was applied, in range 0..1. */
+  blindIntensity?: number;
 }
 
 // ----- Events -----
@@ -78,4 +111,7 @@ export interface GameEvents {
   bombDefused: Record<string, never>;
   bombExploded: Record<string, never>;
   matchEnd: { winner: Team };
+  grenadeThrown: { thrower: Combatant; type: GrenadeType };
+  grenadeDetonated: { type: GrenadeType; pos: Vec3 };
+  combatantFlashed: { victim: Combatant; intensity: number; duration: number };
 }

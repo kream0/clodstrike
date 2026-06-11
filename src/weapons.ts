@@ -1,4 +1,4 @@
-import type { Combatant, WeaponSlot } from './types';
+import type { Combatant, WeaponSlot, GrenadeType } from './types';
 import type { World } from './world';
 import { MOVEMENT } from './constants';
 import { clamp, randSpread, yawPitchToDir, normalize } from './math';
@@ -234,4 +234,141 @@ export function updateWeapon(
     : fireHitscan(c, normDir, world, targets, now);
 
   return result;
+}
+
+// ---------------------------------------------------------------------------
+// Grenade equip state machine
+// ---------------------------------------------------------------------------
+
+/** Single-tick edge inputs for grenade equip/throw control. */
+export interface GrenadeControlInput {
+  /** Rising edge: key 4 was pressed this tick (equip / cycle). */
+  equipPressed: boolean;
+  /** Rising edge: primary fire was pressed this tick (throw). */
+  firePressed: boolean;
+  /**
+   * True if the player switched to a weapon slot (1/2/3/wheel) this tick.
+   * Integration MUST pass true whenever switchSlot was called or wheel-scroll
+   * triggered a slot change, so the grenade is unequipped immediately.
+   */
+  slotSwitchPressed?: boolean;
+}
+
+/** Returned when the player commits a grenade throw.
+ *  Integration routes this to GrenadeManager.throwGrenade(player, request.type). */
+export interface ThrowRequest {
+  type: GrenadeType;
+}
+
+/** Canonical equip order — he → flash → smoke. */
+const GRENADE_ORDER: readonly GrenadeType[] = ['he', 'flash', 'smoke'] as const;
+
+/**
+ * Return true when the combatant has a grenade equipped (i.e. overlay mode is
+ * active and the gun fire path must be suppressed).
+ *
+ * Integration in main.ts MUST check this before passing `trigger` to
+ * updateWeapon — if isGrenadeEquipped(player) is true, pass trigger: false.
+ */
+export function isGrenadeEquipped(c: Combatant): boolean {
+  return (c.equippedGrenade ?? null) !== null;
+}
+
+/**
+ * Immediately clear the equipped grenade (e.g. called when 1/2/3 or wheel
+ * switches weapon slot).  Integration MUST call this alongside switchSlot.
+ */
+export function cancelGrenadeEquip(c: Combatant): void {
+  c.equippedGrenade = null;
+}
+
+/**
+ * Advance the grenade equip / throw state machine for one fixed-step tick.
+ *
+ * ### Integration contract (what main.ts must do each tick, in order):
+ * 1. Determine `slotSwitchPressed` — true if Digit1/2/3 or wheel fired a
+ *    switchSlot call this frame (capture before the fixed-step loop, like
+ *    other edge flags).
+ * 2. Build `GrenadeControlInput`:
+ *    - `equipPressed`     = Digit4 wasPressed edge (captured before loop, honoured first tick only)
+ *    - `firePressed`      = mousePressed0 edge (same as gun trigger — honour first tick only)
+ *    - `slotSwitchPressed`= as above
+ * 3. Call `updateGrenadeEquip(player, inp, clock.now)` **before** calling
+ *    `updateWeapon` on the same tick.
+ * 4. If a ThrowRequest is returned, call
+ *    `GrenadeManager.throwGrenade(player, request.type, eyePos, eyeDir)`.
+ * 5. After this call, check `isGrenadeEquipped(player)` to decide whether to
+ *    suppress gun firing: pass `trigger: false` to `updateWeapon` while true.
+ * 6. `cancelGrenadeEquip` is provided for direct slot-switch paths; you may
+ *    alternatively rely on the `slotSwitchPressed` param alone.
+ *
+ * @param c   - The combatant whose grenade state is updated (mutated in place).
+ * @param inp - Edge inputs for this tick.
+ * @param _now - Game-time seconds (reserved for future timed animations; unused now).
+ * @returns ThrowRequest when the player fires while equipped, null otherwise.
+ */
+export function updateGrenadeEquip(
+  c: Combatant,
+  inp: GrenadeControlInput,
+  _now: number,
+): ThrowRequest | null {
+  const grenades = c.grenades;
+
+  // --- Auto-unequip: slot switch input ---
+  if (inp.slotSwitchPressed) {
+    c.equippedGrenade = null;
+  }
+
+  // --- Auto-unequip: equipped type's count hit zero externally ---
+  if (c.equippedGrenade != null) {
+    const count = grenades?.[c.equippedGrenade] ?? 0;
+    if (count <= 0) {
+      c.equippedGrenade = null;
+    }
+  }
+
+  // --- Equip / cycle on key 4 ---
+  if (inp.equipPressed) {
+    if (grenades == null || GRENADE_ORDER.every(t => (grenades[t] ?? 0) <= 0)) {
+      // No grenades owned — no-op.
+    } else if (c.equippedGrenade == null) {
+      // Equip the first owned type in canonical order.
+      for (const type of GRENADE_ORDER) {
+        if ((grenades[type] ?? 0) > 0) {
+          c.equippedGrenade = type;
+          break;
+        }
+      }
+    } else {
+      // Cycle to next owned type (wrap around).
+      const cur = GRENADE_ORDER.indexOf(c.equippedGrenade);
+      let found = false;
+      for (let i = 1; i <= GRENADE_ORDER.length; i++) {
+        const next = GRENADE_ORDER[(cur + i) % GRENADE_ORDER.length];
+        if (next !== undefined && (grenades[next] ?? 0) > 0) {
+          c.equippedGrenade = next;
+          found = true;
+          break;
+        }
+      }
+      if (!found) {
+        // Only one type with count > 0 — stays equipped (no change needed).
+      }
+    }
+  }
+
+  // --- Throw on fire while equipped ---
+  if (c.equippedGrenade != null && inp.firePressed) {
+    const type = c.equippedGrenade;
+    c.equippedGrenade = null;
+    const count = grenades?.[type] ?? 0;
+    if (count > 0) {
+      // The core grenade module decrements inventory on actual throw.
+      return { type };
+    }
+    // count somehow 0 — just unequip, no throw.
+    return null;
+  }
+
+  return null;
 }

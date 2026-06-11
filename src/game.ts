@@ -1,6 +1,6 @@
 import * as THREE from 'three';
 import type { Combatant, Inventory, Vec3, Team, WeaponDef, WeaponState, SpawnPoint } from './types';
-import { WEAPONS, ECONOMY, RULES, BOT_NAMES, BOT_DIFFICULTY, TEAM_COLORS } from './constants';
+import { WEAPONS, ECONOMY, RULES, BOT_NAMES, BOT_DIFFICULTY, TEAM_COLORS, GRENADES } from './constants';
 import { DUST2 } from './maps/dust2';
 import type { World } from './world';
 import { gameEvents } from './combat';
@@ -248,9 +248,13 @@ export class Game {
     if (!this.player) {
       this.player = createCombatant(0, 'Player', playerTeam, true);
     } else {
-      this.player.team = playerTeam;
-      this.player.kills  = 0;
-      this.player.deaths = 0;
+      this.player.team          = playerTeam;
+      this.player.kills         = 0;
+      this.player.deaths        = 0;
+      this.player.grenades      = { he: 0, flash: 0, smoke: 0 };
+      this.player.equippedGrenade = null;
+      this.player.blindUntil    = 0;
+      this.player.blindIntensity = 0;
     }
 
     // Assign starting money.
@@ -320,8 +324,10 @@ export class Game {
         c.armor   = 0;
         c.helmet  = false;
         c.hasDefuseKit = false;
+        // Dead combatants lose their grenades (CS semantics: no carry-over).
+        c.grenades = { he: 0, flash: 0, smoke: 0 };
       } else {
-        // Survivors keep weapons but refill ammo.
+        // Survivors keep weapons but refill ammo. Grenade counts carry over.
         refillAmmo(c);
       }
 
@@ -332,6 +338,11 @@ export class Game {
       c.crouching = false;
       c.walking   = false;
       c.hasBomb   = false;
+
+      // Clear blind state each round.
+      c.blindUntil     = 0;
+      c.blindIntensity = 0;
+      c.equippedGrenade = null;
 
       // Assign spawn.
       let sp: SpawnPoint;
@@ -709,6 +720,15 @@ export class Game {
     }
 
     if (itemId === 'armorHelmet') {
+      // If player already has vest (armor > 0) but no helmet, only charge upgrade price.
+      if (c.armor > 0 && !c.helmet) {
+        const price = ECONOMY.ARMOR_UPGRADE_PRICE;
+        if (c.money < price) return false;
+        c.money -= price;
+        c.armor  = 100;
+        c.helmet = true;
+        return true;
+      }
       const price = ECONOMY.ARMOR_HELMET_PRICE;
       if (c.money < price) return false;
       c.money -= price;
@@ -723,6 +743,20 @@ export class Game {
       if (c.money < price) return false;
       c.money -= price;
       c.hasDefuseKit = true;
+      return true;
+    }
+
+    // Grenades.
+    if (itemId === 'he' || itemId === 'flash' || itemId === 'smoke') {
+      const grenDef = GRENADES[itemId];
+      if (c.money < grenDef.price) return false;
+      const carried = c.grenades?.[itemId] ?? 0;
+      if (carried >= grenDef.maxCarry) return false;
+      if (c.grenades === undefined) {
+        c.grenades = { he: 0, flash: 0, smoke: 0 };
+      }
+      c.grenades[itemId] = carried + 1;
+      c.money -= grenDef.price;
       return true;
     }
 
@@ -742,6 +776,68 @@ export class Game {
       switchSlot(c, 'secondary', now);
     }
     return true;
+  }
+
+  // ---------------------------------------------------------------------------
+  // applyExplosionDamage — shared by HE grenade and bomb explosion
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Apply pre-computed explosion damage to a victim.
+   * Handles health clamp, death detection, kill credit,
+   * kill reward, and killfeed + damage event emission.
+   * Called by grenades.ts onExplosionDamage callback AND by _triggerExplosion.
+   *
+   * @param applyArmor - true for HE grenade (armor absorbs damage);
+   *                     false for bomb (raw health damage, no armor absorption).
+   */
+  applyExplosionDamage(
+    victim: Combatant,
+    damage: number,
+    thrower: Combatant | null,
+    weaponId: string,
+    applyArmor = true,
+  ): void {
+    if (!victim.alive || damage <= 0) return;
+
+    // Armor absorption: armor takes a share of the damage (HE only, not bomb).
+    let remainingDmg = damage;
+    if (applyArmor && victim.armor > 0) {
+      const absorbed = Math.min(victim.armor, remainingDmg * (1 - RULES.ARMOR_DAMAGE_MULT));
+      victim.armor   = Math.max(0, victim.armor - absorbed);
+      remainingDmg   = Math.round(remainingDmg * RULES.ARMOR_DAMAGE_MULT);
+    }
+
+    victim.health = Math.max(0, victim.health - remainingDmg);
+
+    gameEvents.emit('damage', {
+      attacker: thrower,
+      victim,
+      amount:   remainingDmg,
+      hitGroup: 'body',
+    });
+
+    if (victim.health <= 0) {
+      victim.health = 0;
+      victim.alive  = false;
+      victim.deaths++;
+
+      // Kill credit to thrower (but not self-kills).
+      if (thrower !== null && thrower !== victim) {
+        thrower.kills++;
+        thrower.money = Math.min(
+          ECONOMY.MAX_MONEY,
+          thrower.money + (WEAPONS[weaponId]?.killReward ?? 300),
+        );
+      }
+
+      gameEvents.emit('kill', {
+        attacker: thrower,
+        victim,
+        weaponId,
+        headshot: false,
+      });
+    }
   }
 
   // ---------------------------------------------------------------------------
@@ -884,7 +980,7 @@ export class Game {
     this.bomb.state = 'exploded';
     gameEvents.emit('bombExploded', {});
 
-    // Radial damage.
+    // Radial damage — delegate to applyExplosionDamage for consistent armor/kill logic.
     const center = this.bomb.pos;
     const BLAST_RADIUS = 25;
     for (const c of this.combatants) {
@@ -896,14 +992,7 @@ export class Game {
       if (dist < BLAST_RADIUS) {
         const dmg = Math.round(500 * Math.pow(1 - dist / BLAST_RADIUS, 1.6));
         if (dmg <= 0) continue;
-        c.health -= dmg;
-        if (c.health <= 0) {
-          c.health = 0;
-          c.alive  = false;
-          c.deaths++;
-          gameEvents.emit('kill', { attacker: null, victim: c, weaponId: 'bomb', headshot: false });
-        }
-        gameEvents.emit('damage', { attacker: null, victim: c, amount: dmg, hitGroup: 'body' });
+        this.applyExplosionDamage(c, dmg, null, 'bomb', false);
       }
     }
 

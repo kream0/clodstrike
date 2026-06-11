@@ -486,3 +486,256 @@ describe('AWP scope-pulse', () => {
     expect(isScoped(bot)).toBe(false);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Smoke LOS injection
+// ---------------------------------------------------------------------------
+
+describe('Smoke LOS injection', () => {
+  /**
+   * Reusable scenario: CT bot facing a T enemy 5 m ahead in open mid with
+   * clear world LOS. We use the same verified positions as the AWP tests.
+   *   bot  : x=0, z=-28, floor=0       (CTMid)
+   *   enemy: x=0, z=-33, floor=0.375   (MidDoors, 5 m in front)
+   * Enemy health is set to 9999 so it survives being shot during the test.
+   */
+  function setupOpenMidScenario(game: Game) {
+    const bot = game.combatants.find(c => c.team === 'CT' && !c.isPlayer && c.alive)!;
+    bot.inventory.primary    = makeWeaponState(WEAPONS.m4a4);
+    bot.inventory.activeSlot = 'primary';
+    bot.pos    = { x: 0, y: 0, z: -28 };
+    bot.yaw    = 0; // facing -Z
+    bot.onGround = true;
+
+    const enemy = game.combatants.find(c => c.team === 'T' && !c.isPlayer && c.alive)!;
+    enemy.pos    = { x: 0, y: 0.375, z: -33 };
+    enemy.alive  = true;
+    enemy.health = 9999; // effectively unkillable — prevents round-end during test
+    enemy.onGround = true;
+
+    // Kill everyone else to isolate the scenario, but keep the player alive so
+    // the game phase doesn't flip (player is T, killing it risks round-end).
+    for (const c of game.combatants) {
+      if (c !== bot && c !== enemy && !c.isPlayer) { c.alive = false; c.health = 0; }
+    }
+    return { bot, enemy };
+  }
+
+  test('bot acquires target normally when no smokeQuery is set', () => {
+    const { game, mgr } = freshSetup({ playerTeam: 'T', difficulty: 'hard' });
+    let now = advanceFreeze(game);
+    const { bot } = setupOpenMidScenario(game);
+
+    // No smoke query installed (default null). Tick for 1 s — well past reaction.
+    const TICKS = Math.ceil(1.0 / (1 / 64));
+    now = tickBrains(game, mgr, TICKS, now);
+
+    const state = mgr.getBrainState(bot.id);
+    // Bot should be in engage (or hunt if it already processed the kill, but health=9999).
+    expect(state === 'engage' || state === 'hunt').toBe(true);
+  });
+
+  test('bot does NOT acquire target when smokeQuery returns true for that segment', () => {
+    const { game, mgr } = freshSetup({ playerTeam: 'T', difficulty: 'hard' });
+    let now = advanceFreeze(game);
+    const { bot } = setupOpenMidScenario(game);
+
+    // Smoke query always returns true → all segments smoked.
+    mgr.setSmokeQuery(() => true);
+
+    const TICKS = Math.ceil(1.0 / (1 / 64));
+    now = tickBrains(game, mgr, TICKS, now);
+
+    const state = mgr.getBrainState(bot.id);
+    // Bot should stay in objective/guard/hunt, NOT engage (never saw enemy through smoke).
+    expect(state).not.toBe('engage');
+    // Target should be null.
+    expect(mgr.getBrainTarget(bot.id) ?? null).toBeNull();
+  });
+
+  test('engaged bot loses target when smokeQuery flips to smoked', () => {
+    const { game, mgr } = freshSetup({ playerTeam: 'T', difficulty: 'hard' });
+    let now = advanceFreeze(game);
+    const { bot } = setupOpenMidScenario(game);
+
+    // Phase 1: no smoke — let bot acquire and engage (0.5 s, hard reactionMs=220 ms).
+    mgr.setSmokeQuery(null);
+    // Drive perception manually for precise control: tick at 128 Hz, 1 s.
+    const DT = 1 / 128;
+    const ENGAGE_TICKS = Math.ceil(1.0 / DT);
+    for (let i = 0; i < ENGAGE_TICKS; i++) {
+      now += DT;
+      const brain = game.botBrains.get(bot.id);
+      if (brain) brain(bot, DT, now);
+      if (mgr.getBrainState(bot.id) === 'engage') break;
+    }
+
+    // Verify bot is now in engage state.
+    expect(mgr.getBrainState(bot.id)).toBe('engage');
+
+    // Phase 2: smoke all segments → bot should stop seeing the target.
+    mgr.setSmokeQuery(() => true);
+
+    // Run SIGHT_LOSE_TIME (1.5 s) + a margin so the engage → hunt transition fires.
+    const LOSE_TICKS = Math.ceil(2.0 / DT);
+    for (let i = 0; i < LOSE_TICKS; i++) {
+      now += DT;
+      const brain = game.botBrains.get(bot.id);
+      if (brain) brain(bot, DT, now);
+    }
+
+    const state = mgr.getBrainState(bot.id);
+    // Bot should have transitioned to hunt (chasing last-known-pos) or objective.
+    expect(state === 'hunt' || state === 'objective').toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Flash blindness
+// ---------------------------------------------------------------------------
+
+describe('Flash blindness', () => {
+  /**
+   * Place a CT bot in open mid, facing a T enemy 5 m ahead (same verified
+   * positions as smoke tests). Enemy health = 9999 so it survives being shot.
+   * The player (T) is kept alive so the game phase doesn't flip to roundEnd.
+   */
+  function setupFlashScenario(game: Game) {
+    const bot = game.combatants.find(c => c.team === 'CT' && !c.isPlayer && c.alive)!;
+    bot.inventory.primary    = makeWeaponState(WEAPONS.m4a4);
+    bot.inventory.activeSlot = 'primary';
+    bot.pos    = { x: 0, y: 0, z: -28 };
+    bot.yaw    = 0;
+    bot.onGround = true;
+
+    const enemy = game.combatants.find(c => c.team === 'T' && !c.isPlayer && c.alive)!;
+    enemy.pos    = { x: 0, y: 0.375, z: -33 };
+    enemy.alive  = true;
+    enemy.health = 9999; // unkillable — prevents round-end
+    enemy.onGround = true;
+
+    // Kill only other bots; keep the player alive to hold the game in 'live'.
+    for (const c of game.combatants) {
+      if (c !== bot && c !== enemy && !c.isPlayer) { c.alive = false; c.health = 0; }
+    }
+    return { bot, enemy };
+  }
+
+  /**
+   * Drive only the named bot's brain at 128 Hz until it enters 'engage', or
+   * until maxMs elapses. Returns the final now value.
+   */
+  function tickUntilEngage(game: Game, mgr: BotManager, bot: Combatant, startNow: number, maxMs = 1500): number {
+    const DT = 1 / 128;
+    let now = startNow;
+    const maxTicks = Math.ceil((maxMs / 1000) / DT);
+    for (let i = 0; i < maxTicks; i++) {
+      now += DT;
+      const brain = game.botBrains.get(bot.id);
+      if (brain) brain(bot, DT, now);
+      if (mgr.getBrainState(bot.id) === 'engage') break;
+    }
+    return now;
+  }
+
+  test('full blind (intensity 0.9): target dropped, no fire intent while blind', () => {
+    const { game, mgr } = freshSetup({ playerTeam: 'T', difficulty: 'hard' });
+    let now = advanceFreeze(game);
+    const { bot, enemy } = setupFlashScenario(game);
+
+    // Let the bot acquire the enemy and enter engage state.
+    now = tickUntilEngage(game, mgr, bot, now);
+    expect(mgr.getBrainState(bot.id)).toBe('engage');
+
+    // Apply full blindness: 2 s from now.
+    const blindEnd = now + 2.0;
+    bot.blindUntil     = blindEnd;
+    bot.blindIntensity = 0.9;
+
+    const initHealth = enemy.health;
+    let shotWhileBlind = false;
+    const unsub = gameEvents.on('shot', (ev) => {
+      if (ev.shooter.id === bot.id) shotWhileBlind = true;
+    });
+
+    try {
+      // Tick for 1 s (still blind: blindEnd = now+2).
+      const DT = 1 / 128;
+      const BLIND_TICKS = Math.ceil(1.0 / DT);
+      for (let i = 0; i < BLIND_TICKS; i++) {
+        now += DT;
+        const brain = game.botBrains.get(bot.id);
+        if (brain) brain(bot, DT, now);
+      }
+
+      // While blind: target must be null, no shots fired.
+      expect(mgr.getBrainTarget(bot.id) ?? null).toBeNull();
+      expect(shotWhileBlind).toBe(false);
+      expect(enemy.health).toBe(initHealth);
+
+      // State must not be engage (target was dropped).
+      const stateWhileBlind = mgr.getBrainState(bot.id);
+      expect(stateWhileBlind).not.toBe('engage');
+    } finally {
+      unsub();
+    }
+  });
+
+  test('full blind: bot re-acquires and can fire after blindUntil passes', () => {
+    const { game, mgr } = freshSetup({ playerTeam: 'T', difficulty: 'hard' });
+    let now = advanceFreeze(game);
+    const { bot, enemy } = setupFlashScenario(game);
+
+    // Apply full blindness lasting 0.15 s (expires quickly).
+    bot.blindUntil     = now + 0.15;
+    bot.blindIntensity = 0.9;
+    // Set normal enemy health so we can confirm a hit.
+    enemy.health = 100;
+
+    const initHealth = enemy.health;
+    const DT = 1 / 128;
+    // Tick for 3 s: blind ends at +0.15 s, reaction fires at ~+0.37 s.
+    const TICKS = Math.ceil(3.0 / DT);
+    for (let i = 0; i < TICKS; i++) {
+      now += DT;
+      const brain = game.botBrains.get(bot.id);
+      if (brain) brain(bot, DT, now);
+      if (enemy.health < initHealth) break;
+    }
+
+    // Health should have dropped after blindness expired and reaction window passed.
+    expect(enemy.health).toBeLessThan(initHealth);
+  });
+
+  test('partial blind (intensity 0.4): target is kept, aim error is scaled', () => {
+    const { game, mgr } = freshSetup({ playerTeam: 'T', difficulty: 'hard' });
+    let now = advanceFreeze(game);
+    const { bot } = setupFlashScenario(game);
+
+    // Drive bot to engage state.
+    now = tickUntilEngage(game, mgr, bot, now);
+    expect(mgr.getBrainState(bot.id)).toBe('engage');
+
+    const baseAimError = mgr.getBrainAimErrorDeg(bot.id) ?? 0;
+
+    // Apply partial blindness (intensity < 0.6).
+    bot.blindUntil     = now + 5.0; // won't expire during test
+    bot.blindIntensity = 0.4;
+
+    // Tick for 0.4 s to trigger an aim-error resample (AIM_ERROR_RESAMPLE = 0.25 s).
+    const DT = 1 / 128;
+    const PARTIAL_TICKS = Math.ceil(0.4 / DT);
+    for (let i = 0; i < PARTIAL_TICKS; i++) {
+      now += DT;
+      const brain = game.botBrains.get(bot.id);
+      if (brain) brain(bot, DT, now);
+    }
+
+    // Target should still be held (partial blind intensity < 0.6 does not drop target).
+    expect(mgr.getBrainTarget(bot.id)).not.toBeNull();
+
+    // Aim error should be scaled up: base * (1 + 3*0.4) = base * 2.2.
+    const scaledAimError = mgr.getBrainAimErrorDeg(bot.id) ?? 0;
+    expect(scaledAimError).toBeGreaterThan(baseAimError);
+  });
+});

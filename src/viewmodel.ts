@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import type { Vec3 } from './types';
+import type { Vec3, GrenadeType } from './types';
 
 // ---------------------------------------------------------------------------
 // Weapon ID type (union of all weapon ids from constants.ts WEAPONS table)
@@ -244,6 +244,37 @@ const DEFAULT_TUNING: WeaponTuning = {
 };
 
 // ---------------------------------------------------------------------------
+// Grenade procedural mesh builders (lazy, pooled once per type)
+// ---------------------------------------------------------------------------
+
+function buildGrenadeHE(): THREE.Group {
+  const g = new THREE.Group();
+  // Olive rounded box (approximate with a sphere-ish box)
+  g.add(box(0.055, 0.07, 0.07, 0x556b2f, 0, 0, 0));
+  // Safety lever nub
+  g.add(box(0.016, 0.016, 0.022, 0x3a3a2a, 0.035, 0.01, -0.02));
+  return g;
+}
+
+function buildGrenadeFlash(): THREE.Group {
+  const g = new THREE.Group();
+  // Light gray cylinder approximated with a thin taller box
+  g.add(box(0.05, 0.09, 0.05, 0xd0d0d0, 0, 0, 0));
+  // Black safety pin top
+  g.add(box(0.012, 0.012, 0.012, 0x222222, 0, 0.052, 0));
+  return g;
+}
+
+function buildGrenadeSmoke(): THREE.Group {
+  const g = new THREE.Group();
+  // Blue-gray cylinder — taller than flash
+  g.add(box(0.05, 0.11, 0.05, 0x7090a0, 0, 0, 0));
+  // Green safety ring marker
+  g.add(box(0.056, 0.014, 0.056, 0x3a7a3a, 0, -0.03, 0));
+  return g;
+}
+
+// ---------------------------------------------------------------------------
 // Animation state
 // ---------------------------------------------------------------------------
 
@@ -334,6 +365,12 @@ export class ViewModel {
   /** The currently active procedural mesh group */
   private _proceduralMesh: THREE.Group | null = null;
 
+  /** Lazily-built grenade meshes, keyed by type — built once, reused. */
+  private _grenadeMeshes: Partial<Record<GrenadeType, THREE.Group>> = {};
+
+  /** Currently displayed grenade group (non-null while grenade is equipped). */
+  private _activeGrenade: THREE.Group | null = null;
+
   constructor(camera: THREE.Camera) {
     this._camera = camera;
     this._group  = new THREE.Group();
@@ -387,6 +424,77 @@ export class ViewModel {
   setVisible(v: boolean): void {
     this._visible = v;
     this._group.visible = v;
+  }
+
+  /**
+   * Show a procedural grenade mesh in the hand area (bob/sway still apply via
+   * the shared anchor group).  Pass null to dismiss the grenade and restore the
+   * current weapon visual.
+   *
+   * Integration MUST call this:
+   *  - setGrenadeView(type)  immediately after updateGrenadeEquip sets equippedGrenade
+   *  - setGrenadeView(null)  after updateGrenadeEquip clears equippedGrenade (throw, cancel, slot switch)
+   */
+  setGrenadeView(type: GrenadeType | null): void {
+    if (type !== null) {
+      // Hide current weapon visual without destroying it.
+      if (this._activeModel !== null) {
+        this._activeModel.visible = false;
+      }
+      if (this._proceduralMesh !== null) {
+        this._proceduralMesh.visible = false;
+      }
+
+      // Detach previous grenade if switching types.
+      if (this._activeGrenade !== null) {
+        this._group.remove(this._activeGrenade);
+        this._activeGrenade = null;
+      }
+
+      // Lazily build grenade mesh.
+      let grenadeMesh = this._grenadeMeshes[type];
+      if (grenadeMesh === undefined) {
+        switch (type) {
+          case 'he':    grenadeMesh = buildGrenadeHE();    break;
+          case 'flash': grenadeMesh = buildGrenadeFlash(); break;
+          case 'smoke': grenadeMesh = buildGrenadeSmoke(); break;
+        }
+        this._grenadeMeshes[type] = grenadeMesh;
+      }
+
+      this._group.add(grenadeMesh);
+      this._activeGrenade = grenadeMesh;
+
+      // Reset switch raise so grenade swings up nicely.
+      this._anim.switchTimer = 0.2;
+    } else {
+      // Remove grenade mesh from anchor.
+      if (this._activeGrenade !== null) {
+        this._group.remove(this._activeGrenade);
+        this._activeGrenade = null;
+      }
+
+      // Restore weapon visual.
+      if (this._activeModel !== null) {
+        this._activeModel.visible = true;
+      }
+      if (this._proceduralMesh !== null) {
+        this._proceduralMesh.visible = true;
+      }
+
+      // Trigger raise animation on restore.
+      this._anim.switchTimer = 0.2;
+    }
+  }
+
+  /**
+   * Trigger a quick forward-kick on the anchor (same mechanism as onFire) to
+   * provide throw feedback.  Integration calls this when a ThrowRequest is returned
+   * by updateGrenadeEquip.
+   */
+  playThrowAnim(_now: number): void {
+    this._anim.kickZ     = 0.08;
+    this._anim.kickPitch = 0.07;
   }
 
   getMuzzleWorldPos(out?: Vec3): Vec3 {
@@ -480,8 +588,8 @@ export class ViewModel {
   // ---------------------------------------------------------------------------
 
   /**
-   * Remove any existing weapon visual children (model or procedural).
-   * Always keeps the muzzle marker.
+   * Remove any existing weapon visual children (model or procedural) as well
+   * as any grenade overlay mesh.  Always keeps the muzzle marker.
    */
   private _removeWeaponVisuals(): void {
     while (this._group.children.length > 0) {
@@ -490,6 +598,7 @@ export class ViewModel {
     this._group.add(this._muzzle);
     this._activeModel = null;
     this._proceduralMesh = null;
+    this._activeGrenade = null;
   }
 
   /**

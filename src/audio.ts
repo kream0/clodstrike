@@ -518,6 +518,311 @@ export class GameAudio {
     src.start(now);
     src.stop(now + 0.1);
   }
+
+  // ---------------------------------------------------------------------------
+  // Grenade audio (appended — existing code untouched above)
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Short metallic tick on grenade bounce.  Volume is scaled by impact speed
+   * (speed ≥ 10 m/s → full gain; linear below that).
+   */
+  grenadeBounce(pos: Vec3, speed: number): void {
+    const ctx    = this._ctx;
+    const master = this._master;
+    if (!ctx || !master || !this._unlocked) return;
+
+    const vol = Math.min(1, speed / 10) * 0.22;
+    if (vol < 0.005) return;
+
+    const now    = ctx.currentTime;
+    const dur    = 0.06;
+    const bufLen = Math.ceil(ctx.sampleRate * dur);
+    const buffer = ctx.createBuffer(1, bufLen, ctx.sampleRate);
+    const data   = buffer.getChannelData(0);
+    for (let i = 0; i < bufLen; i++) data[i] = Math.random() * 2 - 1;
+
+    const src = ctx.createBufferSource();
+    src.buffer = buffer;
+
+    // Bandpass in the metallic clank range.
+    const bp = ctx.createBiquadFilter();
+    bp.type            = 'bandpass';
+    bp.frequency.value = 2200;
+    bp.Q.value         = 4;
+
+    // Short high-pass to cut low rumble.
+    const hp = ctx.createBiquadFilter();
+    hp.type            = 'highpass';
+    hp.frequency.value = 1400;
+
+    const gain = ctx.createGain();
+    gain.gain.setValueAtTime(vol, now);
+    gain.gain.exponentialRampToValueAtTime(0.001, now + dur);
+
+    src.connect(bp);
+    bp.connect(hp);
+
+    const panner = ctx.createPanner();
+    panner.panningModel  = 'HRTF';
+    panner.distanceModel = 'inverse';
+    panner.refDistance   = 5;
+    panner.maxDistance   = 40;
+    panner.positionX.setValueAtTime(pos.x, now);
+    panner.positionY.setValueAtTime(pos.y, now);
+    panner.positionZ.setValueAtTime(pos.z, now);
+
+    hp.connect(gain);
+    gain.connect(panner);
+    panner.connect(master);
+    src.start(now);
+    src.stop(now + dur + 0.02);
+  }
+
+  /**
+   * Player-local soft whoosh on throw.  No positional panning — the sound
+   * belongs to the player's own action.
+   */
+  grenadeThrowWhoosh(): void {
+    const ctx    = this._ctx;
+    const master = this._master;
+    if (!ctx || !master || !this._unlocked) return;
+
+    const now = ctx.currentTime;
+    const dur = 0.18;
+
+    const bufLen = Math.ceil(ctx.sampleRate * dur);
+    const buffer = ctx.createBuffer(1, bufLen, ctx.sampleRate);
+    const data   = buffer.getChannelData(0);
+    for (let i = 0; i < bufLen; i++) data[i] = Math.random() * 2 - 1;
+
+    const src = ctx.createBufferSource();
+    src.buffer = buffer;
+
+    const bp = ctx.createBiquadFilter();
+    bp.type            = 'bandpass';
+    bp.frequency.value = 800;
+    bp.Q.value         = 0.6;
+
+    const lp = ctx.createBiquadFilter();
+    lp.type            = 'lowpass';
+    lp.frequency.value = 1200;
+
+    const gain = ctx.createGain();
+    gain.gain.setValueAtTime(0.0, now);
+    gain.gain.linearRampToValueAtTime(0.12, now + 0.04);
+    gain.gain.exponentialRampToValueAtTime(0.001, now + dur);
+
+    src.connect(bp);
+    bp.connect(lp);
+    lp.connect(gain);
+    gain.connect(master);
+    src.start(now);
+    src.stop(now + dur + 0.02);
+  }
+
+  /**
+   * HE grenade explosion — variant of bomb explosion, smaller/sharper
+   * (shorter dur, higher LP cutoff, lighter sub drop).
+   */
+  heBoom(pos: Vec3): void {
+    const ctx    = this._ctx;
+    const master = this._master;
+    if (!ctx || !master || !this._unlocked) return;
+
+    const now = ctx.currentTime;
+    const dur = 0.9;
+
+    const bufLen = Math.ceil(ctx.sampleRate * dur);
+    const buffer = ctx.createBuffer(1, bufLen, ctx.sampleRate);
+    const data   = buffer.getChannelData(0);
+    for (let i = 0; i < bufLen; i++) data[i] = Math.random() * 2 - 1;
+
+    const src = ctx.createBufferSource();
+    src.buffer = buffer;
+
+    const lp = ctx.createBiquadFilter();
+    lp.type            = 'lowpass';
+    lp.frequency.value = 600;   // sharper than bomb (350 Hz)
+
+    const gain = ctx.createGain();
+    gain.gain.setValueAtTime(0.85, now);
+    gain.gain.exponentialRampToValueAtTime(0.001, now + dur);
+
+    src.connect(lp);
+    lp.connect(gain);
+
+    const panner = ctx.createPanner();
+    panner.distanceModel = 'inverse';
+    panner.refDistance   = 12;
+    panner.maxDistance   = 120;
+    panner.positionX.setValueAtTime(pos.x, now);
+    panner.positionY.setValueAtTime(pos.y, now);
+    panner.positionZ.setValueAtTime(pos.z, now);
+    gain.connect(panner);
+    panner.connect(master);
+    src.start(now);
+    src.stop(now + dur + 0.05);
+
+    // Sub-sine drop — lighter than bomb.
+    const sub = ctx.createOscillator();
+    sub.type = 'sine';
+    sub.frequency.setValueAtTime(70, now);
+    sub.frequency.exponentialRampToValueAtTime(22, now + 0.45);
+    const subGain = ctx.createGain();
+    subGain.gain.setValueAtTime(0.35, now);
+    subGain.gain.exponentialRampToValueAtTime(0.001, now + 0.5);
+    sub.connect(subGain);
+    subGain.connect(master);
+    sub.start(now);
+    sub.stop(now + 0.55);
+  }
+
+  /**
+   * Flash-bang detonation pop — positional crack.
+   */
+  flashPop(pos: Vec3): void {
+    const ctx    = this._ctx;
+    const master = this._master;
+    if (!ctx || !master || !this._unlocked) return;
+
+    const now = ctx.currentTime;
+    const dur = 0.08;
+
+    const bufLen = Math.ceil(ctx.sampleRate * dur);
+    const buffer = ctx.createBuffer(1, bufLen, ctx.sampleRate);
+    const data   = buffer.getChannelData(0);
+    for (let i = 0; i < bufLen; i++) data[i] = Math.random() * 2 - 1;
+
+    const src = ctx.createBufferSource();
+    src.buffer = buffer;
+
+    const hp = ctx.createBiquadFilter();
+    hp.type            = 'highpass';
+    hp.frequency.value = 2500;
+
+    const lp = ctx.createBiquadFilter();
+    lp.type            = 'lowpass';
+    lp.frequency.value = 8000;
+
+    const gain = ctx.createGain();
+    gain.gain.setValueAtTime(0.55, now);
+    gain.gain.exponentialRampToValueAtTime(0.001, now + dur);
+
+    src.connect(hp);
+    hp.connect(lp);
+    lp.connect(gain);
+
+    const panner = ctx.createPanner();
+    panner.panningModel  = 'HRTF';
+    panner.distanceModel = 'inverse';
+    panner.refDistance   = 8;
+    panner.maxDistance   = 60;
+    panner.positionX.setValueAtTime(pos.x, now);
+    panner.positionY.setValueAtTime(pos.y, now);
+    panner.positionZ.setValueAtTime(pos.z, now);
+    gain.connect(panner);
+    panner.connect(master);
+    src.start(now);
+    src.stop(now + dur + 0.02);
+  }
+
+  /**
+   * Flash-bang tinnitus ring — local player-only high sine fading over
+   * (1 + 2*intensity) seconds.  Safe to call repeatedly; each call
+   * schedules its own independent envelope node and restarts naturally.
+   */
+  flashRing(intensity: number): void {
+    const ctx    = this._ctx;
+    const master = this._master;
+    if (!ctx || !master || !this._unlocked) return;
+
+    const dur = 1 + 2 * Math.max(0, Math.min(1, intensity));
+    const now = ctx.currentTime;
+
+    // Tinnitus sine.
+    const osc = ctx.createOscillator();
+    osc.type            = 'sine';
+    osc.frequency.value = 3200;
+
+    const gain = ctx.createGain();
+    gain.gain.setValueAtTime(0.35 * intensity, now);
+    gain.gain.exponentialRampToValueAtTime(0.001, now + dur);
+
+    osc.connect(gain);
+
+    // Cheap ambience duck: low-pass the master bus side-chain — keep simple,
+    // just add a short-lived LP on the master output path.
+    if (intensity > 0.3) {
+      const duck = ctx.createBiquadFilter();
+      duck.type            = 'lowpass';
+      duck.frequency.value = 600;
+      duck.frequency.setValueAtTime(600, now);
+      duck.frequency.exponentialRampToValueAtTime(20000, now + Math.min(dur, 1.5));
+
+      // Route tinnitus → duck → master; this creates an additive node not
+      // affecting existing audio routing — no global state mutation.
+      gain.connect(duck);
+      duck.connect(master);
+    } else {
+      gain.connect(master);
+    }
+
+    osc.start(now);
+    osc.stop(now + dur + 0.05);
+  }
+
+  /**
+   * Smoke grenade pop — soft hiss burst ~0.8 s, positional.
+   */
+  smokePop(pos: Vec3): void {
+    const ctx    = this._ctx;
+    const master = this._master;
+    if (!ctx || !master || !this._unlocked) return;
+
+    const now = ctx.currentTime;
+    const dur = 0.8;
+
+    const bufLen = Math.ceil(ctx.sampleRate * dur);
+    const buffer = ctx.createBuffer(1, bufLen, ctx.sampleRate);
+    const data   = buffer.getChannelData(0);
+    for (let i = 0; i < bufLen; i++) data[i] = Math.random() * 2 - 1;
+
+    const src = ctx.createBufferSource();
+    src.buffer = buffer;
+
+    // Narrow bandpass for a hiss character.
+    const bp = ctx.createBiquadFilter();
+    bp.type            = 'bandpass';
+    bp.frequency.value = 3000;
+    bp.Q.value         = 0.5;
+
+    const lp = ctx.createBiquadFilter();
+    lp.type            = 'lowpass';
+    lp.frequency.value = 5000;
+
+    const gain = ctx.createGain();
+    // Soft attack then slow fade.
+    gain.gain.setValueAtTime(0.0, now);
+    gain.gain.linearRampToValueAtTime(0.28, now + 0.05);
+    gain.gain.exponentialRampToValueAtTime(0.001, now + dur);
+
+    src.connect(bp);
+    bp.connect(lp);
+    lp.connect(gain);
+
+    const panner = ctx.createPanner();
+    panner.distanceModel = 'inverse';
+    panner.refDistance   = 6;
+    panner.maxDistance   = 50;
+    panner.positionX.setValueAtTime(pos.x, now);
+    panner.positionY.setValueAtTime(pos.y, now);
+    panner.positionZ.setValueAtTime(pos.z, now);
+    gain.connect(panner);
+    panner.connect(master);
+    src.start(now);
+    src.stop(now + dur + 0.05);
+  }
 }
 
 export const audio = new GameAudio();
