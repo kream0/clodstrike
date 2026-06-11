@@ -135,7 +135,7 @@ Every agent prompt must include:
 
 ## Known gotchas (read this before debugging)
 
-- **`clock.now` vs `performance.now()`.** This is the single most common bug class. Game-time `clock.now` does not advance during freeze, pause, or menu phases, and resets on restart. Any timer set using `performance.now()` will drift by round 2. `hud.ts` gets game-time via the `hud.getNow` hook wired in `main.ts` — do not remove it.
+- **`clock.now` vs `performance.now()`.** This is the single most common bug class. Game-time `clock.now` does not advance during freeze, pause, or menu phases (it is monotonic across match restarts — never reset — but never assume that: guard any cached timestamp against going stale across phase/visibility transitions). Any timer set using `performance.now()` will drift by round 2. `hud.ts` gets game-time via the `hud.getNow` hook wired in `main.ts` — do not remove it.
 - **Semi-auto / scope input edges must fire on ONE tick per frame.** `mousePressed` and `mouse2Pressed` are edge flags (rising edge this frame). They must be captured before the fixed-step loop and fed only to the first tick via the `edgesConsumed` flag. Catch-up ticks must not duplicate shots or scope toggles.
 - **Pointer lock requires a user gesture.** `requestPointerLock()` only works inside a synchronous click/keypress handler. Don't `await` before calling it. Pointer-lock loss while in-game auto-pauses; re-locking unpauses.
 - **WebAudio needs `audio.unlock()` on gesture.** Call it alongside `requestPointerLock()` on the first user interaction that starts the match.

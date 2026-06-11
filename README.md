@@ -122,7 +122,7 @@ Seven weapons across three slots with individually tuned stats:
 
 - **Open-licensed assets** — ✅ world textures · ✅ weapon models · ✅ character models (all shipped; credits in `assets/LICENSES.md`).
 - **UI improvement** — ✅ HUD/menu visual overhaul shipped.
-- **Performance** — ⏳ profile-guided pass: draw calls, shadow cost, pixel-ratio capping, render-cost instrumentation.
+- **Performance** — ✅ shipped: tightened shadow frustum (104×96 m fit), high-performance GPU preference, 1.5× pixel-ratio cap, scoreboard/radar update gating, draw-call + triangle counters in the F3 overlay.
 
 ### Short term
 
