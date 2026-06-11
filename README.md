@@ -52,8 +52,9 @@ Seven weapons across three slots with individually tuned stats:
 | M4A4 | Primary | $2 900 | CT rifle; auto, 666 RPM |
 | AWP | Primary | $4 750 | Scope + FOV zoom; 41 RPM |
 
-- **RPM gate, reload, recoil**: each weapon has an independent `nextFire` timer, a timed reload sequence, and a view-punch-and-recovery system (pitch + random yaw per shot, recovery in radians/second).
-- **Spread**: base accuracy + movement penalty + airborne penalty — all modelled as cone half-angles. Crouching and standing still narrows the cone.
+- **RPM gate, reload, recoil**: each weapon has an independent `nextFire` timer, a timed reload sequence, and a view-punch-and-recovery system (recovery in radians/second, suppressed while actively spraying so punch genuinely accumulates).
+- **Learnable spray patterns**: per-weapon recoil patterns (±15% jitter) — the AK-47 climbs hard for ~9 bullets then weaves right/left/right in the classic "7"; the M4A4 runs the same family at ~75% magnitude; pistols have short climbs; Deagle/AWP keep heavy single-shot punch. Pull down and counter-weave to control it, exactly like the real thing.
+- **Spread**: base accuracy + movement penalty + airborne penalty — all modelled as cone half-angles. Movement accuracy is thresholded CS2-style: accurate below ~34% of max speed (counter-strafing works), then a steep quadratic penalty — running rifle fire is unusable. Spray inaccuracy grows per consecutive shot. Crouching narrows the cone.
 - **Range falloff**: `damage × rangeModifier^(distance / 15 m)`. The AWP barely falls off at range; the Glock degrades fast.
 - **Hitgroups**: head (×4 damage, overridden to ×2.5 for AWP), body (×1), legs (×0.75, ignores armor). Armor absorbs to 0.775× for body shots (helmet required for head armor benefit). Armor durability tracked per combatant.
 - **AWP scope**: right-click zooms FOV from 73° to 30° with an overlay; sensitivity scales 0.4× scoped; hip-fire spread is severe (0.05 rad base).
