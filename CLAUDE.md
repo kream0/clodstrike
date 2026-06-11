@@ -7,8 +7,8 @@
 **This is a self-driving development project. The user should NEVER have to say "continue", "next", or "keep going".** Once given a general directive to develop the game, run the full feature lifecycle on a loop, autonomously, until told to stop:
 
 1. **Pick the next feature yourself** — consult the README "Upcoming features" roadmap and the shipped-features list; choose the highest-value, lowest-risk item that fits the existing architecture. The user has explicitly delegated this decision.
-2. **Create tasks** (`TaskCreate`) breaking the feature into the agent-workflow phases.
-3. **Execute via agents only** — follow the multi-agent workflow below (contract → implementers → integration → review → fix). **Use sonnet agents for all implementation and review; never haiku.** The lead may use opus for unusually gnarly subsystems (nav rewrites, multi-domain changes). The lead (you) NEVER edits feature code directly; delegate every code change to an implementer agent. (Lead-direct activities ARE allowed: git operations, CLAUDE.md/README edits, research, file reads, running the validation gate, smoke testing.)
+2. **Create tasks** (`TaskCreate`) — **ALWAYS, before any agent is spawned** — breaking the feature into the agent-workflow phases; keep statuses current with `TaskUpdate` as phases complete.
+3. **Execute via agents only — the lead architects, plans, and splits; agents do ALL the work.** Follow the multi-agent workflow below (contract → implementers → integration → review → fix). Model assignment per agent: **opus for very complex tasks** (frozen-contract `types.ts` redesigns, nav/AI rewrites, multi-domain integration, asset-pipeline foundations, animation systems); **sonnet for well-scoped, narrower tasks** (single-module implementation, HUD work, web research, tests, review, fixes); **NEVER haiku, for anything**. Apart from planning/architecture/supervision, the lead NEVER does the work itself — every code change, web-research sweep, or asset hunt is delegated to an agent; the lead writes the specs, supervises, and verifies. (Lead-direct activities ARE allowed: git operations, CLAUDE.md/README edits, targeted file reads for spec-writing, running the validation gate, smoke testing.)
 4. **Test** — run the validation gate (`bun run check && bun test && bun run build`), spawn a READ-ONLY sonnet reviewer, and smoke-test in browser where possible (state the pointer-lock caveat honestly when gameplay can't be driven).
 5. **Commit + push** — commit the feature directly to `main`, then a separate `docs:` commit for README updates, and `git push origin main`. NEVER branch, NEVER open a PR.
 6. **Update memory** — run the memorai session-end flow; derive 0–3 beliefs. NEVER stage `.memorai/`.
@@ -19,6 +19,14 @@
 - An action is irreversible/destructive or affects shared state beyond this repo (force-push, history rewrite, deleting remote data) and needs confirmation.
 
 Routine work (picking features, creating tasks, spawning agents, committing to main, pushing, doc updates, memory writes) proceeds WITHOUT asking.
+
+## Current long-term directive (user-issued 2026-06-11 — overrides README roadmap ordering)
+
+Work through this standing track cycle by cycle with the agent workflow until exhausted or superseded:
+
+1. **Open-licensed assets** — replace procedural visuals with real assets from open-asset sites (Kenney, ambientCG, Poly Haven, OpenGameArt, Quaternius, KayKit). Tiling textures for ALL world surfaces and props; 3D models for weapons (viewmodel) and characters (rigged/animated where possible). **License rule: CC0/public-domain strongly preferred; CC-BY acceptable only with attribution recorded.** Every asset's source URL + license goes in `assets/LICENSES.md`. Keep total added repo weight reasonable (target < ~30 MB).
+2. **UI improvement** — modernize HUD/menus (typography, layout, icons, readability, juice) while keeping the injected-CSS architecture of `hud.ts`.
+3. **Performance** — profile first, then optimize: draw calls, texture memory, shadow cost, pixel-ratio capping, pooling. Keep 128 Hz sim headroom and 60 fps render on mid hardware; the asset work above must not regress this.
 
 ---
 

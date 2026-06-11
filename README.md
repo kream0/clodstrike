@@ -109,6 +109,12 @@ Seven weapons across three slots with individually tuned stats:
 
 ## Upcoming features
 
+### Active track — visual & UX overhaul (user-directed)
+
+- **Open-licensed assets** — replace procedural visuals with open-licensed (CC0-first) assets: tiling textures for every world surface and prop, real low-poly models for weapons and characters. Sources: Kenney, ambientCG, Poly Haven, OpenGameArt, Quaternius, KayKit. Every asset's source + license recorded in `assets/LICENSES.md`.
+- **UI improvement** — modernized HUD and menus: typography, icons, layout, readability.
+- **Performance** — profile-guided: draw calls, texture memory, shadow cost, pixel-ratio capping.
+
 ### Short term
 
 - **Halftime side swap** — teams exchange CT/T at round 13; economy resets.
