@@ -2,6 +2,25 @@ import * as THREE from 'three';
 import type { Vec3 } from './types';
 
 // ---------------------------------------------------------------------------
+// Weapon ID type (union of all weapon ids from constants.ts WEAPONS table)
+// ---------------------------------------------------------------------------
+
+export type WeaponId = 'knife' | 'glock' | 'usp' | 'deagle' | 'ak47' | 'm4a4' | 'awp';
+
+// ---------------------------------------------------------------------------
+// Model path registry — 6 gun ids only (knife stays procedural)
+// ---------------------------------------------------------------------------
+
+export const WEAPON_MODEL_PATHS: Readonly<Partial<Record<WeaponId, string>>> = {
+  glock:  'models/weapons/glock.glb',
+  usp:    'models/weapons/usp.glb',
+  deagle: 'models/weapons/deagle.glb',
+  ak47:   'models/weapons/ak47.glb',
+  m4a4:   'models/weapons/m4a4.glb',
+  awp:    'models/weapons/awp.glb',
+} as const;
+
+// ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------
 
@@ -11,7 +30,7 @@ const GUN_DARK  = 0x1a1a1c;
 const GUN_WOOD  = 0x5a3a1a;
 
 // ---------------------------------------------------------------------------
-// Per-weapon mesh factories (box-based)
+// Per-weapon procedural mesh factories (box-based fallback)
 // ---------------------------------------------------------------------------
 
 function mat(color: number): THREE.MeshLambertMaterial {
@@ -74,6 +93,157 @@ function buildKnife(): THREE.Group {
 }
 
 // ---------------------------------------------------------------------------
+// Normalization support types + pure function (exported for tests)
+// ---------------------------------------------------------------------------
+
+export interface NormalizeConfig {
+  /** The approximate length (Z-extent) the weapon should appear as, in meters. */
+  targetLength: number;
+  /** World-space position offset to place the model at the procedural gun's location. */
+  gripOffset: { x: number; y: number; z: number };
+  /** Optional extra rotation (Euler, in radians) applied after axis alignment. */
+  extraRotation?: { x: number; y: number; z: number };
+}
+
+export interface NormalizeResult {
+  /** Uniform scale factor to apply to the model. */
+  scale: number;
+  /**
+   * Euler rotation (in radians) to align the model's longest bbox axis to -Z
+   * (barrel pointing away from camera). If the model is already aligned, this
+   * is the zero rotation.
+   */
+  rotation: THREE.Euler;
+  /** Position offset to apply. */
+  position: THREE.Vector3;
+}
+
+/**
+ * Compute scale, rotation, and position to normalise a loaded weapon model.
+ *
+ * Pure function — no THREE rendering state modified.
+ *
+ * @param bbox     - The world-space Box3 of the original unscaled model scene.
+ * @param config   - Per-weapon target configuration.
+ * @returns        - Scale, rotation, and position ready to apply to the model root.
+ */
+export function normalizeWeaponModel(
+  bbox: THREE.Box3,
+  config: NormalizeConfig,
+): NormalizeResult {
+  const size = new THREE.Vector3();
+  bbox.getSize(size);
+
+  // Guard against degenerate / zero bbox
+  const maxExtent = Math.max(size.x, size.y, size.z, 0.001);
+
+  const scale = config.targetLength / maxExtent;
+
+  // Determine which axis is the longest to align to -Z (barrel forward)
+  let rotY = 0;
+  let rotX = 0;
+  if (size.x >= size.y && size.x >= size.z) {
+    // Longest axis is X: rotate 90° around Y to point -Z
+    rotY = Math.PI / 2;
+  } else if (size.y >= size.x && size.y >= size.z) {
+    // Longest axis is Y: rotate -90° around X to point -Z
+    rotX = -Math.PI / 2;
+  }
+  // else longest axis is Z (already aligned) — identity rotation
+
+  let finalRotX = rotX;
+  let finalRotY = rotY;
+  let finalRotZ = 0;
+
+  if (config.extraRotation !== undefined) {
+    finalRotX += config.extraRotation.x;
+    finalRotY += config.extraRotation.y;
+    finalRotZ += config.extraRotation.z;
+  }
+
+  const rotation = new THREE.Euler(finalRotX, finalRotY, finalRotZ, 'XYZ');
+  const position = new THREE.Vector3(
+    config.gripOffset.x,
+    config.gripOffset.y,
+    config.gripOffset.z,
+  );
+
+  return { scale, rotation, position };
+}
+
+// ---------------------------------------------------------------------------
+// Per-weapon tuning table
+// Single place to tweak offsets/rotation/scale after playtesting.
+// ---------------------------------------------------------------------------
+
+interface WeaponTuning {
+  /** targetLength fed into normalizeWeaponModel (approximate Z-span in meters). */
+  targetLength: number;
+  /** Grip/anchor offset in viewmodel local space — fine-tune after playtesting. */
+  gripOffset: { x: number; y: number; z: number };
+  /** Extra rotation tweak in radians (XYZ Euler). */
+  extraRotation: { x: number; y: number; z: number };
+  /** Additional uniform scale multiplier applied on top of normalisation. */
+  scaleMult: number;
+  /** Muzzle Z offset (in viewmodel local space) for the muzzle flash anchor. */
+  muzzleZ: number;
+}
+
+const WEAPON_TUNING: Record<string, WeaponTuning> = {
+  glock: {
+    targetLength: 0.22,
+    gripOffset: { x: 0, y: 0, z: 0 },
+    extraRotation: { x: 0, y: 0, z: 0 },
+    scaleMult: 1.0,
+    muzzleZ: -0.14,
+  },
+  usp: {
+    targetLength: 0.22,
+    gripOffset: { x: 0, y: 0, z: 0 },
+    extraRotation: { x: 0, y: 0, z: 0 },
+    scaleMult: 1.0,
+    muzzleZ: -0.14,
+  },
+  deagle: {
+    targetLength: 0.22,
+    gripOffset: { x: 0, y: 0, z: 0 },
+    extraRotation: { x: 0, y: 0, z: 0 },
+    scaleMult: 1.1,
+    muzzleZ: -0.14,
+  },
+  ak47: {
+    targetLength: 0.38,
+    gripOffset: { x: 0, y: 0, z: 0 },
+    extraRotation: { x: 0, y: 0, z: 0 },
+    scaleMult: 1.0,
+    muzzleZ: -0.32,
+  },
+  m4a4: {
+    targetLength: 0.38,
+    gripOffset: { x: 0, y: 0, z: 0 },
+    extraRotation: { x: 0, y: 0, z: 0 },
+    scaleMult: 1.0,
+    muzzleZ: -0.32,
+  },
+  awp: {
+    targetLength: 0.60,
+    gripOffset: { x: 0, y: 0, z: 0 },
+    extraRotation: { x: 0, y: 0, z: 0 },
+    scaleMult: 1.0,
+    muzzleZ: -0.45,
+  },
+} as const satisfies Record<string, WeaponTuning>;
+
+// Fallback tuning for unknown ids (procedural fallback anyway)
+const DEFAULT_TUNING: WeaponTuning = {
+  targetLength: 0.22,
+  gripOffset: { x: 0, y: 0, z: 0 },
+  extraRotation: { x: 0, y: 0, z: 0 },
+  scaleMult: 1.0,
+  muzzleZ: -0.14,
+};
+
+// ---------------------------------------------------------------------------
 // Animation state
 // ---------------------------------------------------------------------------
 
@@ -109,6 +279,39 @@ function freshAnim(): AnimState {
 }
 
 // ---------------------------------------------------------------------------
+// Helper: apply viewmodel render properties to every mesh in a model
+// Mirrors the same settings the procedural box meshes rely on implicitly
+// (They're added to the camera's sub-graph which has no depth-clip issues,
+//  so no special renderOrder/layers tricks are needed — preserve that here.)
+// ---------------------------------------------------------------------------
+
+function applyViewmodelMaterial(obj: THREE.Object3D): void {
+  obj.traverse((child) => {
+    if (child instanceof THREE.Mesh) {
+      child.castShadow = false;
+      child.frustumCulled = false;
+      // Preserve GLB materials; just ensure depth behaves correctly
+      const mats = Array.isArray(child.material) ? child.material : [child.material];
+      for (const m of mats) {
+        if (m instanceof THREE.Material) {
+          m.depthTest = true;
+          m.depthWrite = true;
+        }
+      }
+    }
+  });
+}
+
+// Check if a scene has any SkinnedMesh nodes
+function hasSkinnedMesh(obj: THREE.Object3D): boolean {
+  let found = false;
+  obj.traverse((child) => {
+    if (child instanceof THREE.SkinnedMesh) found = true;
+  });
+  return found;
+}
+
+// ---------------------------------------------------------------------------
 // ViewModel class
 // ---------------------------------------------------------------------------
 
@@ -118,6 +321,18 @@ export class ViewModel {
   private _anim: AnimState;
   private _muzzle: THREE.Object3D;
   private _visible = true;
+
+  /** Current weapon id */
+  private _currentId = 'usp';
+
+  /** Preloaded models, set once by the integration layer */
+  private _models: Partial<Record<WeaponId, THREE.Object3D>> = {};
+
+  /** The currently active model node (GLB clone) or null when procedural */
+  private _activeModel: THREE.Object3D | null = null;
+
+  /** The currently active procedural mesh group */
+  private _proceduralMesh: THREE.Group | null = null;
 
   constructor(camera: THREE.Camera) {
     this._camera = camera;
@@ -133,40 +348,24 @@ export class ViewModel {
     this.setWeapon('usp');
   }
 
+  /**
+   * Called once (or whenever models are updated) after async GLB loading.
+   * Idempotent — safe to call before or after any setWeapon() call.
+   * If called after setWeapon(), it will immediately swap in the model for
+   * the current weapon if one is now available.
+   */
+  setWeaponModels(models: Partial<Record<WeaponId, THREE.Object3D>>): void {
+    this._models = models;
+    // Re-apply for the current weapon so the swap happens immediately
+    this._applyCurrentWeaponVisual(this._currentId);
+  }
+
   setWeapon(id: string): void {
-    // Clear old meshes (keep muzzle).
-    while (this._group.children.length > 0) {
-      this._group.remove(this._group.children[0]);
-    }
-    this._group.add(this._muzzle);
+    this._currentId = id;
 
-    let weaponMesh: THREE.Group;
-    let muzzleZ: number;
+    // _applyCurrentWeaponVisual removes old visuals and updates muzzle position.
+    this._applyCurrentWeaponVisual(id);
 
-    switch (id) {
-      case 'ak47':
-      case 'm4a4':
-        weaponMesh = buildRifle();
-        muzzleZ    = -0.32;
-        break;
-      case 'awp':
-        weaponMesh = buildAWP();
-        muzzleZ    = -0.45;
-        break;
-      case 'knife':
-        weaponMesh = buildKnife();
-        muzzleZ    = -0.18;
-        break;
-      default: // pistols
-        weaponMesh = buildPistol();
-        muzzleZ    = -0.14;
-        break;
-    }
-
-    // Muzzle position in viewmodel local space.
-    this._muzzle.position.set(0, 0.02, muzzleZ);
-
-    this._group.add(weaponMesh);
     this._group.position.copy(VM_OFFSET);
     this._group.rotation.set(0, 0, 0);
 
@@ -177,7 +376,7 @@ export class ViewModel {
 
   onFire(): void {
     this._anim.kickZ     = 0.06;
-    this._anim.kickPitch = 0.05; // radians, visually added to group rotation
+    this._anim.kickPitch = 0.05;
   }
 
   onReloadStart(duration: number): void {
@@ -274,5 +473,94 @@ export class ViewModel {
       a.swayX * 0.3,
       0,
     );
+  }
+
+  // ---------------------------------------------------------------------------
+  // Private helpers
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Remove any existing weapon visual children (model or procedural).
+   * Always keeps the muzzle marker.
+   */
+  private _removeWeaponVisuals(): void {
+    while (this._group.children.length > 0) {
+      this._group.remove(this._group.children[0]);
+    }
+    this._group.add(this._muzzle);
+    this._activeModel = null;
+    this._proceduralMesh = null;
+  }
+
+  /**
+   * Attach either a normalized GLB clone or a procedural mesh for the given
+   * weapon id. Picks GLB when available in _models; otherwise falls back to
+   * procedural boxes.
+   */
+  private _applyCurrentWeaponVisual(id: string): void {
+    // Remove previous visuals before reattaching
+    this._removeWeaponVisuals();
+
+    const tuning = WEAPON_TUNING[id] ?? DEFAULT_TUNING;
+    this._muzzle.position.set(0, 0.02, tuning.muzzleZ);
+
+    const weaponId = id as WeaponId;
+    const sourceModel = this._models[weaponId];
+
+    if (sourceModel !== undefined) {
+      // --- GLB path ---
+      // Clone the model. If any SkinnedMesh is present we need SkeletonUtils;
+      // these flat-gun packs have no skinned meshes, so .clone(true) suffices.
+      // (Check is performed defensively; will warn in console if bones found.)
+      if (hasSkinnedMesh(sourceModel)) {
+        console.warn(
+          `[viewmodel] SkinnedMesh found in ${id} model — shallow clone used; ` +
+          'bones may not animate correctly. Consider importing SkeletonUtils.clone().',
+        );
+      }
+      const modelClone: THREE.Object3D = sourceModel.clone(true);
+
+      // Compute normalization
+      const bbox = new THREE.Box3().setFromObject(sourceModel);
+      const normResult = normalizeWeaponModel(bbox, {
+        targetLength: tuning.targetLength,
+        gripOffset: tuning.gripOffset,
+        extraRotation: tuning.extraRotation,
+      });
+
+      // Apply scale + scaleMult
+      const finalScale = normResult.scale * tuning.scaleMult;
+      modelClone.scale.setScalar(finalScale);
+      modelClone.rotation.copy(normResult.rotation);
+      modelClone.position.copy(normResult.position);
+
+      // Apply viewmodel render settings to every child mesh
+      applyViewmodelMaterial(modelClone);
+
+      this._group.add(modelClone);
+      this._activeModel = modelClone;
+    } else {
+      // --- Procedural fallback ---
+      let weaponMesh: THREE.Group;
+
+      switch (id) {
+        case 'ak47':
+        case 'm4a4':
+          weaponMesh = buildRifle();
+          break;
+        case 'awp':
+          weaponMesh = buildAWP();
+          break;
+        case 'knife':
+          weaponMesh = buildKnife();
+          break;
+        default:
+          weaponMesh = buildPistol();
+          break;
+      }
+
+      this._group.add(weaponMesh);
+      this._proceduralMesh = weaponMesh;
+    }
   }
 }

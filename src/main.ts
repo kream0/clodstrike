@@ -14,6 +14,8 @@ import { gameEvents } from './combat';
 import type { ShotResult } from './combat';
 import { createCharacterMesh, updateCharacterMesh } from './characters';
 import { ViewModel } from './viewmodel';
+import type { WeaponId } from './viewmodel';
+import { WEAPON_MODEL_PATHS } from './viewmodel';
 import { Effects } from './effects';
 import { audio } from './audio';
 import { Game } from './game';
@@ -21,6 +23,12 @@ import type { MatchOptions } from './game';
 import { HUD } from './hud';
 import { NavGrid } from './bots/nav';
 import { BotManager } from './bots/bot';
+import {
+  loadAllTextures,
+  loadAllNormalTextures,
+  loadGLB,
+} from './assets';
+import type { LoadedTextures, TextureSlot } from './assets';
 
 // ---------------------------------------------------------------------------
 // Game-time clock (seconds) — advanced by fixed-step simulation.
@@ -83,8 +91,104 @@ function createCombatant(id: number, name: string, team: Team, isPlayer: boolean
 // Bootstrap
 // ---------------------------------------------------------------------------
 
-function boot(): void {
-  // --- Renderer ---
+// ---------------------------------------------------------------------------
+// Loading overlay helpers
+// ---------------------------------------------------------------------------
+
+const TOTAL_ASSETS = 22; // 8 color textures + 8 normals + 6 GLBs
+
+function createLoadingOverlay(): {
+  overlay: HTMLDivElement;
+  setProgress: (loaded: number) => void;
+  remove: () => void;
+} {
+  const overlay = document.createElement('div');
+  Object.assign(overlay.style, {
+    position:       'fixed',
+    inset:          '0',
+    background:     '#0a0a0a',
+    display:        'flex',
+    flexDirection:  'column',
+    alignItems:     'center',
+    justifyContent: 'center',
+    zIndex:         '9999',
+    fontFamily:     'sans-serif',
+    transition:     'opacity 0.15s ease',
+    opacity:        '1',
+  });
+
+  const title = document.createElement('div');
+  title.textContent = 'CLODSTRIKE';
+  Object.assign(title.style, {
+    color:         '#c9a06a',
+    fontSize:      '36px',
+    fontWeight:    'bold',
+    letterSpacing: '0.25em',
+    marginBottom:  '16px',
+  });
+
+  const subtitle = document.createElement('div');
+  subtitle.textContent = 'loading assets…';
+  Object.assign(subtitle.style, {
+    color:         '#888888',
+    fontSize:      '14px',
+    marginBottom:  '20px',
+    letterSpacing: '0.05em',
+  });
+
+  const barWrap = document.createElement('div');
+  Object.assign(barWrap.style, {
+    width:           '260px',
+    height:          '3px',
+    background:      '#222222',
+    borderRadius:    '2px',
+    overflow:        'hidden',
+    marginBottom:    '10px',
+  });
+
+  const barFill = document.createElement('div');
+  Object.assign(barFill.style, {
+    height:          '100%',
+    width:           '0%',
+    background:      '#c9a06a',
+    borderRadius:    '2px',
+    transition:      'width 0.1s linear',
+  });
+  barWrap.appendChild(barFill);
+
+  const countLabel = document.createElement('div');
+  countLabel.textContent = `0 / ${TOTAL_ASSETS}`;
+  Object.assign(countLabel.style, {
+    color:     '#666666',
+    fontSize:  '12px',
+  });
+
+  overlay.appendChild(title);
+  overlay.appendChild(subtitle);
+  overlay.appendChild(barWrap);
+  overlay.appendChild(countLabel);
+  document.body.appendChild(overlay);
+
+  function setProgress(loaded: number): void {
+    const pct = Math.min(loaded / TOTAL_ASSETS, 1) * 100;
+    barFill.style.width = `${pct}%`;
+    countLabel.textContent = `${loaded} / ${TOTAL_ASSETS}`;
+  }
+
+  function remove(): void {
+    overlay.style.opacity = '0';
+    setTimeout(() => {
+      if (overlay.parentNode) overlay.parentNode.removeChild(overlay);
+    }, 150);
+  }
+
+  return { overlay, setProgress, remove };
+}
+
+async function boot(): Promise<void> {
+  const { setProgress, remove: removeOverlay } = createLoadingOverlay();
+
+  // --- Renderer (created early so anisotropy cap is available) ---
   const renderer = new THREE.WebGLRenderer({ antialias: true });
   renderer.shadowMap.enabled = true;
   renderer.shadowMap.type    = THREE.PCFSoftShadowMap;
@@ -95,12 +199,91 @@ function boot(): void {
   if (!app) throw new Error('Missing #app element');
   app.appendChild(renderer.domElement);
 
+  // ---------------------------------------------------------------------------
+  // Asset loading — three groups in parallel, each independent
+  // Total progress units: 8 color + 8 normals + 6 GLBs = 22
+  // ---------------------------------------------------------------------------
+  let loadedCount = 0;
+  function onAssetLoaded(n: number): void {
+    loadedCount += n;
+    setProgress(loadedCount);
+  }
+
+  let textures: LoadedTextures | undefined;
+  let normals: Partial<Record<TextureSlot, THREE.Texture>> | undefined;
+  let loadedModels: Partial<Record<WeaponId, THREE.Object3D>> = {};
+
+  try {
+    const [texResult, normResult, modelResults] = await Promise.allSettled([
+      // Group 1: 8 color textures — callback fires once per loaded texture
+      loadAllTextures((_loaded, _total) => {
+        onAssetLoaded(1);
+      }),
+      // Group 2: 8 normal textures
+      loadAllNormalTextures((_loaded, _total) => {
+        onAssetLoaded(1);
+      }),
+      // Group 3: 6 weapon GLBs — each settles independently
+      Promise.allSettled(
+        (Object.entries(WEAPON_MODEL_PATHS) as [WeaponId, string][]).map(
+          async ([id, relPath]) => {
+            const gltf = await loadGLB(relPath);
+            onAssetLoaded(1);
+            return [id, gltf.scene] as [WeaponId, THREE.Object3D];
+          },
+        ),
+      ),
+    ]);
+
+    // --- Color textures ---
+    if (texResult.status === 'fulfilled') {
+      textures = texResult.value;
+      // Apply anisotropy now that renderer exists (must happen before first render)
+      const aniso = Math.min(8, renderer.capabilities.getMaxAnisotropy());
+      for (const tex of Object.values(textures)) {
+        tex.anisotropy = aniso;
+        tex.needsUpdate = true;
+      }
+    } else {
+      console.warn('[boot] Color textures failed to load — using legacy colors:', texResult.reason);
+    }
+
+    // --- Normal textures ---
+    if (normResult.status === 'fulfilled') {
+      normals = normResult.value;
+      const aniso = Math.min(8, renderer.capabilities.getMaxAnisotropy());
+      for (const tex of Object.values(normals)) {
+        if (tex !== undefined) {
+          tex.anisotropy = aniso;
+          tex.needsUpdate = true;
+        }
+      }
+    } else {
+      console.warn('[boot] Normal textures failed to load — no normals:', normResult.reason);
+    }
+
+    // --- Weapon GLBs ---
+    if (modelResults.status === 'fulfilled') {
+      for (const entry of modelResults.value) {
+        if (entry.status === 'fulfilled') {
+          const [id, obj] = entry.value;
+          loadedModels[id] = obj;
+        } else {
+          console.warn('[boot] Weapon GLB failed to load:', entry.reason);
+        }
+      }
+    }
+  } finally {
+    // Overlay is always removed — even on catastrophic failure
+    removeOverlay();
+  }
+
   // --- Scene + environment ---
   const scene = new THREE.Scene();
   setupEnvironment(scene);
 
-  // --- Map ---
-  const { group } = buildMapScene(DUST2);
+  // --- Map (with optional textures + normals) ---
+  const { group } = buildMapScene(DUST2, textures, normals);
   scene.add(group);
 
   // --- World (collision) ---
@@ -138,6 +321,7 @@ function boot(): void {
 
   // --- ViewModel ---
   const viewmodel = new ViewModel(camera);
+  viewmodel.setWeaponModels(loadedModels);
   viewmodel.setWeapon(player.inventory.secondary?.def.id ?? 'usp');
 
   // --- BotManager (created/replaced on each match start) ---
@@ -673,7 +857,7 @@ function boot(): void {
 
 // Boot after DOM ready.
 if (document.readyState === 'loading') {
-  document.addEventListener('DOMContentLoaded', boot);
+  document.addEventListener('DOMContentLoaded', () => { void boot(); });
 } else {
-  boot();
+  void boot();
 }

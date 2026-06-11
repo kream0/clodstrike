@@ -1,5 +1,6 @@
 import * as THREE from 'three';
 import type { MapData, CellLegend } from './types';
+import type { LoadedTextures, TextureSlot } from './assets';
 
 // ---- Material palette -------------------------------------------------------
 
@@ -13,17 +14,116 @@ const MAT_COLORS: Record<string, number> = {
   dark:       0x6e6253,
 };
 
-function createMaterial(colorHex: number, vertexColors = false): THREE.MeshLambertMaterial {
-  return new THREE.MeshLambertMaterial({ color: colorHex, vertexColors });
+// ---- Texture mapping --------------------------------------------------------
+
+/** Tile sizes in meters per texture repeat (world-space planar UV scale). */
+const TILE_SIZES: Record<TextureSlot, number> = {
+  ground_sand:   3.5,
+  wall_sandstone: 3.0,
+  wall_plaster:   3.0,
+  floor_stone:    1.8,
+  concrete:       3.0,
+  wood:           2.0,
+  metal:          2.0,
+  fabric:         1.5,
+};
+
+/** Surface kind for bucketing — determines UV axis and texture choice. */
+type SurfaceKind = 'wall' | 'floor' | 'ceil';
+
+/**
+ * matKey × kind → TextureSlot mapping.
+ * Wall/ceil distinction: walls get the vertical-surface texture;
+ * floors/ceils get the horizontal-surface texture.
+ */
+const TEX_MAP: Record<string, Partial<Record<SurfaceKind, TextureSlot>>> = {
+  sand:      { wall: 'wall_sandstone', floor: 'ground_sand',  ceil: 'concrete' },
+  sandLight: { wall: 'wall_plaster',   floor: 'ground_sand',  ceil: 'concrete' },
+  stone:     { wall: 'wall_sandstone', floor: 'floor_stone',  ceil: 'concrete' },
+  floor:     { wall: 'concrete',       floor: 'concrete',     ceil: 'concrete' },
+  dark:      { wall: 'concrete',       floor: 'concrete',     ceil: 'concrete' },
+  wood:      { wall: 'wood',           floor: 'wood',         ceil: 'wood'     },
+  metal:     { wall: 'metal',          floor: 'metal',        ceil: 'metal'    },
+};
+
+/**
+ * Neutral per-slot tint colors (very light, so textures read correctly).
+ * These replace the strong hex colors in textured path.
+ */
+const TEX_TINT: Partial<Record<TextureSlot, number>> = {
+  ground_sand:   0xf0e8d8,
+  wall_sandstone: 0xf5ede0,
+  wall_plaster:   0xf8f0e8,
+  floor_stone:    0xe8e4e0,
+  concrete:       0xe0dcd8,
+  wood:           0xf0ead8,
+  metal:          0xe8ecf0,
+  fabric:         0xf0e8e0,
+};
+
+// ---- UV projection ----------------------------------------------------------
+
+/**
+ * World-space planar UV projection.
+ * Projects a world-space vertex (px,py,pz) onto a 2D UV plane based on the
+ * dominant axis of the face normal (nx,ny,nz), then scales by 1/tile.
+ *
+ * Rules:
+ *   |ny| dominant (top/bottom faces): uv = (x/tile, z/tile)
+ *   |nx| dominant (±X faces):         uv = (z/tile, y/tile)
+ *   else ±Z faces:                    uv = (x/tile, y/tile)
+ *
+ * This ensures tiling stays continuous across greedy-merged boxes at the
+ * same world position — any two boxes sharing a face edge will produce
+ * identical UV values at that shared world coordinate.
+ *
+ * @param px  vertex world X
+ * @param py  vertex world Y
+ * @param pz  vertex world Z
+ * @param nx  face normal X
+ * @param ny  face normal Y
+ * @param nz  face normal Z
+ * @param tile texture repeat in meters (meters per one full UV unit)
+ * @returns [u, v]
+ */
+export function projectUV(
+  px: number, py: number, pz: number,
+  nx: number, ny: number, nz: number,
+  tile: number,
+): [number, number] {
+  const ax = Math.abs(nx);
+  const ay = Math.abs(ny);
+  const az = Math.abs(nz);
+
+  if (ay >= ax && ay >= az) {
+    // Top / bottom face
+    return [px / tile, pz / tile];
+  } else if (ax >= az) {
+    // ±X side face
+    return [pz / tile, py / tile];
+  } else {
+    // ±Z side face
+    return [px / tile, py / tile];
+  }
 }
 
 // ---- Vertex-color tint helpers ----------------------------------------------
 
-/** Add subtle per-box vertex-color tint (×0.94–1.06) to a BoxGeometry. */
-function tintGeometry(geo: THREE.BoxGeometry): THREE.BufferGeometry {
+/**
+ * Add subtle per-box vertex-color tint (×0.94–1.06) to a BoxGeometry.
+ * In the textured path, tints are already near-white so they act as
+ * subtle AO variation without muddying the texture.
+ */
+function tintGeometry(geo: THREE.BufferGeometry, attenuate = false): THREE.BufferGeometry {
   const count = geo.attributes.position.count;
   const colors = new Float32Array(count * 3);
-  const t = 0.94 + Math.random() * 0.12; // 0.94 to 1.06
+  // Raw tint in [0.94, 1.06]
+  let t = 0.94 + Math.random() * 0.12;
+  if (attenuate) {
+    // In textured path: lerp strongly toward 1.0 so texture reads clearly.
+    // Result is in [0.988, 1.003] — virtually invisible, just mild AO haze.
+    t = 0.8 * 1.0 + 0.2 * t; // 0.8 * 1 + 0.2 * [0.94..1.06] = [0.988..1.012]
+  }
   for (let i = 0; i < count; i++) {
     colors[i * 3]     = t;
     colors[i * 3 + 1] = t;
@@ -33,22 +133,68 @@ function tintGeometry(geo: THREE.BoxGeometry): THREE.BufferGeometry {
   return geo;
 }
 
+// ---- World-space UV application ---------------------------------------------
+
+/**
+ * Rewrite the `uv` attribute of a geometry that has already been translated
+ * to world position (via geo.translate), using world-space planar projection.
+ * Must be called AFTER geo.translate() so vertex positions are in world space.
+ */
+function applyWorldUVs(geo: THREE.BufferGeometry, slot: TextureSlot): void {
+  const tile = TILE_SIZES[slot];
+  const pos = geo.attributes.position as THREE.BufferAttribute;
+  const nor = geo.attributes.normal   as THREE.BufferAttribute;
+  const count = pos.count;
+  const uvs = new Float32Array(count * 2);
+
+  for (let i = 0; i < count; i++) {
+    const px = pos.getX(i);
+    const py = pos.getY(i);
+    const pz = pos.getZ(i);
+    const nx = nor.getX(i);
+    const ny = nor.getY(i);
+    const nz = nor.getZ(i);
+    const [u, v] = projectUV(px, py, pz, nx, ny, nz, tile);
+    uvs[i * 2]     = u;
+    uvs[i * 2 + 1] = v;
+  }
+
+  geo.setAttribute('uv', new THREE.BufferAttribute(uvs, 2));
+}
+
 // ---- Scene row-merge builder ------------------------------------------------
 
 interface BoxSpec {
   cx: number; cy: number; cz: number;   // center
   sx: number; sy: number; sz: number;   // full extents
   matKey: string;
+  kind: SurfaceKind;
 }
 
-function buildBox(spec: BoxSpec): THREE.BufferGeometry {
+function buildBox(spec: BoxSpec, applyUVSlot?: TextureSlot): THREE.BufferGeometry {
   const geo = new THREE.BoxGeometry(spec.sx, spec.sy, spec.sz);
+  // Translate to world position BEFORE UV projection so vertex positions are world-space.
   geo.translate(spec.cx, spec.cy, spec.cz);
-  tintGeometry(geo);
+  if (applyUVSlot !== undefined) {
+    applyWorldUVs(geo, applyUVSlot);
+  }
+  tintGeometry(geo, applyUVSlot !== undefined);
   return geo;
 }
 
-export function buildMapScene(map: MapData): { group: THREE.Group } {
+/**
+ * Build the map scene geometry and materials.
+ *
+ * @param map     MapData to render (e.g. DUST2)
+ * @param textures Optional LoadedTextures. When provided, meshes use tiling world-UV textures.
+ *                 When omitted, falls back to existing vertex-color-only behavior (no textures).
+ * @param normals  Optional normal maps per slot. Requires textures to be provided.
+ */
+export function buildMapScene(
+  map: MapData,
+  textures?: LoadedTextures,
+  normals?: Partial<Record<TextureSlot, THREE.Texture>>,
+): { group: THREE.Group } {
   const group = new THREE.Group();
 
   const rows = map.grid.length;
@@ -62,12 +208,18 @@ export function buildMapScene(map: MapData): { group: THREE.Group } {
   const FLOOR_SLAB  = 0.5;  // floor slab thickness
   const CEIL_THICK  = 0.4;  // covered-ceiling slab thickness
 
-  // Collect BoxSpecs bucketed by material key.
-  const specsByMat = new Map<string, BoxSpec[]>();
+  // Textured path: bucket by `${matKey}|${kind}` for surface-aware texture selection.
+  // No-texture path: bucket by `${matKey}` (original behavior).
+  const specsByBucket = new Map<string, BoxSpec[]>();
+
+  function bucketKey(matKey: string, kind: SurfaceKind): string {
+    return textures ? `${matKey}|${kind}` : matKey;
+  }
 
   function addSpec(s: BoxSpec): void {
-    let arr = specsByMat.get(s.matKey);
-    if (!arr) { arr = []; specsByMat.set(s.matKey, arr); }
+    const key = bucketKey(s.matKey, s.kind);
+    let arr = specsByBucket.get(key);
+    if (!arr) { arr = []; specsByBucket.set(key, arr); }
     arr.push(s);
   }
 
@@ -83,7 +235,8 @@ export function buildMapScene(map: MapData): { group: THREE.Group } {
         const nc = col + dc;
         const nr = row + dr;
         if (nc < 0 || nc >= cols || nr < 0 || nr >= rows) continue;
-        const ch = map.grid[nr][nc];
+        const ch = map.grid[nr]?.[nc];
+        if (ch === undefined) continue;
         const leg = map.legend[ch];
         if (leg && !leg.wall) return true;
       }
@@ -94,9 +247,11 @@ export function buildMapScene(map: MapData): { group: THREE.Group } {
   // Process rows: greedy merge along row for consecutive cells with the same char.
   for (let row = 0; row < rows; row++) {
     const gridRow = map.grid[row];
+    if (gridRow === undefined) continue;
     let c = 0;
     while (c < cols) {
       const ch = gridRow[c];
+      if (ch === undefined) { c++; continue; }
       const leg: CellLegend | undefined = map.legend[ch];
       if (!leg) { c++; continue; }
 
@@ -120,12 +275,12 @@ export function buildMapScene(map: MapData): { group: THREE.Group } {
             const cellX = ox + cc * cs + cs / 2;
             const cellZ = oz + row * cs + cs / 2;
             const h = WALL_HEIGHT - WALL_BOTTOM;
-            addSpec({ cx: cellX, cy: (WALL_BOTTOM + WALL_HEIGHT) / 2, cz: cellZ, sx: cs, sy: h, sz: cs, matKey: 'sand' });
+            addSpec({ cx: cellX, cy: (WALL_BOTTOM + WALL_HEIGHT) / 2, cz: cellZ, sx: cs, sy: h, sz: cs, matKey: 'sand', kind: 'wall' });
           }
         } else {
           // Normal wall cell '#'.
           const h = WALL_HEIGHT - WALL_BOTTOM;
-          addSpec({ cx: centerX, cy: (WALL_BOTTOM + WALL_HEIGHT) / 2, cz: centerZ, sx: runW, sy: h, sz: cs, matKey });
+          addSpec({ cx: centerX, cy: (WALL_BOTTOM + WALL_HEIGHT) / 2, cz: centerZ, sx: runW, sy: h, sz: cs, matKey, kind: 'wall' });
         }
       } else {
         // Floor slab: top at leg.floor, thickness FLOOR_SLAB.
@@ -137,6 +292,7 @@ export function buildMapScene(map: MapData): { group: THREE.Group } {
           sy: FLOOR_SLAB,
           sz: cs,
           matKey,
+          kind: 'floor',
         });
 
         // Covered ceiling slab.
@@ -149,6 +305,7 @@ export function buildMapScene(map: MapData): { group: THREE.Group } {
             sy: CEIL_THICK,
             sz: cs,
             matKey: 'dark',
+            kind: 'ceil',
           });
         }
       }
@@ -157,14 +314,37 @@ export function buildMapScene(map: MapData): { group: THREE.Group } {
     }
   }
 
-  // Build merged meshes per material.
-  for (const [matKey, specs] of specsByMat) {
-    const color = MAT_COLORS[matKey] ?? 0xc9a06a;
-    const mat = createMaterial(color, true);
-    const geos = specs.map(buildBox);
+  // Build merged meshes per bucket.
+  for (const [bucketKey, specs] of specsByBucket) {
+    // Derive matKey from bucket key (either 'mat' or 'mat|kind').
+    const matKey = bucketKey.split('|')[0] ?? bucketKey;
 
-    // Synchronous merge via manual combination if mergeGeometries is unavailable at this point.
-    // We'll batch them into one using a simple loop approach.
+    let mat: THREE.MeshLambertMaterial;
+    let applyUVSlot: TextureSlot | undefined;
+
+    if (textures) {
+      // kind is only meaningful in the textured path where bucketKey is 'mat|kind'.
+      const kind = (bucketKey.split('|')[1] ?? 'floor') as SurfaceKind;
+      const slot: TextureSlot = TEX_MAP[matKey]?.[kind] ?? 'concrete';
+      applyUVSlot = slot;
+      const tex = textures[slot];
+      const tintHex = TEX_TINT[slot] ?? 0xffffff;
+      mat = new THREE.MeshLambertMaterial({
+        map: tex,
+        vertexColors: true,
+        color: tintHex,
+      });
+      // Apply normal map if available.
+      const normalTex = normals?.[slot];
+      if (normalTex !== undefined) {
+        mat.normalMap = normalTex;
+      }
+    } else {
+      const color = MAT_COLORS[matKey] ?? 0xc9a06a;
+      mat = createMaterial(color, true);
+    }
+
+    const geos = specs.map(s => buildBox(s, applyUVSlot));
     mergeAndAddMesh(group, geos, mat);
   }
 
@@ -173,16 +353,61 @@ export function buildMapScene(map: MapData): { group: THREE.Group } {
     const [px, py, pz] = prop.pos;
     const [sx, sy, sz] = prop.size;
     const matKey = prop.mat ?? 'wood';
-    const color  = MAT_COLORS[matKey] ?? MAT_COLORS.wood;
-    const propMat = createMaterial(color, true);
+    let propMat: THREE.MeshLambertMaterial;
+
+    if (textures) {
+      // Map prop kind/mat to a texture slot.
+      const slot = resolvePropSlot(prop.kind, matKey);
+      // Clone texture so we can set a different repeat independently.
+      const tex = textures[slot].clone();
+      tex.needsUpdate = true;
+      const tile = TILE_SIZES[slot];
+      // For box props use world repeat; for cylinders use a fixed repeat.
+      if (prop.kind === 'barrel') {
+        tex.repeat.set(sx / tile, sy / tile);
+      } else {
+        // Box props: world-UV repeat handled in geometry; set repeat (1,1) and
+        // let UVs do the work — but props are NOT merged, so we bake UVs directly.
+        tex.repeat.set(1, 1);
+      }
+      const tintHex = TEX_TINT[slot] ?? 0xffffff;
+      propMat = new THREE.MeshLambertMaterial({
+        map: tex,
+        vertexColors: true,
+        color: tintHex,
+      });
+      const normalTex = normals?.[slot];
+      if (normalTex !== undefined) {
+        propMat.normalMap = normalTex.clone();
+        propMat.normalMap.needsUpdate = true;
+      }
+    } else {
+      const color  = MAT_COLORS[matKey] ?? MAT_COLORS['wood'] ?? 0x8a6b46;
+      propMat = createMaterial(color, true);
+    }
 
     let geo: THREE.BufferGeometry;
     if (prop.kind === 'barrel') {
       geo = new THREE.CylinderGeometry(sx / 2, sx / 2, sy, 10);
     } else {
-      geo = new THREE.BoxGeometry(sx, sy, sz);
+      const boxGeo = new THREE.BoxGeometry(sx, sy, sz);
+      // For textured props, apply world-space UVs using the prop's world center.
+      if (textures) {
+        const slot = resolvePropSlot(prop.kind, matKey);
+        // Translate to world position first for accurate UV projection.
+        boxGeo.translate(px, py + sy / 2, pz);
+        applyWorldUVs(boxGeo, slot);
+        // Geometry is now at world pos; mesh.position stays at origin.
+        const mesh = new THREE.Mesh(boxGeo, propMat);
+        mesh.castShadow    = true;
+        mesh.receiveShadow = true;
+        tintGeometry(boxGeo, true);
+        group.add(mesh);
+        continue;
+      }
+      geo = boxGeo;
     }
-    tintGeometry(geo as THREE.BoxGeometry);
+    tintGeometry(geo, textures !== undefined);
 
     const mesh = new THREE.Mesh(geo, propMat);
     mesh.position.set(px, py + sy / 2, pz);
@@ -191,10 +416,25 @@ export function buildMapScene(map: MapData): { group: THREE.Group } {
     group.add(mesh);
   }
 
-  // Override prop material colors for special kinds.
-  // (Applied above but kept explicit here for clarity.)
-
   return { group };
+}
+
+/** Resolve a TextureSlot for a prop given its kind and matKey. */
+function resolvePropSlot(kind: MapPropKind, matKey: string): TextureSlot {
+  // Explicit kind overrides.
+  if (kind === 'sandbag') return 'fabric';
+  if (kind === 'car')     return 'metal';
+  // matKey fallback.
+  if (matKey === 'wood')  return 'wood';
+  if (matKey === 'metal') return 'metal';
+  return 'wood';
+}
+
+// Narrow prop kind type for internal use (mirrors MapProp.kind).
+type MapPropKind = 'crate' | 'door' | 'barrel' | 'plank' | 'block' | 'sandbag' | 'car';
+
+function createMaterial(colorHex: number, vertexColors = false): THREE.MeshLambertMaterial {
+  return new THREE.MeshLambertMaterial({ color: colorHex, vertexColors });
 }
 
 /**
@@ -208,8 +448,6 @@ function mergeAndAddMesh(
 ): void {
   if (geos.length === 0) return;
 
-  // Manual merge using THREE.BufferGeometryUtils-style attribute concatenation.
-  // This avoids async import issues entirely by doing it inline.
   try {
     const merged = manualMerge(geos);
     const mesh = new THREE.Mesh(merged, mat);

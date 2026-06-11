@@ -6,7 +6,7 @@
   "scripts": {
     "dev": "bun ./index.html",
     "check": "tsc --noEmit",
-    "build": "bun build ./index.html --outdir=dist",
+    "build": "rm -rf dist && bun build ./index.html --outdir=dist && bun scripts/copy-assets.ts",
     "test": "bun test"
   },
   "dependencies": {
