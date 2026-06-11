@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import type { Combatant, Inventory, Vec3, Team, WeaponDef, WeaponState, SpawnPoint } from './types';
+import type { Combatant, Inventory, Vec3, Team, WeaponDef, WeaponState, SpawnPoint, MatchStats } from './types';
 import { WEAPONS, ECONOMY, RULES, BOT_NAMES, BOT_DIFFICULTY, TEAM_COLORS, GRENADES } from './constants';
 import { DUST2 } from './maps/dust2';
 import type { World } from './world';
@@ -63,6 +63,41 @@ export function decideBuyStrategy(inp: BuyDecisionInput): BuyStrategy {
   }
 
   return 'eco';
+}
+
+/**
+ * Pick the round MVP from the combatants list using the following precedence:
+ * 1. CT wins + defuser is present → defuser wins MVP.
+ * 2. T wins + planter is present → planter wins MVP.
+ * 3. Otherwise: winning-team combatant with the most round-kills;
+ *    ties broken by lower id; if the top kill count is 0 → null.
+ *
+ * NOTE: defuser/planter snapshots are only set when those specific actions ended
+ * the round — so no team-alignment check is needed here.
+ */
+export function pickRoundMvp(
+  combatants: readonly Combatant[],
+  roundKills: ReadonlyMap<number, number>,
+  winner: Team,
+  planter: Combatant | null,
+  defuser: Combatant | null,
+): Combatant | null {
+  // Precedence 1: CT win with a defuser.
+  if (winner === 'CT' && defuser !== null) return defuser;
+  // Precedence 2: T win with a planter.
+  if (winner === 'T' && planter !== null) return planter;
+  // Precedence 3: most round-kills on the winning team.
+  let best: Combatant | null = null;
+  let bestKills = 0;
+  for (const c of combatants) {
+    if (c.team !== winner) continue;
+    const k = roundKills.get(c.id) ?? 0;
+    if (k > bestKills || (k === bestKills && best !== null && c.id < best.id)) {
+      best = c;
+      bestKills = k;
+    }
+  }
+  return bestKills > 0 ? best : null;
 }
 
 export interface MatchOptions {
@@ -206,12 +241,90 @@ export class Game {
   private _opts: MatchOptions | null = null;
   private _bombPlanted    = false; // track if bomb was planted this round (for T team bonus)
 
+  // ----- Match stats -----
+  // Per-combatant cumulative stats. Keys are Combatant.id.
+  // NOTE: the gameEvents bus is module-global. Tests construct multiple Game
+  // instances, so these handlers must only mutate THIS instance's own maps and
+  // must never throw for combatants not in this.combatants (statsFor is lazy).
+  private _stats: Map<number, MatchStats> = new Map();
+  private _roundKills: Map<number, number> = new Map();
+  private _roundPlanter: Combatant | null = null;
+  private _roundDefuser: Combatant | null = null;
+
   // Beep scheduling
   private _lastBeepAt = 0;
+
+  // Unsubscribe handles for the gameEvents listeners attached in the constructor.
+  // Stored so dispose() can cleanly detach them (used by tests / future
+  // multi-instance callers — production main.ts holds one Game for the app
+  // lifetime and never needs to call dispose()).
+  private _unsubKill:   (() => void) | null = null;
+  private _unsubDamage: (() => void) | null = null;
 
   constructor(world: World, scene: THREE.Scene | null = null) {
     this._world = world;
     this._scene = scene;
+
+    // Subscribe to combat events for stat accumulation.
+    // These handlers only mutate this instance's own maps; they are safe in
+    // multi-Game test environments because statsFor() creates entries lazily.
+    this._unsubKill = gameEvents.on('kill', (ev) => {
+      const attacker = ev.attacker;
+      if (attacker === null || attacker.id === ev.victim.id) return;
+      const prev = this._roundKills.get(attacker.id) ?? 0;
+      this._roundKills.set(attacker.id, prev + 1);
+      if (ev.headshot) {
+        this.statsFor(attacker).headshotKills++;
+      }
+    });
+
+    this._unsubDamage = gameEvents.on('damage', (ev) => {
+      const attacker = ev.attacker;
+      if (attacker === null || attacker.id === ev.victim.id) return;
+      this.statsFor(attacker).damageDealt += ev.amount;
+    });
+  }
+
+  /**
+   * Detach this instance from the module-global gameEvents bus.
+   *
+   * Call this when the Game instance is no longer needed (e.g., in tests after
+   * each case) so listeners do not accumulate across instances.
+   *
+   * NOT called from startMatch()/restart(): a restarted match reuses the same
+   * instance and its constructor-attached listeners — auto-disposing on restart
+   * would strip them and silently break post-restart stat accumulation.
+   * Production main.ts creates exactly one Game and never needs to call this.
+   */
+  dispose(): void {
+    if (this._unsubKill !== null) {
+      this._unsubKill();
+      this._unsubKill = null;
+    }
+    if (this._unsubDamage !== null) {
+      this._unsubDamage();
+      this._unsubDamage = null;
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Stats public API
+  // ---------------------------------------------------------------------------
+
+  /** Return the MatchStats for a combatant, creating a zero entry if needed. */
+  statsFor(c: Combatant): MatchStats {
+    let s = this._stats.get(c.id);
+    if (s === undefined) {
+      s = { headshotKills: 0, damageDealt: 0, moneySpent: 0, mvps: 0 };
+      this._stats.set(c.id, s);
+    }
+    return s;
+  }
+
+  /** Deduct money from a combatant and track the spend in match stats. */
+  private _spend(c: Combatant, amount: number): void {
+    c.money -= amount;
+    this.statsFor(c).moneySpent += amount;
   }
 
   // ---------------------------------------------------------------------------
@@ -227,6 +340,12 @@ export class Game {
     this.score       = { CT: 0, T: 0 };
     this.lossStreak  = { CT: 0, T: 0 };
     this.roundNumber = 0;
+
+    // Clear match stats — fresh match, fresh slate.
+    this._stats.clear();
+    this._roundKills.clear();
+    this._roundPlanter = null;
+    this._roundDefuser = null;
 
     // Clear old bot meshes from scene.
     for (const [, mesh] of this._botMeshes) {
@@ -306,6 +425,9 @@ export class Game {
     this.phase         = 'freeze';
     this._bombPlanted  = false;
     this._lastBeepAt   = 0;
+    this._roundKills.clear();
+    this._roundPlanter = null;
+    this._roundDefuser = null;
 
     const now = this._now();
     this._freezeStartAt = now;
@@ -439,24 +561,24 @@ export class Game {
         const awp = WEAPONS['awp'];
         if (awp && !c.inventory.primary && c.money >= awp.price) {
           c.inventory.primary = makeWeaponState(awp);
-          c.money -= awp.price;
+          this._spend(c, awp.price);
           switchSlot(c, 'primary', now);
         }
         // Armor: vest+helmet if affordable, else vest.
         if (c.armor === 0) {
           if (c.money >= ECONOMY.ARMOR_HELMET_PRICE) {
-            c.money -= ECONOMY.ARMOR_HELMET_PRICE;
+            this._spend(c, ECONOMY.ARMOR_HELMET_PRICE);
             c.armor  = 100;
             c.helmet = true;
           } else if (c.money >= ECONOMY.ARMOR_PRICE) {
-            c.money -= ECONOMY.ARMOR_PRICE;
+            this._spend(c, ECONOMY.ARMOR_PRICE);
             c.armor  = 100;
           }
         }
         // CT kit on leftover.
         if (c.team === 'CT' && !c.hasDefuseKit && c.money >= ECONOMY.DEFUSE_KIT_PRICE) {
           c.hasDefuseKit = true;
-          c.money -= ECONOMY.DEFUSE_KIT_PRICE;
+          this._spend(c, ECONOMY.DEFUSE_KIT_PRICE);
         }
         break;
       }
@@ -464,7 +586,7 @@ export class Game {
       case 'full': {
         // Armor + helmet first.
         if (c.armor === 0 && c.money >= ECONOMY.ARMOR_HELMET_PRICE) {
-          c.money -= ECONOMY.ARMOR_HELMET_PRICE;
+          this._spend(c, ECONOMY.ARMOR_HELMET_PRICE);
           c.armor  = 100;
           c.helmet = true;
         }
@@ -473,13 +595,13 @@ export class Game {
         const rifle   = WEAPONS[rifleId];
         if (rifle && !c.inventory.primary && c.money >= rifle.price) {
           c.inventory.primary = makeWeaponState(rifle);
-          c.money -= rifle.price;
+          this._spend(c, rifle.price);
           switchSlot(c, 'primary', now);
         }
         // CT kit.
         if (c.team === 'CT' && !c.hasDefuseKit && c.money >= ECONOMY.DEFUSE_KIT_PRICE) {
           c.hasDefuseKit = true;
-          c.money -= ECONOMY.DEFUSE_KIT_PRICE;
+          this._spend(c, ECONOMY.DEFUSE_KIT_PRICE);
         }
         break;
       }
@@ -487,18 +609,18 @@ export class Game {
       case 'force': {
         // Vest (no helmet on force).
         if (c.armor === 0 && c.money >= ECONOMY.ARMOR_PRICE) {
-          c.money -= ECONOMY.ARMOR_PRICE;
+          this._spend(c, ECONOMY.ARMOR_PRICE);
           c.armor  = 100;
         }
         // Deagle if no primary and affordable.
         if (!c.inventory.primary && c.money >= WEAPONS.deagle.price) {
           c.inventory.secondary = makeWeaponState(WEAPONS.deagle);
-          c.money -= WEAPONS.deagle.price;
+          this._spend(c, WEAPONS.deagle.price);
         }
         // CT kit only if well-funded leftovers.
         if (c.team === 'CT' && !c.hasDefuseKit && c.money >= 1000) {
           c.hasDefuseKit = true;
-          c.money -= ECONOMY.DEFUSE_KIT_PRICE;
+          this._spend(c, ECONOMY.DEFUSE_KIT_PRICE);
         }
         break;
       }
@@ -714,7 +836,7 @@ export class Game {
     if (itemId === 'armor') {
       const price = ECONOMY.ARMOR_PRICE;
       if (c.money < price) return false;
-      c.money -= price;
+      this._spend(c, price);
       c.armor  = 100;
       return true;
     }
@@ -724,14 +846,14 @@ export class Game {
       if (c.armor > 0 && !c.helmet) {
         const price = ECONOMY.ARMOR_UPGRADE_PRICE;
         if (c.money < price) return false;
-        c.money -= price;
+        this._spend(c, price);
         c.armor  = 100;
         c.helmet = true;
         return true;
       }
       const price = ECONOMY.ARMOR_HELMET_PRICE;
       if (c.money < price) return false;
-      c.money -= price;
+      this._spend(c, price);
       c.armor  = 100;
       c.helmet = true;
       return true;
@@ -741,7 +863,7 @@ export class Game {
       if (c.team !== 'CT') return false;
       const price = ECONOMY.DEFUSE_KIT_PRICE;
       if (c.money < price) return false;
-      c.money -= price;
+      this._spend(c, price);
       c.hasDefuseKit = true;
       return true;
     }
@@ -756,7 +878,7 @@ export class Game {
         c.grenades = { he: 0, flash: 0, smoke: 0 };
       }
       c.grenades[itemId] = carried + 1;
-      c.money -= grenDef.price;
+      this._spend(c, grenDef.price);
       return true;
     }
 
@@ -765,7 +887,7 @@ export class Game {
     if (!def) return false;
     if (c.money < def.price) return false;
 
-    c.money -= def.price;
+    this._spend(c, def.price);
     const ws = makeWeaponState(def);
 
     if (def.slot === 'primary') {
@@ -965,6 +1087,7 @@ export class Game {
 
     c.money = Math.min(ECONOMY.MAX_MONEY, c.money + ECONOMY.PLANT_BONUS_PLANTER);
 
+    this._roundPlanter = c; // snapshot for MVP calculation
     this._ensureBombMesh();
     gameEvents.emit('bombPlanted', { site, pos: { ...this.bomb.pos } });
   }
@@ -972,6 +1095,7 @@ export class Game {
   private _triggerDefuse(now: number): void {
     this.bomb.state          = 'defused';
     this.bomb.defuseProgress = 1;
+    this._roundDefuser = this.bomb.defuser; // snapshot for MVP calculation
     gameEvents.emit('bombDefused', {});
     this._endRound('CT', 'Bomb defused', now);
   }
@@ -1015,6 +1139,18 @@ export class Game {
 
     // Update score.
     this.score[winner]++;
+
+    // Award MVP for this round.
+    const mvp = pickRoundMvp(
+      this.combatants,
+      this._roundKills,
+      winner,
+      this._roundPlanter,
+      this._roundDefuser,
+    );
+    if (mvp !== null) {
+      this.statsFor(mvp).mvps++;
+    }
 
     // Economy.
     const loser: Team = winner === 'CT' ? 'T' : 'CT';

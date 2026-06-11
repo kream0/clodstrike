@@ -98,6 +98,15 @@ export interface Combatant {
   blindIntensity?: number;
 }
 
+// ----- Match stats -----
+/** Per-combatant cumulative stats for the current match. Produced by Game, consumed by HUD. */
+export interface MatchStats {
+  headshotKills: number;
+  damageDealt: number;
+  moneySpent: number;
+  mvps: number;
+}
+
 // ----- Events -----
 export interface GameEvents {
   kill: { attacker: Combatant | null; victim: Combatant; weaponId: string; headshot: boolean };

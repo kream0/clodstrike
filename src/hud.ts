@@ -554,7 +554,72 @@ const HUD_CSS = `
   color: #c9a06a;
   background: rgba(201,160,106,0.12);
 }
+
+/* ── Match stats screen ────────────────────────────────────────── */
+#hud-matchstats {
+  position: fixed; inset: 0;
+  background: rgba(0,0,0,0.55);
+  display: none; align-items: center; justify-content: center;
+  z-index: 250;
+}
+#hud-matchstats.visible { display: flex; pointer-events: none; }
+
+.ms-panel {
+  background: rgba(10,12,18,0.95);
+  border: 1px solid rgba(255,255,255,0.10);
+  border-radius: 8px;
+  padding: 28px 36px 24px;
+  min-width: 740px; max-width: 920px; width: 90vw;
+  color: #e8e6e1;
+  backdrop-filter: blur(6px);
+  pointer-events: auto;
+}
+
+.ms-headline {
+  font-size: 28px; font-weight: 700;
+  text-transform: uppercase; letter-spacing: 0.18em;
+  text-align: center; margin-bottom: 6px;
+}
+.ms-headline.ct { color: #6aa3c9; text-shadow: 0 0 24px rgba(106,163,201,0.25); }
+.ms-headline.t  { color: #c9a06a; text-shadow: 0 0 24px rgba(201,160,106,0.25); }
+
+.ms-score {
+  text-align: center; font-size: 18px; font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  margin-bottom: 20px; opacity: 0.75;
+}
+
+.ms-team-label {
+  font-size: 10px; text-transform: uppercase; letter-spacing: 0.14em;
+  margin-bottom: 4px; padding: 0 2px;
+}
+.ms-team-label.ct { color: #6aa3c9; }
+.ms-team-label.t  { color: #c9a06a; }
+
+.ms-table {
+  width: 100%; border-collapse: collapse;
+  font-size: 12px; font-variant-numeric: tabular-nums;
+  margin-bottom: 16px;
+}
+.ms-table th {
+  font-size: 9px; text-transform: uppercase; letter-spacing: 0.10em;
+  opacity: 0.45; padding: 5px 8px; text-align: right;
+  border-bottom: 1px solid rgba(255,255,255,0.07);
+}
+.ms-table th:first-child { text-align: left; }
+.ms-table td {
+  padding: 5px 8px; text-align: right;
+  border-bottom: 1px solid rgba(255,255,255,0.04);
+}
+.ms-table td:first-child { text-align: left; }
+.ms-table tr:nth-child(even) td { background: rgba(255,255,255,0.025); }
+.ms-table tr.ms-player td { background: rgba(201,160,106,0.09) !important; }
+
+.ms-play-again {
+  width: 100%; margin-top: 8px;
+}
 `;
+
 
 
 // ---------------------------------------------------------------------------
@@ -609,6 +674,7 @@ export class HUD {
   private _pauseMenu!:    HTMLElement;
   private _flashOverlay!: HTMLElement;
   private _grenPips!:     HTMLElement;
+  private _matchStats!:   HTMLElement;
 
   // State.
   private _hitmarkerTimer   = 0;
@@ -624,6 +690,9 @@ export class HUD {
   // Menu selections.
   private _menuTeam: 'CT' | 'T' = 'CT';
   private _menuDiff: 'easy' | 'normal' | 'hard' = 'normal';
+
+  // Match-end stats screen.
+  private _statsVisible = false;
 
   // Tab scoreboard.
   private _sbVisible = false;
@@ -800,11 +869,23 @@ export class HUD {
     } else if (phase === 'roundEnd') {
       // Keep existing banner (set by roundEnd event).
     } else if (phase === 'matchEnd') {
-      // Keep existing banner (set by matchEnd event).
+      // Stats panel carries the match-over message; hide the banner.
+      this._hideBanner();
     } else {
       if (phase === 'live' || phase === 'planted') {
         this._hideBanner();
       }
+    }
+
+    // Hide stats panel if a restart has occurred and we're no longer in matchEnd.
+    if (this._statsVisible && phase !== 'matchEnd') {
+      this._hideMatchStats();
+    }
+
+    // Suppress Tab scoreboard while stats panel is open.
+    if (this._statsVisible && this._sbVisible) {
+      this._sbVisible = false;
+      this._scoreboard.classList.remove('visible');
     }
 
     // Buy menu auto-close when window ends.
@@ -1069,6 +1150,13 @@ export class HUD {
     root.appendChild(grenDiv);
     this._grenPips = grenDiv;
 
+    // ── Match stats screen ──
+    const msDiv = document.createElement('div');
+    msDiv.id = 'hud-matchstats';
+    root.appendChild(msDiv);
+    this._matchStats = msDiv;
+    this._wireMatchStats();
+
     // ── Start menu ──
     const startMenu = document.createElement('div');
     startMenu.id = 'hud-start-menu';
@@ -1203,6 +1291,79 @@ export class HUD {
         item.dispatchEvent(new CustomEvent('hud-buy-fail', { bubbles: true }));
       }
     });
+  }
+
+  private _wireMatchStats(): void {
+    // Use event delegation so the Play Again button click is handled once.
+    this._matchStats.addEventListener('click', (e) => {
+      const btn = (e.target as HTMLElement).closest<HTMLElement>('.ms-play-again');
+      if (!btn) return;
+      this._hideMatchStats();
+      this.onRestart?.();
+    });
+  }
+
+  private _showMatchStats(winner: 'CT' | 'T'): void {
+    this._statsVisible = true;
+    const game = this._game;
+    const teamClass = winner === 'CT' ? 'ct' : 't';
+    const teamName  = winner === 'CT' ? 'COUNTER-TERRORISTS WIN' : 'TERRORISTS WIN';
+
+    // Sort combatants per team: kills desc, deaths asc, id asc.
+    function sortedTeam(team: 'CT' | 'T') {
+      return [...game.combatants]
+        .filter(c => c.team === team)
+        .sort((a, b) => {
+          if (b.kills !== a.kills) return b.kills - a.kills;
+          if (a.deaths !== b.deaths) return a.deaths - b.deaths;
+          return a.id - b.id;
+        });
+    }
+
+    function buildTable(team: 'CT' | 'T'): string {
+      const rows = sortedTeam(team).map(c => {
+        const stats = game.statsFor(c);
+        const hsPercent = c.kills > 0
+          ? Math.round(100 * stats.headshotKills / c.kills) + '%'
+          : '—';
+        const dmg = Math.round(stats.damageDealt);
+        const playerCls = c.isPlayer ? ' ms-player' : '';
+        const nameSuffix = c.isPlayer ? ' &#9733;' : '';
+        return `<tr class="${playerCls}">
+          <td>${c.name}${nameSuffix}</td>
+          <td>${c.kills}</td>
+          <td>${c.deaths}</td>
+          <td>${hsPercent}</td>
+          <td>${dmg}</td>
+          <td>${stats.mvps}</td>
+          <td>$${stats.moneySpent}</td>
+        </tr>`;
+      }).join('');
+      return `<table class="ms-table">
+        <thead><tr>
+          <th>Name</th><th>K</th><th>D</th><th>HS%</th><th>DMG</th><th>MVP</th><th>$ Spent</th>
+        </tr></thead>
+        <tbody>${rows}</tbody>
+      </table>`;
+    }
+
+    this._matchStats.innerHTML = `
+      <div class="ms-panel">
+        <div class="ms-headline ${teamClass}">${teamName}</div>
+        <div class="ms-score">CT ${game.score.CT} &mdash; ${game.score.T} T</div>
+        <div class="ms-team-label ct">Counter-Terrorists</div>
+        ${buildTable('CT')}
+        <div class="ms-team-label t">Terrorists</div>
+        ${buildTable('T')}
+        <button class="menu-btn primary ms-play-again">Play Again</button>
+      </div>
+    `;
+    this._matchStats.classList.add('visible');
+  }
+
+  private _hideMatchStats(): void {
+    this._statsVisible = false;
+    this._matchStats.classList.remove('visible');
   }
 
   /**
@@ -1363,6 +1524,9 @@ export class HUD {
       // Tab: scoreboard.
       if (e.code === 'Tab') {
         e.preventDefault();
+        // Stats panel takes over the screen during matchEnd — don't flicker the
+        // scoreboard over it.  Let update() keep _sbVisible=false for us.
+        if (this._statsVisible) return;
         this._sbLastRenderTime = -Infinity;
         this._sbVisible = true;
         this._scoreboard.classList.add('visible');
@@ -1391,6 +1555,9 @@ export class HUD {
     });
     window.addEventListener('keyup', (e) => {
       if (e.code === 'Tab') {
+        // Mirror the keydown guard: if stats panel is open Tab never opened the
+        // scoreboard, so there is nothing to close here.
+        if (this._statsVisible) return;
         this._sbVisible = false;
         this._scoreboard.classList.remove('visible');
       }
@@ -1680,9 +1847,8 @@ export class HUD {
     });
 
     gameEvents.on('matchEnd', (ev) => {
-      const teamClass = ev.winner === 'CT' ? 'ct' : 't';
-      const teamName  = ev.winner === 'CT' ? 'Counter-Terrorists' : 'Terrorists';
-      this._showBanner(`Match Over — ${teamName} Win`, teamClass);
+      this._showMatchStats(ev.winner);
+      document.exitPointerLock();
     });
   }
 }

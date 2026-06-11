@@ -420,7 +420,7 @@ async function boot(): Promise<void> {
     const hint = document.getElementById('lock-hint');
     if (hint) hint.style.display = locked ? 'none' : 'flex';
 
-    if (!locked && game.phase !== 'menu') {
+    if (!locked && game.phase !== 'menu' && game.phase !== 'matchEnd') {
       // Pointer lost while in-game → pause.
       paused = true;
       hud.showMenu('pause');
