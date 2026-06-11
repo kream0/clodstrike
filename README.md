@@ -59,6 +59,13 @@ Seven weapons across three slots with individually tuned stats:
 - **First-person viewmodel**: CC0 GLB gun models (procedural box fallback) with bob (speed-linked), sway (mouse-linked), kick (per-shot), reload animation, and weapon-switch blend — all animation transforms code-driven on a shared anchor.
 - **Kill rewards**: most weapons give $300 per kill; knife gives $1 500; AWP gives $100.
 
+### Grenades
+
+- **HE grenade** ($300, carry 1): 1.6 s fuse, 98 max damage with 10 m falloff, line-of-sight attenuated through cover, self-damage on, team damage off. Kill credit + killfeed entry for the thrower.
+- **Flashbang** ($200, carry 2): 1.5 s fuse; blindness scales with distance, facing angle, and line of sight — full-screen whiteout for the player, and bots genuinely lose their target (full blind drops target + holds fire; partial blind multiplies aim error). Tinnitus ring scales with intensity.
+- **Smoke** ($300, carry 1): pops at rest, 3.5 m opaque cloud for 15 s — blocks bot vision per eye/chest sample exactly like world geometry.
+- **Throwing**: key **4** equips / cycles owned grenades, left-click throws (gun fire is fully suppressed while a grenade is out), switching slots stows it. Projectiles bounce off world geometry with restitution + friction at full 128 Hz fidelity.
+
 ### Bots
 
 - **A* pathfinding** over the same map grid used for collision: octile heuristic, binary min-heap open list, wall-hug penalty (×1.15 for wall-adjacent cells), drop-cost shaping (×1.5 for downward-drop edges), string-pull smoothing to collapse collinear waypoints. Paths compute in ~1.2 ms and are cached per bot with replanning every 2.5 s.
@@ -128,7 +135,6 @@ Seven weapons across three slots with individually tuned stats:
 ### Short term
 
 - **Halftime side swap** — teams exchange CT/T at round 13; economy resets.
-- **Grenades** — HE (radial damage), flashbang (screen whiteout + bot reaction penalty), smoke (opaque sphere, LOS blocking for bots).
 
 ### Medium term
 
@@ -176,8 +182,9 @@ bun install
 | **Space** | Jump |
 | **E (hold)** | Plant / defuse bomb |
 | **B** | Open / close buy menu |
-| **1–9 (buy menu)** | Buy: 1 USP-S · 2 Glock-18 · 3 Desert Eagle · 4 AK-47 · 5 M4A4 · 6 AWP · 7 Vest · 8 Vest+Helmet · 9 Defuse Kit |
+| **1–9 (buy menu)** | Buy: 1 Pistol (team) · 2 Desert Eagle · 3 Rifle (team) · 4 AWP · 5 Armor (vest → helmet upgrade) · 6 Defuse Kit · 7 HE · 8 Flashbang · 9 Smoke |
 | **1 / 2 / 3** | Switch weapon slot: primary / secondary / knife |
+| **4** | Equip / cycle grenades (LMB throws) |
 | **Mouse wheel** | Cycle weapon slots |
 | **Tab (hold)** | Scoreboard |
 | **Esc** | Pause menu (Resume · Restart · Sensitivity) |
