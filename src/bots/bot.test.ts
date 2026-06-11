@@ -1070,3 +1070,283 @@ describe('F3: spawn zone hunt filter', () => {
     // If lkp is null the test also passes (no update was made).
   });
 });
+
+// ---------------------------------------------------------------------------
+// LOS wall-vision fix — bots must not fire through walls or shake at corners
+// ---------------------------------------------------------------------------
+
+describe('LOS wall-vision fix', () => {
+  /**
+   * Self-validating occluded pair: CT spawn interior vs Upper Tunnels.
+   * These two positions are separated by solid geometry.  The test suite
+   * asserts world.lineOfSight === false before relying on this assumption.
+   *
+   *   botPos  : x= 6.5, y=1.5,  z=-40  (CTSpawn area, floor=1.5)
+   *   enemyPos: x=-28,  y=1.5,  z=  0  (UpperTunnels area, floor=1.5)
+   *
+   * The eye heights for LOS checks add 1.64 m (standing eye offset).
+   */
+  const BOT_WALL_POS   = { x:  6.5, y: 1.5, z: -40 };
+  const ENEMY_WALL_POS = { x: -28,  y: 1.5, z:   0 };
+
+  /**
+   * Shared setup: one CT bot, one T enemy, all others killed.
+   * Bot gets an M4A4 (reliable auto damage).  Enemy health set to 9999 so
+   * the round stays live regardless of firing.
+   */
+  function setupWallScenario(game: Game, botFloorPos: { x: number; y: number; z: number }, enemyFloorPos: { x: number; y: number; z: number }) {
+    const bot = game.combatants.find(c => c.team === 'CT' && !c.isPlayer && c.alive)!;
+    bot.inventory.primary    = makeWeaponState(WEAPONS.m4a4);
+    bot.inventory.activeSlot = 'primary';
+    bot.pos      = { ...botFloorPos };
+    bot.onGround = true;
+
+    const enemy = game.combatants.find(c => c.team === 'T' && !c.isPlayer && c.alive)!;
+    enemy.pos    = { ...enemyFloorPos };
+    enemy.alive  = true;
+    enemy.health = 9999;
+    enemy.onGround = true;
+
+    // Kill everyone else; keep the player alive to hold game in 'live'.
+    for (const c of game.combatants) {
+      if (c !== bot && c !== enemy && !c.isPlayer) { c.alive = false; c.health = 0; }
+    }
+
+    return { bot, enemy };
+  }
+
+  test('occluded pair geometric premise: CTSpawn↔UpperTunnels has no LOS', () => {
+    // Standalone geometry check — does not need BotManager.
+    const world = new World(DUST2);
+    const eyeBot   = { x: BOT_WALL_POS.x,   y: BOT_WALL_POS.y   + 1.64, z: BOT_WALL_POS.z };
+    const eyeEnemy = { x: ENEMY_WALL_POS.x, y: ENEMY_WALL_POS.y + 1.64, z: ENEMY_WALL_POS.z };
+    expect(world.lineOfSight(eyeBot, eyeEnemy)).toBe(false);
+  });
+
+  test('(a) bot does not fire at occluded target', () => {
+    const { game, mgr, world } = freshSetup({ playerTeam: 'T', difficulty: 'hard' });
+    let now = advanceFreeze(game);
+
+    // Assert the LOS premise for this test's positions.
+    const eyeBot   = { x: BOT_WALL_POS.x,   y: BOT_WALL_POS.y   + 1.64, z: BOT_WALL_POS.z };
+    const eyeEnemy = { x: ENEMY_WALL_POS.x, y: ENEMY_WALL_POS.y + 1.64, z: ENEMY_WALL_POS.z };
+    expect(world.lineOfSight(eyeBot, eyeEnemy)).toBe(false);
+
+    const { bot, enemy } = setupWallScenario(game, BOT_WALL_POS, ENEMY_WALL_POS);
+
+    // Point bot's yaw directly at the enemy (angular error ≈ 0).
+    const dx = enemy.pos.x - bot.pos.x;
+    const dz = enemy.pos.z - bot.pos.z;
+    bot.yaw = Math.atan2(-dx, -dz);
+
+    // Force engage state with target and lastKnownPos set.
+    mgr.setBrainStateForTest(bot.id, 'engage', now, enemy);
+    mgr.setBrainLastKnownPosForTest(bot.id, enemy.pos);
+
+    // targetVisible must be false: _perceive will not fire (not yet at nextPerceptAt
+    // since we just set it to now in setBrainStateForTest).  Verify the flag is false.
+    expect(mgr.getBrainTargetVisible(bot.id)).toBe(false);
+
+    // Listen for shot events from this bot.
+    let shotFired = false;
+    const unsub = gameEvents.on('shot', (ev) => {
+      if (ev.shooter.id === bot.id) shotFired = true;
+    });
+
+    try {
+      // Run 0.5 s of ticks — enough time for weapon RPM + angle gate if LOS were present.
+      const DT = 1 / 128;
+      const TICKS = Math.ceil(0.5 / DT);
+      for (let i = 0; i < TICKS; i++) {
+        now += DT;
+        // Keep targetVisible false: nextPerceptAt is always in the future so
+        // _perceive won't run (it was set to now+PERCEPTION_INTERVAL on roundStart).
+        // The existing engage + reaction time won't re-trigger firing without LOS.
+        const brain = game.botBrains.get(bot.id);
+        if (brain) brain(bot, DT, now);
+      }
+
+      // No shot should have fired through the wall.
+      expect(shotFired).toBe(false);
+    } finally {
+      unsub();
+    }
+  });
+
+  test('(b) occluded target: aim holds lastKnownPos, does not track live position', () => {
+    /**
+     * Phase 1: bot and enemy are in open mid with clear LOS.
+     * Bot: x=0, y=0, z=-28 (CTMid).  Enemy: x=0, y=0.375, z=-33 (MidDoors, 5 m south).
+     * Bot yaw = 0 → facing -Z (south toward enemy).
+     * The test ASSERTS LOS is clear before starting phase 1.
+     *
+     * Phase 2: enemy teleports behind a wall (Upper Tunnels area, x=-28, z=0)
+     * while BOT stays in CTMid.  The test asserts that CTMid→UpperTunnels LOS
+     * is blocked.  The frozen lastKnownPos is ≈ (0, -33); the live enemy is at
+     * (-28, 0), an angular separation of ~2.4 rad from bot's position — easily
+     * distinguishable.  Lateral offset from frozen = sqrt(28²+33²) ≈ 43 m >> 10 m.
+     *
+     * After 1 s of occlusion the bot's yaw must still face the frozen position
+     * (south, ≈ 0 rad) and must NOT have turned northwest toward the live enemy.
+     */
+    const BOT_POS        = { x:  0, y: 0,     z: -28 };   // CTMid
+    const ENEMY_OPEN_POS = { x:  0, y: 0.375, z: -33 };   // MidDoors (5 m south, visible)
+    const ENEMY_HIDE_POS = { x: -28, y: 1.5,  z:   0 };   // UpperTunnels (behind wall)
+
+    const { game, mgr, world } = freshSetup({ playerTeam: 'T', difficulty: 'hard' });
+    let now = advanceFreeze(game);
+
+    // Assert open-LOS premise.
+    const eyeBot      = { x: BOT_POS.x,        y: BOT_POS.y        + 1.64, z: BOT_POS.z };
+    const eyeEnemyVis = { x: ENEMY_OPEN_POS.x, y: ENEMY_OPEN_POS.y + 1.64, z: ENEMY_OPEN_POS.z };
+    expect(world.lineOfSight(eyeBot, eyeEnemyVis)).toBe(true);
+
+    // Assert occluded premise.
+    const eyeEnemyHide = { x: ENEMY_HIDE_POS.x, y: ENEMY_HIDE_POS.y + 1.64, z: ENEMY_HIDE_POS.z };
+    expect(world.lineOfSight(eyeBot, eyeEnemyHide)).toBe(false);
+
+    const { bot, enemy } = setupWallScenario(game, BOT_POS, ENEMY_OPEN_POS);
+
+    // Phase 1: tick until bot acquires enemy and enters engage.
+    const DT = 1 / 128;
+    bot.yaw = 0; // facing -Z toward enemy
+    const ENGAGE_TICKS = Math.ceil(1.5 / DT);
+    for (let i = 0; i < ENGAGE_TICKS; i++) {
+      now += DT;
+      const brain = game.botBrains.get(bot.id);
+      if (brain) brain(bot, DT, now);
+      if (mgr.getBrainState(bot.id) === 'engage') break;
+    }
+    expect(mgr.getBrainState(bot.id)).toBe('engage');
+
+    // Record the lastKnownPos after acquisition (enemy was at ENEMY_OPEN_POS).
+    const lkpAfterEngage = mgr.getBrainLastKnownPos(bot.id);
+    expect(lkpAfterEngage).not.toBeNull();
+    const frozenX = lkpAfterEngage!.x;   // ≈ 0
+    const frozenZ = lkpAfterEngage!.z;   // ≈ -33
+
+    // Phase 2: enemy hides behind the wall (bot does NOT move — stays in CTMid).
+    enemy.pos = { ...ENEMY_HIDE_POS };
+
+    // Lateral distance from frozen lastKnownPos to new live enemy pos must be > 10 m.
+    const lateralDist = Math.sqrt(
+      (enemy.pos.x - frozenX) ** 2 + (enemy.pos.z - frozenZ) ** 2,
+    );
+    expect(lateralDist).toBeGreaterThan(10);
+
+    // Tick ~1 s (< SIGHT_LOSE_TIME = 1.5 s) so bot is still in engage but target occluded.
+    const HOLD_TICKS = Math.ceil(1.0 / DT);
+    for (let i = 0; i < HOLD_TICKS; i++) {
+      now += DT;
+      const brain = game.botBrains.get(bot.id);
+      if (brain) brain(bot, DT, now);
+    }
+
+    // Bot must still be in engage (SIGHT_LOSE_TIME not elapsed yet).
+    expect(mgr.getBrainState(bot.id)).toBe('engage');
+
+    // Bearing to frozen lastKnownPos from current bot position (bot did not move).
+    const dxFrozen = frozenX - bot.pos.x;
+    const dzFrozen = frozenZ - bot.pos.z;
+    const bearingToFrozen = Math.atan2(-dxFrozen, -dzFrozen);
+
+    // Bearing to enemy's new live position.
+    const dxLive = enemy.pos.x - bot.pos.x;
+    const dzLive = enemy.pos.z - bot.pos.z;
+    const bearingToLive = Math.atan2(-dxLive, -dzLive);
+
+    // Angular separation between the two bearings must be large (> 1 rad) to make
+    // the test discriminative.
+    const bearingSep = Math.abs(Math.atan2(
+      Math.sin(bearingToFrozen - bearingToLive),
+      Math.cos(bearingToFrozen - bearingToLive),
+    ));
+    expect(bearingSep).toBeGreaterThan(1.0); // geometry check
+
+    // Bot yaw must be close to the FROZEN bearing (within 0.5 rad) and NOT close
+    // to the LIVE bearing (at least 0.6 rad away).
+    const errToFrozen = Math.abs(Math.atan2(
+      Math.sin(bot.yaw - bearingToFrozen),
+      Math.cos(bot.yaw - bearingToFrozen),
+    ));
+    const errToLive = Math.abs(Math.atan2(
+      Math.sin(bot.yaw - bearingToLive),
+      Math.cos(bot.yaw - bearingToLive),
+    ));
+
+    expect(errToFrozen).toBeLessThan(0.5);
+    expect(errToLive).toBeGreaterThan(0.6);
+  });
+
+  test('(c) bot resumes firing when occluded target re-peeks', () => {
+    /**
+     * Setup mirrors test (a): bot in CTSpawn, enemy in UpperTunnels (no LOS).
+     * Then enemy moves back into open mid (clear LOS).
+     * After reaction time + perception, bot should fire.
+     */
+    const { game, mgr, world } = freshSetup({ playerTeam: 'T', difficulty: 'hard' });
+    let now = advanceFreeze(game);
+
+    // Assert occluded premise.
+    const eyeBot   = { x: BOT_WALL_POS.x,   y: BOT_WALL_POS.y   + 1.64, z: BOT_WALL_POS.z };
+    const eyeEnemy = { x: ENEMY_WALL_POS.x, y: ENEMY_WALL_POS.y + 1.64, z: ENEMY_WALL_POS.z };
+    expect(world.lineOfSight(eyeBot, eyeEnemy)).toBe(false);
+
+    const { bot, enemy } = setupWallScenario(game, BOT_WALL_POS, ENEMY_WALL_POS);
+
+    // Force bot into engage, facing enemy, with lastKnownPos set.
+    const dx0 = enemy.pos.x - bot.pos.x;
+    const dz0 = enemy.pos.z - bot.pos.z;
+    bot.yaw = Math.atan2(-dx0, -dz0);
+    mgr.setBrainStateForTest(bot.id, 'engage', now, enemy);
+    mgr.setBrainLastKnownPosForTest(bot.id, enemy.pos);
+
+    // Confirm no shots while occluded (run 0.25 s).
+    let shotFired = false;
+    const unsub = gameEvents.on('shot', (ev) => {
+      if (ev.shooter.id === bot.id) shotFired = true;
+    });
+
+    try {
+      const DT = 1 / 128;
+      const OCCLUDED_TICKS = Math.ceil(0.25 / DT);
+      for (let i = 0; i < OCCLUDED_TICKS; i++) {
+        now += DT;
+        const brain = game.botBrains.get(bot.id);
+        if (brain) brain(bot, DT, now);
+      }
+      expect(shotFired).toBe(false);
+
+      // Assert re-peek LOS premise: open-mid bot+enemy positions have clear LOS.
+      const OPEN_BOT_POS   = { x: 0, y: 0,     z: -28 };
+      const OPEN_ENEMY_POS = { x: 0, y: 0.375, z: -33 };
+      const eyeBotOpen   = { x: OPEN_BOT_POS.x,   y: OPEN_BOT_POS.y   + 1.64, z: OPEN_BOT_POS.z };
+      const eyeEnemyOpen = { x: OPEN_ENEMY_POS.x, y: OPEN_ENEMY_POS.y + 1.64, z: OPEN_ENEMY_POS.z };
+      expect(world.lineOfSight(eyeBotOpen, eyeEnemyOpen)).toBe(true);
+
+      // Enemy re-peeks: move both into open mid with clear LOS.
+      bot.pos   = { ...OPEN_BOT_POS };
+      enemy.pos = { ...OPEN_ENEMY_POS };
+      enemy.health = 9999; // ensure it survives
+
+      // Point bot directly at the enemy.
+      const dxRepeek = enemy.pos.x - bot.pos.x;
+      const dzRepeek = enemy.pos.z - bot.pos.z;
+      bot.yaw = Math.atan2(-dxRepeek, -dzRepeek);
+
+      // Tick up to 2 s for perception + reaction time (hard reactionMs = 220 ms).
+      const REOPEN_TICKS = Math.ceil(2.0 / DT);
+      for (let i = 0; i < REOPEN_TICKS; i++) {
+        now += DT;
+        const brain = game.botBrains.get(bot.id);
+        if (brain) brain(bot, DT, now);
+        if (shotFired) break;
+      }
+
+      // A shot must have fired after the enemy re-peeked.
+      expect(shotFired).toBe(true);
+    } finally {
+      unsub();
+    }
+  });
+});

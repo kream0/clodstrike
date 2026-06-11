@@ -118,6 +118,7 @@ interface BotBrain {
 
   // Combat.
   target:           Combatant | null;
+  targetVisible:    boolean;       // true only when target had LOS this tick
   firstSeenAt:      number;
   targetVisibleAt:  number;
   lastKnownPos:     Vec3 | null;
@@ -301,6 +302,17 @@ export class BotManager {
     return this._brains.get(botId)?.lastKnownPos;
   }
 
+  // Expose targetVisible for tests (LOS gate verification).
+  getBrainTargetVisible(botId: number): boolean | undefined {
+    return this._brains.get(botId)?.targetVisible;
+  }
+
+  // Force lastKnownPos for tests (LOS gate + corner-hold tests).
+  setBrainLastKnownPosForTest(botId: number, pos: Vec3 | null): void {
+    const br = this._brains.get(botId);
+    if (br) br.lastKnownPos = pos !== null ? { ...pos } : null;
+  }
+
   // Expose spawn zone AABBs for tests (F3).
   getSpawnZone(team: 'CT' | 'T'): SpawnZoneAABB {
     return team === 'CT' ? this._ctSpawnZone : this._tSpawnZone;
@@ -388,6 +400,7 @@ export class BotManager {
       guardPos:          null,
       guardFacing:       0,
       target:            null,
+      targetVisible:     false,
       firstSeenAt:       -1,
       targetVisibleAt:   -1,
       lastKnownPos:      null,
@@ -421,6 +434,7 @@ export class BotManager {
   private _roundStart(br: BotBrain): void {
     br.state              = 'objective';
     br.target             = null;
+    br.targetVisible      = false;
     br.firstSeenAt        = -1;
     br.targetVisibleAt    = -1;
     br.lastKnownPos       = null;
@@ -675,6 +689,7 @@ export class BotManager {
     // Full-blind: drop any current target immediately and skip perception.
     if (fullBlind) {
       br.target        = null;
+      br.targetVisible = false;
       br.targetVisibleAt = -1;
       // Transition out of engage (no visible target).
       if (br.state === 'engage') {
@@ -816,6 +831,7 @@ export class BotManager {
       }
 
       br.target          = nearest;
+      br.targetVisible   = true;
       br.targetVisibleAt = now;
       br.lastKnownPos    = { ...nearest.pos };
       br.lastKnownAt     = now;
@@ -826,6 +842,7 @@ export class BotManager {
         }
       }
     } else {
+      br.targetVisible = false;
       if (br.state === 'engage' && now - br.targetVisibleAt >= SIGHT_LOSE_TIME) {
         br.state  = 'hunt';
         br.target = null;
@@ -1242,6 +1259,29 @@ export class BotManager {
       return;
     }
 
+    // When target is occluded (no LOS this tick), hold aim on the frozen
+    // last-known position and skip the jitter resample to avoid corner shake.
+    if (!br.targetVisible && br.lastKnownPos !== null) {
+      // Aim at chest height of last-known feet position (same offset as chestPos).
+      const lkp  = br.lastKnownPos;
+      const botEyeLkp = eyePos(bot);
+      const dxLkp  = lkp.x - botEyeLkp.x;
+      const dyLkp  = (lkp.y + 1.2) - botEyeLkp.y;  // +1.2 = chest offset from feet
+      const dzLkp  = lkp.z - botEyeLkp.z;
+      const horizLkp = Math.sqrt(dxLkp * dxLkp + dzLkp * dzLkp);
+      const desYawLkp   = Math.atan2(-dxLkp, -dzLkp);
+      const desPitchLkp = Math.atan2(dyLkp, horizLkp);
+      const dyawLkp   = angleDiff(bot.yaw,   desYawLkp);
+      const dpitchLkp = angleDiff(bot.pitch, desPitchLkp);
+      bot.yaw   += clamp(dyawLkp,   -turnRate * dtFixed, turnRate * dtFixed);
+      bot.pitch  = clamp(
+        bot.pitch + clamp(dpitchLkp, -turnRate * dtFixed, turnRate * dtFixed),
+        -Math.PI / 2 * 0.99,
+         Math.PI / 2 * 0.99,
+      );
+      return;
+    }
+
     // Resample aim error.
     if (now - br.aimErrorLastAt > AIM_ERROR_RESAMPLE) {
       br.aimErrorLastAt = now;
@@ -1359,6 +1399,12 @@ export class BotManager {
 
     // Only fire in engage state with a live target.
     if (br.state !== 'engage' || br.target === null || !br.target.alive) {
+      return { trigger: false, reloadPressed: false, scopePressed };
+    }
+
+    // LOS gate: never fire at an occluded target (no current-tick LOS).
+    // The bot may still hold the corner (aim tracks lastKnownPos) but no shots.
+    if (!br.targetVisible) {
       return { trigger: false, reloadPressed: false, scopePressed };
     }
 
