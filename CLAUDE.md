@@ -34,7 +34,7 @@ Work through this standing track cycle by cycle with the agent workflow until ex
 
 - **Stack**: Bun 1.3, TypeScript strict (`tsc --noEmit` = `bun run check`), three@0.184. NO Vite.
 - **Entry**: `index.html` → `src/main.ts` — fixed-step simulation at 128 Hz with accumulator loop; render at RAF. Exported `clock.now` (game-time seconds) is THE time source for all game logic.
-- **Validation gate**: `bun run check && bun test && bun run build` — all three must pass before any commit. Tests baseline is **346 tests green**; never let the suite shrink.
+- **Validation gate**: `bun run check && bun test && bun run build` — all three must pass before any commit. Tests baseline is **361 tests green**; never let the suite shrink.
 - **Dev server**: `bun run dev` → http://localhost:3000 (Bun's built-in HTML entrypoint)
 - **Repo**: https://github.com/kream0/clodstrike
 
@@ -70,7 +70,7 @@ src/
   game.ts           # Game state machine: phases, economy, bomb lifecycle, combatants
   main.ts           # Boot, fixed-step loop, RAF render, player + camera wiring
   maps/
-    dust2.ts        # DUST2 MapData: 96×88 ASCII grid, legend, props, spawns, sites
+    dust2.ts        # DUST2 MapData: 96×96 ASCII grid, legend, props, spawns, sites
     dust2.test.ts   # BFS connectivity suite (every route both directions)
   bots/
     nav.ts          # NavGrid — A* over the map grid (octile, binary heap, string-pull)
@@ -144,7 +144,7 @@ Every agent prompt must include:
 - **WebAudio needs `audio.unlock()` on gesture.** Call it alongside `requestPointerLock()` on the first user interaction that starts the match.
 - **ESM-only browser bundle.** `package.json` has `"type": "module"`. No `require()`, no CommonJS. Static imports only — no dynamic `import()` in hot paths.
 - **claude-in-chrome is loopback-isolated on this machine.** The MCP browser cannot reach `localhost:3000`. Smoke tests are done by the human playtester. Be honest about this rather than claiming browser verification.
-- **Map grid conventions.** Units are meters. Cell size = 1 m. Grid origin = world `x −48, z −44`. Row 0 is north (CT side); rows grow south (+Z). Columns grow east (+X). Y = up. Floor heights are multiples of 0.375 m (`−0.75` to `3.0`). Step-up ≤ 0.5 m. Covered cells (tunnels, doors) have explicit ceiling heights in the legend.
+- **Map grid conventions.** Units are meters. Cell size = 1 m. Grid is 96×96; origin = world `x −48, z −48` (rebuilt 2026-06 from real-map radar/setpos calibration, 1 HU = 0.01905 m). Row 0 is north (CT/sites side); rows grow south (+Z, T side). Columns grow east (+X). Y = up. Floor heights are multiples of 0.375 m (0 = CT-spawn/lower-mid ground; T spawn plateau 4.5, A site 4.5, B site 1.5, T plat 5.25). Step-up ≤ 0.5 m — the one-way drops (catwalk→lower mid, B window→site, pit edges, T plat ledge) rely on this rule; don't "fix" them by adding steps. Covered cells (tunnels, doors) have explicit ceiling heights in the legend.
 - **`dust2.test.ts` BFS connectivity is the safety net.** If you touch `dust2.ts` or `world.ts`, keep the BFS suite green. It verifies that every named route (Long/Short/Mid/Tunnels) is traversable in both directions.
 - **Props must stay axis-aligned AABBs.** `MapProp` sizes are full extents. The collision system and navgrid both assume no rotation on props.
 - **Renderer assumes greedy-merged static world.** `buildMapScene` merges adjacent cells of the same material into row-merged box meshes (<10 static draw calls). Adding per-cell meshes will blow the draw call budget and break the prop-occlusion assumptions.

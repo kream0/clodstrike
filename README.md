@@ -12,9 +12,10 @@ A Counter-Strike 2–style single-player FPS — bots, bomb defusal, and a low-p
 
 ### Map — de_dust2
 
-- **Faithful low-poly remake** of de_dust2 encoded as a 96×88 ASCII height grid — one character per square meter, each char mapping to floor height, optional ceiling, wall solidity, and material. Origin at world `x −48, z −44`; row 0 is north (CT side); floors step in 0.375 m increments from −0.75 to 3.0 m.
-- **All iconic areas reproduced**: LongA, Catwalk, UpperTunnels, CT Spawn, A Site (stone floor), B Site, B Doors, Mid, Catwalk, Short, and 20 more named regions — 24 named areas total used by bot routing logic.
-- **Covered geometry**: tunnel and door cells carry explicit ceiling heights (UpperTunnels 1.5 m floor / 4.5 m ceil; Mid Doors 0.75 / 4.0) so players and bots crouch under realistic headroom rather than passing through flat ceilings.
+- **Geometry-faithful remake** of de_dust2 encoded as a 96×96 ASCII height grid — one character per square meter, each char mapping to floor height, optional ceiling, wall solidity, and material. The layout is calibrated against real-map reference data (radar overview + spawn coordinates, 1 unit = 0.01905 m): correct route proportions, chokepoint widths, site shapes and the real elevation profile (T spawn high plateau at +4.5 m, mid sloping down to CT-side ground at 0 m, A site plateau +4.5 m, B site +1.5 m).
+- **All iconic areas reproduced**: LongA, Catwalk, UpperTunnels, CT Spawn, A Site, B Site, B Doors, Mid, Short, Pit, Goose, and more — 24+ named regions used by bot routing logic.
+- **One-way drops like the real map**: catwalk → lower mid, B window → site, pit edges, and the T-spawn ledge are drop-only (the ≤ 0.5 m step-up rule makes them unclimbable), forcing real rotation routes.
+- **Covered geometry**: tunnel and door cells carry explicit ceiling heights so players and bots move under realistic headroom rather than passing through flat ceilings.
 - **25 axis-aligned props**: crates, B-site car, Xbox box, sandbags, planks, and the classic mid-door pair — the gap between them is the AWP mid-doors sightline. Props carry full AABB collision and are included in the navgrid as impassable obstacles.
 - **5+5 spawns** with pre-aimed yaw angles; A and B bombsite rectangles used by the plant/defuse logic.
 - **BFS connectivity suite** in `dust2.test.ts` guarantees every canonical route (Long, Short, Mid, Upper/Lower Tunnels) is traversable in both directions at the map cell level — the safety net whenever the grid changes.
