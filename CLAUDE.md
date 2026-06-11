@@ -34,7 +34,7 @@ Work through this standing track cycle by cycle with the agent workflow until ex
 
 - **Stack**: Bun 1.3, TypeScript strict (`tsc --noEmit` = `bun run check`), three@0.184. NO Vite.
 - **Entry**: `index.html` → `src/main.ts` — fixed-step simulation at 128 Hz with accumulator loop; render at RAF. Exported `clock.now` (game-time seconds) is THE time source for all game logic.
-- **Validation gate**: `bun run check && bun test && bun run build` — all three must pass before any commit. Tests baseline is **98 tests green**; never let the suite shrink.
+- **Validation gate**: `bun run check && bun test && bun run build` — all three must pass before any commit. Tests baseline is **211 tests green**; never let the suite shrink.
 - **Dev server**: `bun run dev` → http://localhost:3000 (Bun's built-in HTML entrypoint)
 - **Repo**: https://github.com/kream0/clodstrike
 
@@ -43,7 +43,12 @@ Work through this standing track cycle by cycle with the agent workflow until ex
 ## Project layout
 
 ```
+assets/             # CC0 textures (textures/) + GLB models (models/) + LICENSES.md — committed
+scripts/
+  copy-assets.ts    # build step: cpSync assets/ -> dist/assets/ (cross-platform)
 src/
+  assets.ts         # Async asset loader: loadAllTextures/loadAllNormalTextures/loadGLB,
+                    #   assetUrl() resolves vs document.baseURI (GH Pages subpath-safe)
   types.ts          # FROZEN contract — all interfaces, constants, event types
   constants.ts      # WEAPONS, MOVEMENT, ECONOMY, RULES, BOT_DIFFICULTY values
   events.ts         # Tiny strongly-typed Emitter<E> (no deps)
@@ -53,7 +58,7 @@ src/
   movement.ts       # simulateMovement — CS-style ground friction / Quake air-accel
   combat.ts         # Hitscan raycast, hitgroup damage, armor, gameEvents bus (Emitter)
   weapons.ts        # updateWeapon — RPM gate, reload, spread, recoil, scope, switchSlot
-  viewmodel.ts      # First-person procedural box guns with bob/sway/kick/reload anims
+  viewmodel.ts      # First-person GLB gun models (procedural fallback) + bob/sway/kick/reload anims
   effects.ts        # Pooled tracers, impacts, blood, muzzle flash, decals, explosion
   audio.ts          # Web Audio positional synthesis (gunshots, steps, bomb, stings)
   characters.ts     # Bot character meshes (procedural colored boxes)
@@ -82,6 +87,7 @@ src/
 5. **Shared movement and weapon code for player and bots.** Both call `simulateMovement(combatant, intent, world, dt, now)` and `updateWeapon(combatant, world, targets, input, now, dt)` identically. Bot brains construct `MoveIntent` and weapon input structs the same way the player does. Do not fork these code paths.
 6. **Pooled effects, no per-tick heap allocations in hot paths.** `Effects` pre-allocates tracer/impact/decal pools. `audio` reuses oscillator graphs. No `new THREE.Vector3()` inside the simulation loop.
 7. **HUD styles injected from TypeScript.** There are no `.css` files for the HUD. All styles are in the `HUD_CSS` template literal in `hud.ts`, injected once via `<style>` on construction.
+8. **Assets are optional everywhere.** `buildMapScene(map, textures?, normals?)` and `ViewModel.setWeaponModels(...)` take loaded assets as optional inputs with full procedural/colors fallback — NEVER remove a fallback path; a 404 must not brick the boot. All assets are CC0 (or CC-BY with recorded attribution), credited in `assets/LICENSES.md`, loaded through `src/assets.ts` only. World texturing relies on world-anchored planar UVs (`projectUV`) so greedy-merged boxes tile seamlessly — keep UVs world-space.
 
 ---
 
@@ -139,6 +145,8 @@ Every agent prompt must include:
 - **`dust2.test.ts` BFS connectivity is the safety net.** If you touch `dust2.ts` or `world.ts`, keep the BFS suite green. It verifies that every named route (Long/Short/Mid/Tunnels) is traversable in both directions.
 - **Props must stay axis-aligned AABBs.** `MapProp` sizes are full extents. The collision system and navgrid both assume no rotation on props.
 - **Renderer assumes greedy-merged static world.** `buildMapScene` merges adjacent cells of the same material into row-merged box meshes (<10 static draw calls). Adding per-cell meshes will blow the draw call budget and break the prop-occlusion assumptions.
+- **Local bun (npm shim) is 1.1.29 — three consequences.** (1) `bun ./index.html` dev server needs Bun ≥ 1.2 and fails locally; the human playtester runs a newer bun. (2) Local `bun run build` emits a 0.11 KB stub JS (HTML not really bundled) — the REAL bundling happens in CI (`oven-sh/setup-bun@v2` = latest). Local `dist/` is NOT deployable; verify deploys via the GitHub Actions run / the live site, not local dist. (3) `bun install` may drop a binary `bun.lockb` — it is gitignored; the text `bun.lock` is canonical.
+- **Texture color spaces.** Color maps = `SRGBColorSpace`; normal maps = `NoColorSpace` (raw data). A cloned `THREE.Texture` needs `needsUpdate = true` or it renders black.
 - **CRLF warnings on Windows are noise.** Git auto-converts on commit. Don't fight it.
 - **Friendly fire is OFF and there is no halftime side swap.** Both are deliberate design decisions encoded in `RULES` and `Game`. Do not "fix" them.
 - **`.memorai/` is the local memory store (gitignored).** The memorai session hook creates one in this directory (and another may exist in the parent `fable-bench/`). Never stage it. Never stage `_ref_*.md` reference files from the parent directory either — they are not part of this repo.

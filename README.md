@@ -20,6 +20,13 @@ A Counter-Strike 2–style single-player FPS — bots, bomb defusal, and a low-p
 - **BFS connectivity suite** in `dust2.test.ts` guarantees every canonical route (Long, Short, Mid, Upper/Lower Tunnels) is traversable in both directions at the map cell level — the safety net whenever the grid changes.
 - **Greedy row-merged renderer**: adjacent cells of the same material are merged into axis-aligned box meshes, producing fewer than 10 static draw calls for the entire map plus ~25 prop meshes. Lambert materials with per-box vertex-color tint; hemisphere + warm directional sun with 2048 PCF shadows; exponential fog; sand/stone palette.
 
+### Visuals & assets
+
+- **CC0-textured world**: 8 open-licensed tiling materials (ambientCG + Poly Haven — sand, sandstone brick, plaster, paving stone, concrete, wood, painted metal, fabric), color + normal maps, applied across the greedy-merged map geometry with **world-anchored planar UVs** so tiles continue seamlessly across merged boxes. Per-kind prop texturing (wood crates, metal car/doors/xbox, fabric sandbags). Colors-only fallback if textures fail to load.
+- **CC0 GLB weapon viewmodels**: the six firearms use models from the "CC0 Flat Guns" packs (OpenGameArt, by Pichuliru), auto-normalized (longest-axis-to-barrel alignment + target-length scaling) under the same procedural animation anchor — bob/sway/kick/reload all still code-driven. Knife stays procedural; any model that fails to load falls back to the procedural box gun.
+- **Async boot with loading screen**: 22-asset progress bar (8 color maps, 8 normal maps, 6 weapon GLBs), parallel loading, per-asset graceful fallback — a 404 can never brick the boot.
+- **Full credits**: every asset's source + license in [`assets/LICENSES.md`](./assets/LICENSES.md).
+
 ### Movement & gunplay
 
 - **CS-style movement** shared between player and bots: ground friction + acceleration, Quake air-strafe (air-accel cap 0.6 m/s wish-speed), jump velocity 5.75 m/s, gravity 15.24 m/s². Walk (×0.52) and crouch (×0.34) multipliers applied to the active weapon's base move speed.
@@ -47,7 +54,7 @@ Seven weapons across three slots with individually tuned stats:
 - **Range falloff**: `damage × rangeModifier^(distance / 15 m)`. The AWP barely falls off at range; the Glock degrades fast.
 - **Hitgroups**: head (×4 damage, overridden to ×2.5 for AWP), body (×1), legs (×0.75, ignores armor). Armor absorbs to 0.775× for body shots (helmet required for head armor benefit). Armor durability tracked per combatant.
 - **AWP scope**: right-click zooms FOV from 73° to 30° with an overlay; sensitivity scales 0.4× scoped; hip-fire spread is severe (0.05 rad base).
-- **First-person viewmodel**: procedural box guns with bob (speed-linked), sway (mouse-linked), kick (per-shot), reload animation, and weapon-switch blend. No external assets.
+- **First-person viewmodel**: CC0 GLB gun models (procedural box fallback) with bob (speed-linked), sway (mouse-linked), kick (per-shot), reload animation, and weapon-switch blend — all animation transforms code-driven on a shared anchor.
 - **Kill rewards**: most weapons give $300 per kill; knife gives $1 500; AWP gives $100.
 
 ### Bots
@@ -111,7 +118,7 @@ Seven weapons across three slots with individually tuned stats:
 
 ### Active track — visual & UX overhaul (user-directed)
 
-- **Open-licensed assets** — replace procedural visuals with open-licensed (CC0-first) assets: tiling textures for every world surface and prop, real low-poly models for weapons and characters. Sources: Kenney, ambientCG, Poly Haven, OpenGameArt, Quaternius, KayKit. Every asset's source + license recorded in `assets/LICENSES.md`.
+- **Open-licensed assets** — ✅ world textures shipped · ✅ weapon models shipped · ⏳ character models next. Sources: Kenney, ambientCG, Poly Haven, OpenGameArt, Quaternius, KayKit. Every asset's source + license recorded in `assets/LICENSES.md`.
 - **UI improvement** — modernized HUD and menus: typography, icons, layout, readability.
 - **Performance** — profile-guided: draw calls, texture memory, shadow cost, pixel-ratio capping.
 
@@ -139,7 +146,7 @@ Seven weapons across three slots with individually tuned stats:
 
 ## Setup
 
-Requires [Bun](https://bun.sh) ≥ 1.2.
+Requires [Bun](https://bun.sh) ≥ 1.2 (the dev server and HTML bundling use Bun's HTML entrypoint; older Bun versions run checks/tests but emit a stub bundle — CI deploys build with the latest Bun).
 
 ```bash
 bun install
@@ -204,4 +211,4 @@ See [`CLAUDE.md`](./CLAUDE.md) for the full project guide. Short module summary:
 - **[Three.js](https://threejs.org/) 0.184** — WebGL rendering
 - **[TypeScript](https://www.typescriptlang.org/)** (strict, `noUncheckedIndexedAccess`)
 - **[Bun](https://bun.sh/) 1.3** — runtime, dev server (HTML entrypoint), bundler, test runner
-- **No external assets** — map geometry from an ASCII grid, audio synthesized with Web Audio API, all materials procedural
+- **Open-licensed assets** — CC0 textures (ambientCG, Poly Haven) and CC0 weapon models (OpenGameArt "Flat Guns"); map geometry still generated from an ASCII grid; audio 100% synthesized with the Web Audio API (no audio files). Credits: [`assets/LICENSES.md`](./assets/LICENSES.md)
