@@ -321,7 +321,8 @@ async function boot(): Promise<void> {
   const navGrid = new NavGrid(DUST2);
 
   // --- Camera ---
-  const camera = new THREE.PerspectiveCamera(73, window.innerWidth / window.innerHeight, 0.05, 300);
+  // FOV = 74°  (CS2 default 90° hor+ at 4:3 → 106.26° horiz at 16:9 → vertical ≈ 2·atan(tan(53.13°)/(16/9)) ≈ 73.74° → rounded to 74)
+  const camera = new THREE.PerspectiveCamera(74, window.innerWidth / window.innerHeight, 0.05, 300);
   camera.rotation.order = 'YXZ';
   scene.add(camera);
 
@@ -405,7 +406,7 @@ async function boot(): Promise<void> {
   let debugVisible = false;
   let paused       = false;
   let stepAccum   = 0;
-  let currentFov  = 73;
+  let currentFov  = 74; // base FOV matches camera construction (CS2-equivalent)
   let prevKeyR    = false;
   let lastMatchOpts: MatchOptions | null = null;
   // Track the previously equipped grenade type to detect changes for viewmodel sync.
@@ -443,7 +444,7 @@ async function boot(): Promise<void> {
     lastMatchOpts = opts;
     // Reset player to chosen team default loadout (Game will reassign on round start).
     player.team = opts.playerTeam;
-    game.startMatch(opts);
+    game.startMatch(opts, clock.now);
     // Instantiate BotManager after startMatch so combatants exist.
     botManager?.dispose();
     botManager = new BotManager(game, world, navGrid, onBotShot);
@@ -471,7 +472,7 @@ async function boot(): Promise<void> {
 
   hud.onRestart = () => {
     if (lastMatchOpts) {
-      game.restart(lastMatchOpts);
+      game.restart(lastMatchOpts, clock.now);
       // Reinstantiate BotManager after restart.
       botManager?.dispose();
       botManager = new BotManager(game, world, navGrid, onBotShot);
@@ -1019,8 +1020,10 @@ async function boot(): Promise<void> {
     }
 
     // --- Scope FOV ---
+    // Scope zoom (30°) keeps the same absolute value: the ratio 30/73 ≈ 41% of base
+    // is deliberately kept as a fixed tight-zoom regardless of base FOV change.
     const scoped    = isScoped(player);
-    const targetFov = scoped ? 30 : 73;
+    const targetFov = scoped ? 30 : 74;
     currentFov += (targetFov - currentFov) * Math.min(1, 12 * frameDt);
     if (Math.abs(currentFov - targetFov) < 0.1) currentFov = targetFov;
     if (camera.fov !== currentFov) {

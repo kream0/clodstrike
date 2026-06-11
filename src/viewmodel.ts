@@ -25,7 +25,18 @@ export const WEAPON_MODEL_PATHS: Readonly<Partial<Record<WeaponId, string>>> = {
 // Constants
 // ---------------------------------------------------------------------------
 
-const VM_OFFSET = new THREE.Vector3(0.22, -0.22, -0.45);
+/**
+ * Global viewmodel size multiplier.  Applied uniformly on top of every per-weapon
+ * WEAPON_TUNING scaleMult (both GLB and procedural fallback paths).
+ * 1.3 matches CS2's larger first-person weapon presence.
+ */
+export const VIEWMODEL_SCALE = 1.3;
+
+// Base offset — shifted slightly lower-right vs the old 0.22/-0.22/-0.45 so
+// the 30% larger models sit at a CS2-like lower-right position without clipping
+// the camera near plane (near = 0.05 m; the viewmodel group is at Z ≈ -0.45 from
+// the camera, well clear of the 0.05 m near plane even at 1.3× scale).
+const VM_OFFSET = new THREE.Vector3(0.25, -0.26, -0.45);
 const GUNMETAL  = 0x2a2a2e;
 const GUN_DARK  = 0x1a1a1c;
 const GUN_WOOD  = 0x5a3a1a;
@@ -626,8 +637,8 @@ export class ViewModel {
         extraRotation: tuning.extraRotation,
       });
 
-      // Apply scale + scaleMult
-      const finalScale = normResult.scale * tuning.scaleMult;
+      // Apply scale + per-weapon scaleMult + global VIEWMODEL_SCALE multiplier
+      const finalScale = normResult.scale * tuning.scaleMult * VIEWMODEL_SCALE;
       modelClone.scale.setScalar(finalScale);
       modelClone.rotation.copy(normResult.rotation);
       modelClone.position.copy(normResult.position);
@@ -657,6 +668,9 @@ export class ViewModel {
           break;
       }
 
+      // Apply global VIEWMODEL_SCALE to the procedural mesh so it matches
+      // the same size multiplier as the GLB path.
+      weaponMesh.scale.setScalar(VIEWMODEL_SCALE);
       this._group.add(weaponMesh);
       this._proceduralMesh = weaponMesh;
     }

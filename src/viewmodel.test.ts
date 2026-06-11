@@ -17,6 +17,7 @@ import { clone as skeletonClone } from 'three/examples/jsm/utils/SkeletonUtils.j
 import {
   normalizeWeaponModel,
   WEAPON_MODEL_PATHS,
+  VIEWMODEL_SCALE,
   type WeaponId,
 } from './viewmodel';
 
@@ -140,6 +141,40 @@ describe('normalizeWeaponModel', () => {
       expect(isFinite(result.scale)).toBe(true);
       expect(result.scale).toBeGreaterThan(0);
     }).not.toThrow();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// VIEWMODEL_SCALE — global size multiplier sanity
+// ---------------------------------------------------------------------------
+
+describe('VIEWMODEL_SCALE', () => {
+  test('is a finite positive number', () => {
+    expect(typeof VIEWMODEL_SCALE).toBe('number');
+    expect(isFinite(VIEWMODEL_SCALE)).toBe(true);
+    expect(VIEWMODEL_SCALE).toBeGreaterThan(0);
+  });
+
+  test('equals 1.3 (CS2-equivalent viewmodel size)', () => {
+    expect(VIEWMODEL_SCALE).toBeCloseTo(1.3, 5);
+  });
+
+  test('applied scale = normalizeWeaponModel scale × scaleMult × VIEWMODEL_SCALE', () => {
+    // Simulate the GLB path for a Z-aligned bbox: scale = targetLength / maxExtent
+    const bbox = new THREE.Box3(
+      new THREE.Vector3(-0.05, -0.05, -0.19),
+      new THREE.Vector3(0.05,  0.05,  0.19),
+    );
+    // targetLength = 0.22, scaleMult = 1.0 (usp-like)
+    const normResult = normalizeWeaponModel(bbox, {
+      targetLength: 0.22,
+      gripOffset: { x: 0, y: 0, z: 0 },
+    });
+    // maxExtent = 0.38 (full span on Z axis), scale = 0.22 / 0.38
+    const expectedBase = 0.22 / 0.38;
+    const scaleMult = 1.0;
+    const finalScale = normResult.scale * scaleMult * VIEWMODEL_SCALE;
+    expect(finalScale).toBeCloseTo(expectedBase * VIEWMODEL_SCALE, 5);
   });
 });
 

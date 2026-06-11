@@ -308,6 +308,13 @@ const HUD_CSS = `
   border-top: 1px solid rgba(255,255,255,0.07);
   font-weight: 600; font-variant-numeric: tabular-nums;
 }
+.buy-time-label {
+  text-align: center; font-size: 11px; color: rgba(232,230,225,0.55);
+  margin-bottom: 6px; padding-bottom: 6px;
+  border-bottom: 1px solid rgba(255,255,255,0.07);
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.06em;
+}
 .buy-key {
   display: inline-flex; align-items: center; justify-content: center;
   width: 18px; height: 18px; border-radius: 3px; flex-shrink: 0;
@@ -955,6 +962,7 @@ export class HUD {
   hideMenus(): void {
     this._startMenu.classList.remove('visible');
     this._pauseMenu.classList.remove('visible');
+    this._setBuyVisible(false);
   }
 
   setSensitivityHook(get: () => number, set: (v: number) => void): void {
@@ -1457,6 +1465,7 @@ export class HUD {
     this._buyMenu.innerHTML = `
       <div class="buy-panel">
         <h3>Weapons</h3>
+        <div class="buy-time-label">BUY TIME: —</div>
         ${_buyRow(pistolId,  pistolLabel,     200,              1)}
         ${_buyRow('deagle', 'Desert Eagle',   700,              2)}
         ${_buyRow(rifleId,   rifleLabel,      riflePrice,       3)}
@@ -1495,10 +1504,17 @@ export class HUD {
         item.classList.remove('cant');
       }
     }
-    // Also refresh money display.
+    // Refresh money display.
     const moneyLabels = this._buyMenu.querySelectorAll<HTMLElement>('.buy-money-label');
     for (const el of moneyLabels) {
       el.textContent = `$${player.money}`;
+    }
+    // Refresh buy-time countdown.
+    const now = this.getNow();
+    const timeLeft = this._game.buyTimeLeft(now);
+    const timeEl = this._buyMenu.querySelector<HTMLElement>('.buy-time-label');
+    if (timeEl) {
+      timeEl.textContent = `BUY TIME: ${_formatTime(timeLeft)}`;
     }
   }
 

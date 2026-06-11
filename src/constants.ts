@@ -104,6 +104,8 @@ export const ECONOMY = {
 
 export const RULES = {
   FREEZE_TIME: 5,
+  /** Seconds from freeze start during which buying is allowed (CS2-style: buy window outlasts freeze). */
+  BUY_TIME: 30,
   ROUND_TIME: 115,
   BOMB_TIME: 40,
   DEFUSE_TIME: 10,

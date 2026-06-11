@@ -333,7 +333,7 @@ export class Game {
   // startMatch
   // ---------------------------------------------------------------------------
 
-  startMatch(opts: MatchOptions): void {
+  startMatch(opts: MatchOptions, now = 0): void {
     this._opts = opts;
     this.difficulty = opts.difficulty;
     const botsPerTeam = opts.botsPerTeam ?? 4;
@@ -416,14 +416,14 @@ export class Game {
       }
     }
 
-    this._startRound();
+    this._startRound(now);
   }
 
   // ---------------------------------------------------------------------------
   // _startRound
   // ---------------------------------------------------------------------------
 
-  private _startRound(): void {
+  private _startRound(now = 0): void {
     this.roundNumber++;
     this.phase         = 'freeze';
     this._bombPlanted  = false;
@@ -433,7 +433,6 @@ export class Game {
     this._roundDefuser = null;
     this._spectateHiddenId = null;
 
-    const now = this._now();
     this._freezeStartAt = now;
     this._roundStartAt  = 0;
 
@@ -972,8 +971,10 @@ export class Game {
 
   canBuy(now: number): boolean {
     if (this.phase === 'freeze') return true;
-    if (this.phase === 'live') {
-      return (now - this._roundStartAt) <= 10;
+    if (this.phase === 'live' || this.phase === 'planted') {
+      // Buy window extends RULES.BUY_TIME seconds from when the freeze phase began,
+      // so players can still buy for the first (BUY_TIME - FREEZE_TIME) seconds of live.
+      return now < this._freezeStartAt + RULES.BUY_TIME;
     }
     return false;
   }
@@ -985,6 +986,14 @@ export class Game {
   roundTimeLeft(now: number): number {
     if (this.phase !== 'live') return 0;
     return Math.max(0, RULES.ROUND_TIME - (now - this._roundStartAt));
+  }
+
+  /** Seconds remaining in the buy window (0 once expired or in a non-buyable phase). */
+  buyTimeLeft(now: number): number {
+    if (this.phase === 'freeze' || this.phase === 'live' || this.phase === 'planted') {
+      return Math.max(0, this._freezeStartAt + RULES.BUY_TIME - now);
+    }
+    return 0;
   }
 
   bombTimeLeft(now: number): number {
@@ -1033,7 +1042,7 @@ export class Game {
   // restart
   // ---------------------------------------------------------------------------
 
-  restart(opts?: MatchOptions): void {
+  restart(opts?: MatchOptions, now = 0): void {
     if (!opts && !this._opts) {
       // Full reset to menu.
       this.phase = 'menu';
@@ -1047,7 +1056,7 @@ export class Game {
     }
     const o = opts ?? this._opts!;
     this._opts = o;
-    this.startMatch(o);
+    this.startMatch(o, now);
   }
 
   // ---------------------------------------------------------------------------
@@ -1210,7 +1219,7 @@ export class Game {
       gameEvents.emit('matchEnd', { winner: w });
       return;
     }
-    this._startRound();
+    this._startRound(now);
   }
 
   // ---------------------------------------------------------------------------

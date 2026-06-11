@@ -327,9 +327,9 @@ describe('buy', () => {
     game.update(freezeEnd, freezeEnd);
     expect(game.phase).toBe('live');
 
-    // Now advance well past the 10 s buy window.
-    const buyWindowEnd = freezeEnd + 15; // 15 s after live start
-    game.update(15, buyWindowEnd);
+    // Advance past the 30 s buy window (measured from freeze start = 0).
+    const buyWindowEnd = RULES.BUY_TIME + 5; // 35 s from freeze start → past window
+    game.update(buyWindowEnd - freezeEnd, buyWindowEnd);
     game.player.money = 5000;
 
     const ok = game.buy(game.player, 'ak47', buyWindowEnd);
@@ -376,7 +376,7 @@ describe('canBuy across rounds', () => {
     expect(game.player.inventory.primary?.def.id).toBe('ak47');
   });
 
-  test('canBuy is true during first 10 s of live in round 2', () => {
+  test('canBuy is true during buy window of live in round 2, false after 30 s from freeze start', () => {
     game = freshGame();
     game.startMatch(DEFAULT_OPTS);
 
@@ -389,19 +389,23 @@ describe('canBuy across rounds', () => {
     const afterPause1 = freeze1 + RULES.ROUND_END_PAUSE + 1;
     game.update(RULES.ROUND_END_PAUSE + 1, afterPause1);
 
+    // Now in round 2 freeze phase; _freezeStartAt = afterPause1.
+    expect(game.phase).toBe('freeze');
+    const r2FreezeStart = afterPause1;
+
     // Advance into live of round 2.
     const liveStart = afterPause1 + RULES.FREEZE_TIME + 0.1;
     game.update(RULES.FREEZE_TIME + 0.1, liveStart);
     expect(game.phase).toBe('live');
 
-    // Within the 10 s window: canBuy must be true.
+    // Within the BUY_TIME window (5 s after live start, window ends at r2FreezeStart + 30).
     const inWindow = liveStart + 5;
     game.update(5, inWindow);
     expect(game.canBuy(inWindow)).toBe(true);
 
-    // Past the 10 s window: canBuy must be false.
-    const pastWindow = liveStart + 15;
-    game.update(10, pastWindow);
+    // Past the 30 s window from freeze start: canBuy must be false.
+    const pastWindow = r2FreezeStart + RULES.BUY_TIME + 2; // 2 s past window end
+    game.update(pastWindow - inWindow, pastWindow);
     expect(game.canBuy(pastWindow)).toBe(false);
   });
 });
