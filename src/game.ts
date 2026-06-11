@@ -372,6 +372,11 @@ export class Game {
   update(dt: number, now: number): void {
     if (this.phase === 'menu' || this.phase === 'matchEnd') return;
 
+    // Sync bomb position to carrier so radar always shows correct location.
+    if (this.bomb.state === 'carried' && this.bomb.carrier !== null) {
+      this.bomb.pos = { ...this.bomb.carrier.pos };
+    }
+
     // ----- Freeze → Live -----
     if (this.phase === 'freeze') {
       if (now - this._freezeStartAt >= RULES.FREEZE_TIME) {
@@ -641,12 +646,12 @@ export class Game {
   // updateVisuals — called at render rate by main.ts
   // ---------------------------------------------------------------------------
 
-  updateVisuals(frameDt: number): void {
+  updateVisuals(frameDt: number, now: number = performance.now() / 1000): void {
     for (const c of this.combatants) {
       if (c.isPlayer) continue;
       const mesh = this._botMeshes.get(c.id);
       if (mesh) {
-        updateCharacterMesh(mesh, c, frameDt);
+        updateCharacterMesh(mesh, c, frameDt, now);
       }
     }
 

@@ -349,6 +349,63 @@ describe('buy', () => {
   });
 });
 
+describe('canBuy across rounds', () => {
+  test('canBuy is true during freeze in round 2', () => {
+    game = freshGame();
+    game.startMatch(DEFAULT_OPTS);
+
+    // Advance through round 1 (CT elimination win).
+    const freeze1 = RULES.FREEZE_TIME + 0.1;
+    game.update(freeze1, freeze1);
+    for (const c of game.combatants) {
+      if (c.team === 'T') { c.alive = false; c.health = 0; }
+    }
+    game.update(0.016, freeze1 + 0.016);
+    const afterPause1 = freeze1 + RULES.ROUND_END_PAUSE + 1;
+    game.update(RULES.ROUND_END_PAUSE + 1, afterPause1);
+
+    // Now in round 2 freeze phase.
+    expect(game.phase).toBe('freeze');
+    expect(game.roundNumber).toBe(2);
+    // canBuy must be true at current game-time during freeze.
+    expect(game.canBuy(afterPause1)).toBe(true);
+    // buy must succeed when called with the same game-time.
+    game.player.money = 5000;
+    const ok = game.buy(game.player, 'ak47', afterPause1);
+    expect(ok).toBe(true);
+    expect(game.player.inventory.primary?.def.id).toBe('ak47');
+  });
+
+  test('canBuy is true during first 10 s of live in round 2', () => {
+    game = freshGame();
+    game.startMatch(DEFAULT_OPTS);
+
+    const freeze1 = RULES.FREEZE_TIME + 0.1;
+    game.update(freeze1, freeze1);
+    for (const c of game.combatants) {
+      if (c.team === 'T') { c.alive = false; c.health = 0; }
+    }
+    game.update(0.016, freeze1 + 0.016);
+    const afterPause1 = freeze1 + RULES.ROUND_END_PAUSE + 1;
+    game.update(RULES.ROUND_END_PAUSE + 1, afterPause1);
+
+    // Advance into live of round 2.
+    const liveStart = afterPause1 + RULES.FREEZE_TIME + 0.1;
+    game.update(RULES.FREEZE_TIME + 0.1, liveStart);
+    expect(game.phase).toBe('live');
+
+    // Within the 10 s window: canBuy must be true.
+    const inWindow = liveStart + 5;
+    game.update(5, inWindow);
+    expect(game.canBuy(inWindow)).toBe(true);
+
+    // Past the 10 s window: canBuy must be false.
+    const pastWindow = liveStart + 15;
+    game.update(10, pastWindow);
+    expect(game.canBuy(pastWindow)).toBe(false);
+  });
+});
+
 describe('Loss bonus progression', () => {
   test('loss streak increments correctly', () => {
     game = freshGame();

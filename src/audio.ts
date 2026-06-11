@@ -294,12 +294,8 @@ export class GameAudio {
 
     src.connect(lp);
     lp.connect(gain);
-    gain.connect(master);
-    src.start(now);
-    src.stop(now + 0.14);
 
     if (pos) {
-      // positional version replaces the above connection (re-do with panner)
       const panner = ctx.createPanner();
       panner.distanceModel = 'inverse';
       panner.refDistance   = 5;
@@ -307,10 +303,14 @@ export class GameAudio {
       panner.positionX.setValueAtTime(pos.x, now);
       panner.positionY.setValueAtTime(pos.y, now);
       panner.positionZ.setValueAtTime(pos.z, now);
-      gain.disconnect();
       gain.connect(panner);
       panner.connect(master);
+    } else {
+      gain.connect(master);
     }
+
+    src.start(now);
+    src.stop(now + 0.14);
   }
 
   // ---------------------------------------------------------------------------

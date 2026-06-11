@@ -161,21 +161,12 @@ export class Effects {
       if (p.life <= 0) {
         p.life = -1;
         p.mesh.visible = false;
-        return;
+        continue;
       }
       const t = p.life / p.maxLife; // 1 at start, 0 at end
       const m = p.mesh.material as THREE.MeshBasicMaterial;
       m.opacity = t;
     }
-  }
-
-  private _nextParticle(
-    pool: Particle[],
-    idx: { value: number },
-  ): Particle {
-    const p = pool[idx.value % pool.length];
-    idx.value = (idx.value + 1) % pool.length;
-    return p;
   }
 
   tracer(from: Vec3, to: Vec3): void {
@@ -185,9 +176,8 @@ export class Effects {
     const len = Math.sqrt(dx * dx + dy * dy + dz * dz);
     if (len < MIN_TRACER_LEN) return;
 
-    const idx = { value: this._tracerIdx };
-    const p   = this._nextParticle(this._tracers, idx);
-    this._tracerIdx = idx.value;
+    const p = this._tracers[this._tracerIdx % this._tracers.length];
+    this._tracerIdx = (this._tracerIdx + 1) % this._tracers.length;
 
     p.life    = TRACER_LIFE;
     p.maxLife = TRACER_LIFE;
@@ -209,9 +199,8 @@ export class Effects {
   }
 
   impact(point: Vec3, normal: Vec3, _surface: 'world' | 'flesh'): void {
-    const idx = { value: this._impactIdx };
-    const p   = this._nextParticle(this._impacts, idx);
-    this._impactIdx = idx.value;
+    const p = this._impacts[this._impactIdx % this._impacts.length];
+    this._impactIdx = (this._impactIdx + 1) % this._impacts.length;
 
     p.life    = IMPACT_LIFE;
     p.maxLife = IMPACT_LIFE;
@@ -234,9 +223,8 @@ export class Effects {
   }
 
   blood(point: Vec3): void {
-    const idx = { value: this._bloodIdx };
-    const p   = this._nextParticle(this._blood, idx);
-    this._bloodIdx = idx.value;
+    const p = this._blood[this._bloodIdx % this._blood.length];
+    this._bloodIdx = (this._bloodIdx + 1) % this._blood.length;
 
     p.life    = BLOOD_LIFE;
     p.maxLife = BLOOD_LIFE;
@@ -256,9 +244,8 @@ export class Effects {
   }
 
   muzzleFlash(worldPos: Vec3): void {
-    const idx = { value: this._flashIdx };
-    const p   = this._nextParticle(this._flashes, idx);
-    this._flashIdx = idx.value;
+    const p = this._flashes[this._flashIdx % this._flashes.length];
+    this._flashIdx = (this._flashIdx + 1) % this._flashes.length;
 
     p.life    = FLASH_LIFE;
     p.maxLife = FLASH_LIFE;

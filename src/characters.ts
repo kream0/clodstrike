@@ -105,6 +105,7 @@ export function updateCharacterMesh(
   group: THREE.Group,
   c: Combatant,
   dt: number,
+  now: number = performance.now() / 1000,
 ): void {
   const state = (group as THREE.Group & { _cs2State?: MeshState })._cs2State;
   if (!state) return;
@@ -148,7 +149,7 @@ export function updateCharacterMesh(
     if (c.onGround && horizSpeed > 0.3) {
       const amp  = 0.25;                           // radians
       const freq = horizSpeed * 2.5;               // cycles per meter ≈ per second at 4 m/s
-      const t2   = performance.now() / 1000;
+      const t2   = now;
       const swing = Math.sin(t2 * freq) * amp;
       const leftLeg  = group.children[0] as THREE.Mesh;
       const rightLeg = group.children[1] as THREE.Mesh;

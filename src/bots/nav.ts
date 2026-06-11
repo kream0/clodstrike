@@ -293,18 +293,14 @@ export class NavGrid {
         if (this._visited[nIdx]) continue;
 
         const tentativeG = this._gScore[current] + edge.cost;
-        let isNew = false;
         if (this._gScore[nIdx] === Infinity) {
           dirty.push(nIdx);
-          isNew = true;
         }
         if (tentativeG < this._gScore[nIdx]) {
           this._parent[nIdx]  = current;
           this._gScore[nIdx]  = tentativeG;
           this._fScore[nIdx]  = tentativeG + h(nIdx);
-          if (isNew || tentativeG < this._gScore[nIdx]) {
-            this._heap.push(this._fScore[nIdx], nIdx);
-          }
+          this._heap.push(this._fScore[nIdx], nIdx);
         }
       }
     }

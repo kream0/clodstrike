@@ -239,6 +239,9 @@ function boot(): void {
     (v) => { input.sensitivity = v; },
   );
 
+  // Wire game-time provider so buy menu uses clock.now not wall time.
+  hud.getNow = () => clock.now;
+
   // --- Audio buy events ---
   document.body.addEventListener('hud-buy-success', () => {
     audio.buyClick();
@@ -313,6 +316,13 @@ function boot(): void {
   gameEvents.on('roundEnd', (ev) => {
     const win = (ev.winner === player.team);
     audio.roundEnd(win);
+  });
+
+  // Sync viewmodel to active weapon on round start (handles respawn weapon resets).
+  gameEvents.on('roundStart', () => {
+    const slot = player.inventory.activeSlot;
+    const ws   = player.inventory[slot];
+    viewmodel.setWeapon(ws?.def.id ?? 'usp');
   });
 
   // --- Lock hint ---
@@ -442,29 +452,37 @@ function boot(): void {
     // Mouse delta for viewmodel sway.
     const { dx: mouseDxRaw, dy: mouseDyRaw } = input.consumeMouseDelta();
 
+    // Apply mouse look once per render frame (before fixed-step loop).
+    // Must be outside the loop so catch-up ticks don't multiply rotation.
+    if (input.locked && !paused && game.phase !== 'menu') {
+      const scopedSensScale = isScoped(player) ? 0.4 : 1.0;
+      player.yaw   -= mouseDxRaw * input.sensitivity * scopedSensScale;
+      player.pitch  = clamp(
+        player.pitch - mouseDyRaw * input.sensitivity * scopedSensScale,
+        -Math.PI / 2 * 89 / 90,
+        Math.PI / 2 * 89 / 90,
+      );
+      player.yaw = ((player.yaw + Math.PI) % (Math.PI * 2) + Math.PI * 2) % (Math.PI * 2) - Math.PI;
+    }
+
+    // Capture edge flags before the loop; only honour them on the first tick.
+    const mousePressed0  = input.mousePressed;
+    const mouse2Pressed0 = input.mouse2Pressed;
+    let edgesConsumed    = false;
+
+    // When unpausing: clamp the accumulator to avoid a giant catch-up burst.
+    // (The accumulator was not advanced while paused, so no burst on resume.)
+
     // Fixed-step ticks.
     while (accumulator >= FIXED_DT) {
       accumulator -= FIXED_DT;
-      clock.now   += FIXED_DT;
 
-      // Skip simulation when paused or in menu.
+      // While paused or in menu: do not advance clock, do not simulate.
       if (paused || game.phase === 'menu') {
-        // Still consume the tick but don't advance simulation.
-        game.update(FIXED_DT, clock.now);
         continue;
       }
 
-      // Mouse look (player alive or freeze/live phase for look).
-      if (input.locked) {
-        const scopedSensScale = isScoped(player) ? 0.4 : 1.0;
-        player.yaw   -= mouseDxRaw * input.sensitivity * scopedSensScale;
-        player.pitch  = clamp(
-          player.pitch - mouseDyRaw * input.sensitivity * scopedSensScale,
-          -Math.PI / 2 * 89 / 90,
-          Math.PI / 2 * 89 / 90,
-        );
-        player.yaw = ((player.yaw + Math.PI) % (Math.PI * 2) + Math.PI * 2) % (Math.PI * 2) - Math.PI;
-      }
+      clock.now += FIXED_DT;
 
       const isFreeze   = game.phase === 'freeze';
       const playerAlive = player.alive;
@@ -532,14 +550,16 @@ function boot(): void {
       const reloadEdge = keyRDown && !prevKeyR;
       prevKeyR = keyRDown;
 
-      const scopeEdge = input.mouse2Pressed;
+      // Edge flags must only fire on the first tick of this frame.
+      const scopeEdge = !edgesConsumed && mouse2Pressed0;
 
       let trigger: boolean;
       if (def && def.auto) {
         trigger = input.mouseDown;
       } else {
-        trigger = input.mousePressed;
+        trigger = !edgesConsumed && mousePressed0;
       }
+      edgesConsumed = true;
 
       // Block firing while plant/defuse in progress.
       if (bombInProgress) trigger = false;
@@ -615,7 +635,7 @@ function boot(): void {
 
     // --- Update systems ---
     effects.update(frameDt);
-    game.updateVisuals(frameDt);
+    game.updateVisuals(frameDt, clock.now);
     hud.update(clock.now, frameDt);
     audio.updateListener(camera);
 

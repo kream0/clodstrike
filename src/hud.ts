@@ -291,8 +291,8 @@ const HUD_CSS = `
 // ---------------------------------------------------------------------------
 
 const RADAR_SIZE    = 168;   // px
-const MAP_WORLD_W   = 96;    // DUST2 grid cols (96 cols * 1 m)
-const MAP_WORLD_H   = 115;   // DUST2 grid rows (see grid length)
+const MAP_WORLD_W   = DUST2.grid[0]?.length ?? 96;  // derive from actual grid width
+const MAP_WORLD_H   = DUST2.grid.length;             // derive from actual grid height
 const MAP_ORIGIN_X  = -48;
 const MAP_ORIGIN_Z  = -44;
 
@@ -362,6 +362,9 @@ export class HUD {
   onStart?:   (opts: MatchOptions) => void;
   onResume?:  () => void;
   onRestart?: () => void;
+
+  // Game-time provider — set by main.ts to use clock.now instead of wall time.
+  getNow: () => number = () => performance.now() / 1000;
 
   constructor(root: HTMLElement, game: Game) {
     this._root = root;
@@ -900,7 +903,7 @@ export class HUD {
       item.addEventListener('click', () => {
         const id    = item.dataset.id!;
         const game  = this._game;
-        const now   = performance.now() / 1000;
+        const now   = this.getNow();
         const ok    = game.buy(game.player, id, now);
         if (ok) {
           // Buy click handled by main.ts audio hook (notified via buyClick callback).
@@ -938,7 +941,7 @@ export class HUD {
         this._scoreboard.classList.add('visible');
       }
       // B: buy menu toggle.
-      if (e.code === 'KeyB' && this._game.canBuy(performance.now() / 1000)) {
+      if (e.code === 'KeyB' && this._game.canBuy(this.getNow())) {
         this._setBuyVisible(!this._buyVisible);
       }
       // Escape: close buy menu (pointer-lock exit / pause handled by main.ts separately).

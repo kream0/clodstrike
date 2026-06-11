@@ -9,7 +9,7 @@
  *   5. updateWeapon(bot, world, targets, input, now, dt)
  */
 
-import type { Combatant, Vec3 } from '../types';
+import type { Combatant, Vec3, MapData } from '../types';
 import type { World } from '../world';
 import type { Game } from '../game';
 import type { ShotResult } from '../combat';
@@ -19,6 +19,7 @@ import { simulateMovement } from '../movement';
 import type { MoveIntent } from '../movement';
 import { updateWeapon, getViewPunch, switchSlot } from '../weapons';
 import { NavGrid } from './nav';
+import { DUST2 } from '../maps/dust2';
 import {
   distance,
   distanceSq,
@@ -180,10 +181,9 @@ export class BotManager {
 
   private _brains:  Map<number, BotBrain> = new Map();
   private _unsubs:  Array<() => void>     = [];
+  private _lastNow: number                = 0;
 
-  // Lazily loaded map data (avoids circular import issues at module top level).
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  private _mapData: any = null;
+  private readonly _mapData: MapData = DUST2;
 
   constructor(
     game:       Game,
@@ -207,9 +207,6 @@ export class BotManager {
   // ---------------------------------------------------------------------------
 
   attach(): void {
-    // eslint-disable-next-line @typescript-eslint/no-var-requires
-    this._mapData = require('../maps/dust2').DUST2;
-
     const game = this._game;
 
     for (const c of game.combatants) {
@@ -389,7 +386,7 @@ export class BotManager {
       const d = distance(br.bot.pos, victim.pos);
       if (d <= 40) {
         br.lastKnownPos = { ...victim.pos };
-        br.lastKnownAt  = 0;
+        br.lastKnownAt  = this._lastNow;
       }
     }
   }
@@ -429,6 +426,9 @@ export class BotManager {
   private _tick(br: BotBrain, dt: number, now: number): void {
     const bot  = br.bot;
     const game = this._game;
+
+    // Track current time for event handlers that have no 'now' parameter.
+    this._lastNow = now;
 
     if (game.phase === 'freeze') return;
     if (!bot.alive) return;
@@ -470,7 +470,7 @@ export class BotManager {
     this._detectStuck(br, dt, now, intent);
 
     // 8. Aim.
-    this._aimAt(br, now, diff);
+    this._aimAt(br, dt, now, diff);
 
     // 9. Weapon update.
     const weapInput = this._weaponInput(br, now, diff);
@@ -867,13 +867,14 @@ export class BotManager {
 
   private _aimAt(
     br: BotBrain,
+    dt: number,
     now: number,
     diff: { reactionMs: number; aimErrorDeg: number; recoilControl: number; visionRange: number },
   ): void {
     const bot      = br.bot;
     const game     = this._game;
     const turnRate = TURN_SPEED[game.difficulty];
-    const dtFixed  = 1 / 64; // approximation per tick
+    const dtFixed  = dt;
 
     // If in guard and no target, face guard direction.
     if (br.state === 'guard' && br.target === null) {
