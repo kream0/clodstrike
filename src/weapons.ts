@@ -1,6 +1,5 @@
-import type { Combatant, WeaponSlot, GrenadeType } from './types';
+import type { Combatant, WeaponDef, WeaponSlot, GrenadeType } from './types';
 import type { World } from './world';
-import { MOVEMENT } from './constants';
 import { clamp, randSpread, yawPitchToDir, normalize } from './math';
 import { fireHitscan, knifeAttack } from './combat';
 import type { ShotResult } from './combat';
@@ -23,7 +22,7 @@ const aimStates = new Map<number, AimState>();
 function getAim(c: Combatant): AimState {
   let s = aimStates.get(c.id);
   if (!s) {
-    s = { viewPunchPitch: 0, viewPunchYaw: 0, scoped: false, lastShotAt: 0, lastTriggerAt: -1 };
+    s = { viewPunchPitch: 0, viewPunchYaw: 0, scoped: false, lastShotAt: -1, lastTriggerAt: -1 };
     aimStates.set(c.id, s);
   }
   return s;
@@ -42,6 +41,58 @@ export function isScoped(c: Combatant): boolean {
   return getAim(c).scoped;
 }
 
+// ---------------------------------------------------------------------------
+// Shared spread computation (used by both currentSpread() and updateWeapon)
+// ---------------------------------------------------------------------------
+
+/**
+ * Compute the firing spread cone (radians) for a combatant given a weapon def
+ * and the current shot count.
+ *
+ * Movement accuracy curve (CS2-like): below 34% of moveSpeed the movement
+ * penalty is zero (counter-strafe / walk accuracy window).  Above that,
+ * the penalty ramps quadratically up to def.spreadMove at full run speed.
+ * Spray inaccuracy: def.spreadSpray × min(shotsFired, 10) added on top.
+ */
+function computeSpread(
+  c: Combatant,
+  def: WeaponDef,
+  scoped: boolean,
+  shotsFired: number,
+): number {
+  if (def.isKnife) return 0;
+  if (def.scope && scoped) {
+    // AWP scoped: minimal spread; moving keeps penalty via moveFrac logic.
+    const horizSpeed = Math.sqrt(c.vel.x * c.vel.x + c.vel.z * c.vel.z);
+    const moveFrac   = clamp(horizSpeed / def.moveSpeed, 0, 1);
+    if (moveFrac > 0.34) {
+      const t = (moveFrac - 0.34) / 0.66;
+      return 0.0008 + def.spreadMove * 0.5 * t * t;
+    }
+    return 0.0008;
+  }
+
+  const horizSpeed = Math.sqrt(c.vel.x * c.vel.x + c.vel.z * c.vel.z);
+  const moveFrac   = clamp(horizSpeed / def.moveSpeed, 0, 1);
+
+  // Quadratic movement penalty: zero below 0.34, ramps to spreadMove at 1.0.
+  let movePenalty = 0;
+  if (moveFrac > 0.34) {
+    const t = (moveFrac - 0.34) / 0.66;
+    movePenalty = def.spreadMove * t * t;
+  }
+
+  let spread = def.spreadBase + movePenalty;
+  if (!c.onGround) spread += def.spreadAir;
+  if (c.crouching) spread *= 0.65;
+
+  // Spray inaccuracy: capped at 10 consecutive shots.
+  const sprayShots = Math.min(shotsFired, 10);
+  spread += (def.spreadSpray ?? 0) * sprayShots;
+
+  return spread;
+}
+
 export function currentSpread(c: Combatant, now: number): number {
   const slot = c.inventory.activeSlot;
   const ws =
@@ -53,14 +104,7 @@ export function currentSpread(c: Combatant, now: number): number {
   if (def.isKnife) return 0;
 
   const aim = getAim(c);
-  if (def.scope && aim.scoped) return 0.0008;
-
-  const horizSpeed  = Math.sqrt(c.vel.x * c.vel.x + c.vel.z * c.vel.z);
-  const moveFrac    = clamp(horizSpeed / def.moveSpeed, 0, 1);
-  let spread = def.spreadBase + def.spreadMove * moveFrac;
-  if (!c.onGround) spread += def.spreadAir;
-  if (c.crouching) spread *= 0.65;
-  return spread;
+  return computeSpread(c, def, aim.scoped, ws.shotsFired);
 }
 
 export function switchSlot(c: Combatant, slot: WeaponSlot, now: number): boolean {
@@ -103,7 +147,7 @@ export function resetAim(c: Combatant): void {
   s.viewPunchPitch = 0;
   s.viewPunchYaw   = 0;
   s.scoped         = false;
-  s.lastShotAt     = 0;
+  s.lastShotAt     = -1;
   s.lastTriggerAt  = -1;
 }
 
@@ -160,14 +204,21 @@ export function updateWeapon(
     aim.scoped = !aim.scoped;
   }
 
-  // ----- Recoil recovery (always) -----
-  const recovery = def.recoilRecovery * dt;
-  aim.viewPunchPitch = aim.viewPunchPitch > 0
-    ? Math.max(0, aim.viewPunchPitch - recovery)
-    : Math.min(0, aim.viewPunchPitch + recovery);
-  aim.viewPunchYaw = aim.viewPunchYaw > 0
-    ? Math.max(0, aim.viewPunchYaw - recovery)
-    : Math.min(0, aim.viewPunchYaw + recovery);
+  // ----- Recoil recovery (suppressed while spraying) -----
+  // Suppress recovery during a spray burst so that pattern entries accumulate
+  // correctly.  sprayWindow is 1.5× the inter-shot interval, capped at 0.3 s
+  // so slow weapons (e.g. AWP bolt ~1.2 s) still recover between shots.
+  const sprayWindow = Math.min((60 / def.rpm) * 1.5, 0.3);
+  const activelySpraying = aim.lastShotAt >= 0 && (now - aim.lastShotAt) <= sprayWindow;
+  if (!activelySpraying) {
+    const recovery = def.recoilRecovery * dt;
+    aim.viewPunchPitch = aim.viewPunchPitch > 0
+      ? Math.max(0, aim.viewPunchPitch - recovery)
+      : Math.min(0, aim.viewPunchPitch + recovery);
+    aim.viewPunchYaw = aim.viewPunchYaw > 0
+      ? Math.max(0, aim.viewPunchYaw - recovery)
+      : Math.min(0, aim.viewPunchYaw + recovery);
+  }
 
   // ----- Shot fired counter reset -----
   if (!input.trigger) {
@@ -197,23 +248,12 @@ export function updateWeapon(
   aim.lastTriggerAt = -1; // reset so the 0.4s reset doesn't fire mid-burst
 
   // ----- Compute direction with spread -----
+  // shotsFired was just incremented; pass it so spray inaccuracy accounts for
+  // the current shot.  Spread function uses min(shotsFired, 10) internally.
   const baseYaw   = c.yaw   + aim.viewPunchYaw;
   const basePitch = c.pitch + aim.viewPunchPitch;
 
-  let spread: number;
-  if (def.isKnife) {
-    spread = 0;
-  } else if (def.scope && aim.scoped) {
-    // AWP scoped: minimal spread, penalty if moving.
-    const horizSpeed = Math.sqrt(c.vel.x * c.vel.x + c.vel.z * c.vel.z);
-    spread = horizSpeed > 0.5 ? def.spreadMove * 0.5 : 0.0008;
-  } else {
-    const horizSpeed  = Math.sqrt(c.vel.x * c.vel.x + c.vel.z * c.vel.z);
-    const moveFrac    = clamp(horizSpeed / def.moveSpeed, 0, 1);
-    spread = def.spreadBase + def.spreadMove * moveFrac;
-    if (!c.onGround) spread += def.spreadAir;
-    if (c.crouching) spread *= 0.65;
-  }
+  const spread = def.isKnife ? 0 : computeSpread(c, def, aim.scoped, ws.shotsFired);
 
   const spreadYaw   = randSpread(spread);
   const spreadPitch = randSpread(spread);
@@ -222,11 +262,22 @@ export function updateWeapon(
   const normDir  = normalize(shootDir);
 
   // ----- Recoil application -----
-  aim.viewPunchPitch += def.recoilPitch * (1 + ws.shotsFired * 0.06);
-  aim.viewPunchPitch  = Math.min(aim.viewPunchPitch, 0.35);
-
-  const yawPattern = Math.sin(ws.shotsFired * 0.7);
-  aim.viewPunchYaw += def.recoilYaw * yawPattern;
+  const pattern = def.recoilPattern;
+  if (pattern !== undefined && pattern.length > 0) {
+    // Pattern-based recoil: index = shotsFired-1, clamped to last entry.
+    const idx   = Math.min(ws.shotsFired - 1, pattern.length - 1);
+    const entry = pattern[idx]!;
+    const DEG_TO_RAD = Math.PI / 180;
+    const jitter     = 1 + randSpread(0.15);  // ±15% determinism noise
+    aim.viewPunchPitch += entry[0] * DEG_TO_RAD * jitter;
+    aim.viewPunchYaw   += entry[1] * DEG_TO_RAD * jitter;
+  } else {
+    // Legacy formula (deagle, awp, knife).
+    aim.viewPunchPitch += def.recoilPitch * (1 + ws.shotsFired * 0.06);
+    const yawPattern = Math.sin(ws.shotsFired * 0.7);
+    aim.viewPunchYaw += def.recoilYaw * yawPattern;
+  }
+  aim.viewPunchPitch = Math.min(aim.viewPunchPitch, 0.35);
 
   // ----- Execute shot -----
   const result = def.isKnife

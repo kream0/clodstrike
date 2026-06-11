@@ -1618,7 +1618,7 @@ export class HUD {
     const center = size / 2;
     ctx.clearRect(0, 0, size, size);
 
-    const gap     = 4 + spread * 300; // scale spread to pixel gap
+    const gap     = Math.min(4 + spread * 300, 56); // scale spread to pixel gap; capped so arms stay inside 120px canvas
     const length  = this._hitmarkerTimer > 0 && this._hitmarkerKill ? 10 : 7;
 
     if (this._hitmarkerTimer > 0) {

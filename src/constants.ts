@@ -1,5 +1,122 @@
 import type { Team, WeaponDef, GrenadeType } from './types';
 
+// ---------------------------------------------------------------------------
+// Recoil pattern data
+//
+// Format: ReadonlyArray of [pitchDeg, yawDeg] per shot (index = shotsFired-1).
+// pitchDeg > 0 = upward kick. yawDeg > 0 = kick right (from shooter's perspective).
+// Clamped to last entry when shotsFired exceeds pattern length.
+// deagle and awp have no pattern — they use the legacy formula.
+// ---------------------------------------------------------------------------
+
+/** AK-47: 30-entry "7"-shape — strong vertical climb, drift right then left then right. */
+const AK47_PATTERN: ReadonlyArray<readonly [number, number]> = [
+  // Shots 1-9: strong vertical climb
+  [1.6,  0.0],
+  [1.8,  0.1],
+  [2.0,  0.2],
+  [2.1,  0.3],
+  [2.1,  0.4],
+  [2.2,  0.5],
+  [2.2,  0.6],
+  [2.2,  0.7],
+  [2.0,  0.8],
+  // Shots 10-13: drift right (yaw > 0), reduced pitch
+  [0.4,  1.0],
+  [0.3,  1.1],
+  [0.3,  1.2],
+  [0.3,  0.9],
+  // Shots 14-20: drift left (yaw < 0)
+  [0.4, -0.9],
+  [0.4, -1.1],
+  [0.4, -1.2],
+  [0.4, -1.3],
+  [0.4, -1.2],
+  [0.4, -1.1],
+  [0.4, -0.9],
+  // Shots 21-30: drift right again
+  [0.4,  0.8],
+  [0.4,  0.9],
+  [0.4,  1.0],
+  [0.4,  1.1],
+  [0.4,  1.0],
+  [0.4,  0.9],
+  [0.4,  0.8],
+  [0.4,  0.7],
+  [0.4,  0.6],
+  [0.4,  0.5],
+] as const;
+
+/** M4A4: 30-entry same-family as AK, ~75% magnitude, smoother weave. */
+const M4A4_PATTERN: ReadonlyArray<readonly [number, number]> = [
+  // Shots 1-9: vertical climb
+  [1.2,  0.0],
+  [1.3,  0.1],
+  [1.5,  0.15],
+  [1.6,  0.2],
+  [1.6,  0.3],
+  [1.65, 0.35],
+  [1.65, 0.45],
+  [1.65, 0.5],
+  [1.5,  0.6],
+  // Shots 10-13: drift right
+  [0.3,  0.75],
+  [0.25, 0.82],
+  [0.25, 0.9],
+  [0.25, 0.7],
+  // Shots 14-20: drift left
+  [0.3, -0.7],
+  [0.3, -0.82],
+  [0.3, -0.9],
+  [0.3, -1.0],
+  [0.3, -0.9],
+  [0.3, -0.82],
+  [0.3, -0.7],
+  // Shots 21-30: drift right again
+  [0.3,  0.6],
+  [0.3,  0.7],
+  [0.3,  0.75],
+  [0.3,  0.82],
+  [0.3,  0.75],
+  [0.3,  0.7],
+  [0.3,  0.6],
+  [0.3,  0.5],
+  [0.3,  0.45],
+  [0.3,  0.4],
+] as const;
+
+/** Glock-18: 12-entry gentle climb, slight alternating yaw. */
+const GLOCK_PATTERN: ReadonlyArray<readonly [number, number]> = [
+  [0.5,  0.0],
+  [0.55, 0.1],
+  [0.6,  0.15],
+  [0.65, -0.1],
+  [0.65, 0.2],
+  [0.7,  -0.15],
+  [0.7,  0.2],
+  [0.65, -0.15],
+  [0.65, 0.15],
+  [0.6,  -0.1],
+  [0.55, 0.1],
+  [0.5,  -0.1],
+] as const;
+
+/** USP-S: 12-entry gentle climb, slight alternating yaw. */
+const USP_PATTERN: ReadonlyArray<readonly [number, number]> = [
+  [0.5,  0.0],
+  [0.55, 0.08],
+  [0.6,  0.12],
+  [0.62, -0.08],
+  [0.63, 0.12],
+  [0.65, -0.1],
+  [0.65, 0.12],
+  [0.62, -0.1],
+  [0.6,  0.1],
+  [0.58, -0.08],
+  [0.55, 0.08],
+  [0.52, -0.06],
+] as const;
+
 export const WEAPONS: Record<string, WeaponDef> = {
   knife: {
     id: 'knife', name: 'Knife', slot: 'knife', price: 0,
@@ -16,18 +133,24 @@ export const WEAPONS: Record<string, WeaponDef> = {
     damage: 30, headshotMult: 4, rangeModifier: 0.90,
     rpm: 400, magSize: 20, reserveAmmo: 120, reloadTime: 2.3,
     moveSpeed: 4.57,
-    spreadBase: 0.004, spreadMove: 0.02, spreadAir: 0.08,
+    // spreadMove: 0.02 -> 0.026 (+1.3x)
+    spreadBase: 0.004, spreadMove: 0.026, spreadAir: 0.08,
     recoilPitch: 0.010, recoilYaw: 0.004, recoilRecovery: 0.5,
     auto: false, killReward: 300,
+    recoilPattern: GLOCK_PATTERN,
+    spreadSpray: 0.002,
   },
   usp: {
     id: 'usp', name: 'USP-S', slot: 'secondary', price: 200,
     damage: 35, headshotMult: 4, rangeModifier: 0.88,
     rpm: 352, magSize: 12, reserveAmmo: 24, reloadTime: 2.2,
     moveSpeed: 4.57,
-    spreadBase: 0.003, spreadMove: 0.018, spreadAir: 0.08,
+    // spreadMove: 0.018 -> 0.0234 (+1.3x)
+    spreadBase: 0.003, spreadMove: 0.0234, spreadAir: 0.08,
     recoilPitch: 0.011, recoilYaw: 0.004, recoilRecovery: 0.5,
     auto: false, killReward: 300,
+    recoilPattern: USP_PATTERN,
+    spreadSpray: 0.0015,
   },
   deagle: {
     id: 'deagle', name: 'Desert Eagle', slot: 'secondary', price: 700,
@@ -37,34 +160,44 @@ export const WEAPONS: Record<string, WeaponDef> = {
     spreadBase: 0.006, spreadMove: 0.05, spreadAir: 0.12,
     recoilPitch: 0.035, recoilYaw: 0.012, recoilRecovery: 0.8,
     auto: false, killReward: 300,
+    // No pattern: legacy formula (heavy single-shot punch)
+    spreadSpray: 0.006,
   },
   ak47: {
     id: 'ak47', name: 'AK-47', slot: 'primary', price: 2700,
     damage: 36, headshotMult: 4, rangeModifier: 0.98,
     rpm: 600, magSize: 30, reserveAmmo: 90, reloadTime: 2.5,
     moveSpeed: 4.10,
-    spreadBase: 0.0035, spreadMove: 0.035, spreadAir: 0.10,
+    // spreadMove: 0.035 -> 0.070 (+2x)
+    spreadBase: 0.0035, spreadMove: 0.070, spreadAir: 0.10,
     recoilPitch: 0.0125, recoilYaw: 0.006, recoilRecovery: 1.6,
     auto: true, killReward: 300,
+    recoilPattern: AK47_PATTERN,
+    spreadSpray: 0.004,
   },
   m4a4: {
     id: 'm4a4', name: 'M4A4', slot: 'primary', price: 2900,
     damage: 33, headshotMult: 4, rangeModifier: 0.97,
     rpm: 666, magSize: 30, reserveAmmo: 90, reloadTime: 3.1,
     moveSpeed: 4.29,
-    spreadBase: 0.003, spreadMove: 0.03, spreadAir: 0.09,
+    // spreadMove: 0.030 -> 0.060 (+2x)
+    spreadBase: 0.003, spreadMove: 0.060, spreadAir: 0.09,
     recoilPitch: 0.0105, recoilYaw: 0.005, recoilRecovery: 1.7,
     auto: true, killReward: 300,
+    recoilPattern: M4A4_PATTERN,
+    spreadSpray: 0.004,
   },
   awp: {
     id: 'awp', name: 'AWP', slot: 'primary', price: 4750,
     damage: 115, headshotMult: 2.5, rangeModifier: 0.99,
     rpm: 41, magSize: 5, reserveAmmo: 30, reloadTime: 3.7,
     moveSpeed: 3.81,
-    // Hip-fire spread; scoped accuracy is handled by the weapon system later.
-    spreadBase: 0.05, spreadMove: 0.15, spreadAir: 0.2,
+    // Hip-fire spreadMove: 0.15 -> 0.30 (+2x); scoped accuracy is handled by the weapon system later.
+    spreadBase: 0.05, spreadMove: 0.30, spreadAir: 0.2,
     recoilPitch: 0.06, recoilYaw: 0.01, recoilRecovery: 1.2,
     auto: false, scope: true, killReward: 100,
+    // No pattern: legacy formula
+    spreadSpray: 0,
   },
 };
 

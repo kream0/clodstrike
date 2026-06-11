@@ -73,6 +73,11 @@ export interface WeaponDef {
   killReward: number;
   isKnife?: boolean;
   range?: number;                // knife reach in meters
+  /** Per-shot recoil pattern: [pitchDeg, yawDeg] view-punch deltas indexed by shot number
+   *  (clamped to last entry). Weapons without a pattern use the legacy formula. */
+  recoilPattern?: ReadonlyArray<readonly [number, number]>;
+  /** Extra spread (radians) accumulated per consecutive shot in a spray, capped at 10 shots. */
+  spreadSpray?: number;
 }
 export interface WeaponState { def: WeaponDef; ammo: number; reserve: number; reloading: boolean; reloadEnd: number; nextFire: number; shotsFired: number }
 export interface Inventory { knife: WeaponState; secondary: WeaponState | null; primary: WeaponState | null; activeSlot: WeaponSlot }
