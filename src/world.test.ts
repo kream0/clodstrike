@@ -12,10 +12,10 @@ describe('World(DUST2) smoke tests', () => {
   const world = new World(DUST2);
   const spawn  = DUST2.spawns.t[0]; // { x: -6, z: 31, angle: 0 }
 
-  test('floorAt T spawn is roughly 1.5', () => {
+  test('floorAt T spawn is on the T-spawn plateau (S = 4.5 m)', () => {
     const f = world.floorAt(spawn.x, spawn.z);
-    expect(f).toBeGreaterThanOrEqual(1.4);
-    expect(f).toBeLessThanOrEqual(1.6);
+    expect(f).toBeGreaterThanOrEqual(4.4);
+    expect(f).toBeLessThanOrEqual(4.6);
   });
 
   test('floorAt inside a wall cell returns +Infinity', () => {
@@ -37,8 +37,8 @@ describe('World(DUST2) smoke tests', () => {
   });
 
   test('raycast aimed 45 degrees down hits a floor', () => {
-    // Shoot at 45° downward from a few meters up at T spawn.
-    const origin = { x: spawn.x, y: 4.0, z: spawn.z };
+    // Shoot at 45° downward from well above the T-spawn plateau (floor=4.5 m).
+    const origin = { x: spawn.x, y: 7.0, z: spawn.z };
     const angle  = -Math.PI / 4;
     const dir    = { x: 0, y: Math.sin(angle), z: -Math.cos(angle) }; // forward-down
     const len    = Math.sqrt(dir.x ** 2 + dir.y ** 2 + dir.z ** 2);

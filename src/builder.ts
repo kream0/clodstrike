@@ -556,8 +556,8 @@ export function setupEnvironment(scene: THREE.Scene): void {
   const sc = sun.shadow.camera as THREE.OrthographicCamera;
   sc.left   = -52;
   sc.right  =  52;
-  sc.top    =  48;
-  sc.bottom = -48;
+  sc.top    =  52;
+  sc.bottom = -52;
   sc.updateProjectionMatrix();
   sun.shadow.bias = -0.0005;
   scene.add(sun);

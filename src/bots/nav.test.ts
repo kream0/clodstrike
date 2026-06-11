@@ -78,12 +78,14 @@ describe('findPath — T spawn to A site', () => {
       const horizDist = Math.sqrt(dx * dx + dz * dz);
       expect(horizDist).toBeLessThanOrEqual(200); // entire map width
 
-      // Floor-height difference. Single-segment string-pull is constrained by
-      // the _straightWalkable check which limits drops. Each cell step ≤ 0.5 rise,
-      // drop ≤ 0.5, so |rise| ≤ 0.5 per 1 m cell. Generous bound = horizDist × 0.5.
+      // Floor-height difference. Consecutive waypoints can differ by at most
+      // MAX_DROP (4.0 m) for a single A*-graph edge (e.g. a diagonal step off a
+      // tall ramp), and for multi-cell string-pulled segments each intermediate
+      // cell is capped at STEP_HEIGHT (0.5 m) per cell by _straightWalkable.
+      // Rise is always ≤ 0.5 per cell; drop is capped at MAX_DROP per edge.
       const rise     = curr.y - prev.y;
       const maxRise  = Math.max(0.5, horizDist * 0.6);
-      const maxDrop  = Math.max(0.5, horizDist * 0.6);
+      const maxDrop  = Math.max(4.0, horizDist * 0.6); // 4.0 = nav MAX_DROP
       expect(rise).toBeLessThanOrEqual(maxRise + 1e-3);
       expect(rise).toBeGreaterThanOrEqual(-maxDrop - 1e-3);
     }

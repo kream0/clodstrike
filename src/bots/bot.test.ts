@@ -286,9 +286,13 @@ describe('Bomb defuse', () => {
     const siteA = DUST2.bombsites[0];
     const bombX = (siteA.min.x + siteA.max.x) / 2;
     const bombZ = (siteA.min.z + siteA.max.z) / 2;
+    // A-site floor height from the map legend (char 'A' = 4.5 m in the geometry-correct grid).
+    const bombCol = Math.floor((bombX - DUST2.origin.x) / DUST2.cellSize);
+    const bombRow = Math.floor((bombZ - DUST2.origin.z) / DUST2.cellSize);
+    const bombY = DUST2.legend[DUST2.grid[bombRow]![bombCol]!]!.floor;
 
     game.bomb.state       = 'planted';
-    game.bomb.pos         = { x: bombX, y: 3.0, z: bombZ };
+    game.bomb.pos         = { x: bombX, y: bombY, z: bombZ };
     game.bomb.explodeAt   = now + 60; // plenty of time
     game.bomb.site        = 'A';
     (game as unknown as { phase: string }).phase = 'planted';
@@ -298,10 +302,10 @@ describe('Bomb defuse', () => {
       if (c.team === 'T') { c.alive = false; c.health = 0; }
     }
 
-    // Find a CT bot and teleport it close.
+    // Find a CT bot and teleport it close (same floor level as bomb).
     const ctBot = game.combatants.find(c => c.team === 'CT' && !c.isPlayer && c.alive)!;
     expect(ctBot).toBeDefined();
-    ctBot.pos      = { x: bombX + 1, y: 3.0, z: bombZ };
+    ctBot.pos      = { x: bombX + 1, y: bombY, z: bombZ };
     ctBot.onGround = true;
 
     const defuseMs = (RULES.DEFUSE_TIME + 2) * 1000;
@@ -687,6 +691,9 @@ describe('Flash blindness', () => {
     let now = advanceFreeze(game);
     const { bot, enemy } = setupFlashScenario(game);
 
+    // Let the bot enter engage state first (same as sibling flash tests).
+    now = tickUntilEngage(game, mgr, bot, now);
+
     // Apply full blindness lasting 0.15 s (expires quickly).
     bot.blindUntil     = now + 0.15;
     bot.blindIntensity = 0.9;
@@ -695,8 +702,9 @@ describe('Flash blindness', () => {
 
     const initHealth = enemy.health;
     const DT = 1 / 128;
-    // Tick for 3 s: blind ends at +0.15 s, reaction fires at ~+0.37 s.
-    const TICKS = Math.ceil(3.0 / DT);
+    // Tick for 5 s: blind ends at +0.15 s; after blind the bot may navigate
+    // briefly before re-acquiring the enemy (up to ~3 s on new map geometry).
+    const TICKS = Math.ceil(5.0 / DT);
     for (let i = 0; i < TICKS; i++) {
       now += DT;
       const brain = game.botBrains.get(bot.id);
@@ -884,7 +892,7 @@ describe('F2: guard facing', () => {
 
 describe('F4: bot separation', () => {
   test('two bots placed at same position separate beyond 1 m within a few seconds', () => {
-    const { game, mgr } = freshSetup({ playerTeam: 'CT' });
+    const { game, mgr, world } = freshSetup({ playerTeam: 'CT' });
     let now = advanceFreeze(game);
 
     // Pick two T bots.
@@ -894,7 +902,9 @@ describe('F4: bot separation', () => {
     const botB = tBots[1]!;
 
     // Stack them exactly on top of each other on a walkable cell.
-    const stackPos = { x: 0, y: 0, z: -10 };
+    // Derive Y from the map so bots are not embedded below the floor.
+    const stackY = world.floorAt(0, -10);
+    const stackPos = { x: 0, y: stackY, z: -10 };
     botA.pos = { ...stackPos };
     botB.pos = { ...stackPos };
     botA.vel = { x: 0, y: 0, z: 0 };
