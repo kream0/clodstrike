@@ -4,7 +4,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "bun ./index.html",
+    "dev": "bun scripts/dev.ts",
     "check": "tsc --noEmit",
     "build": "rm -rf dist && bun build ./index.html --outdir=dist && bun scripts/copy-assets.ts",
     "test": "bun test"
