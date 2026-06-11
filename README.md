@@ -1,76 +1,199 @@
-# CS2 Clone — de_dust2
+# Clodstrike
 
-A Counter-Strike 2 style single-player FPS: you versus bots on a low-poly remake of de_dust2. Built with Bun, TypeScript, and three.js.
+A Counter-Strike 2–style single-player FPS — bots, bomb defusal, and a low-poly de_dust2 — built with **Bun + Three.js + TypeScript (strict)**.
 
-## Requirements
+> Built collaboratively with Claude Code using a multi-agent workflow (contract types.ts → scoped sequential/parallel sonnet implementers per domain → integration → read-only reviewer → fixer; reviewer caught 5 pre-runtime P0s). See [`CLAUDE.md`](./CLAUDE.md) for the full process.
 
-- [Bun](https://bun.sh) >= 1.2
+---
 
-## How to run
+## Current features
 
-```sh
+### Map — de_dust2
+
+- **Faithful low-poly remake** of de_dust2 encoded as a 96×88 ASCII height grid — one character per square meter, each char mapping to floor height, optional ceiling, wall solidity, and material. Origin at world `x −48, z −44`; row 0 is north (CT side); floors step in 0.375 m increments from −0.75 to 3.0 m.
+- **All iconic areas reproduced**: LongA, Catwalk, UpperTunnels, CT Spawn, A Site (stone floor), B Site, B Doors, Mid, Catwalk, Short, and 20 more named regions — 24 named areas total used by bot routing logic.
+- **Covered geometry**: tunnel and door cells carry explicit ceiling heights (UpperTunnels 1.5 m floor / 4.5 m ceil; Mid Doors 0.75 / 4.0) so players and bots crouch under realistic headroom rather than passing through flat ceilings.
+- **25 axis-aligned props**: crates, B-site car, Xbox box, sandbags, planks, and the classic mid-door pair — the gap between them is the AWP mid-doors sightline. Props carry full AABB collision and are included in the navgrid as impassable obstacles.
+- **5+5 spawns** with pre-aimed yaw angles; A and B bombsite rectangles used by the plant/defuse logic.
+- **BFS connectivity suite** in `dust2.test.ts` guarantees every canonical route (Long, Short, Mid, Upper/Lower Tunnels) is traversable in both directions at the map cell level — the safety net whenever the grid changes.
+- **Greedy row-merged renderer**: adjacent cells of the same material are merged into axis-aligned box meshes, producing fewer than 10 static draw calls for the entire map plus ~25 prop meshes. Lambert materials with per-box vertex-color tint; hemisphere + warm directional sun with 2048 PCF shadows; exponential fog; sand/stone palette.
+
+### Movement & gunplay
+
+- **CS-style movement** shared between player and bots: ground friction + acceleration, Quake air-strafe (air-accel cap 0.6 m/s wish-speed), jump velocity 5.75 m/s, gravity 15.24 m/s². Walk (×0.52) and crouch (×0.34) multipliers applied to the active weapon's base move speed.
+- **Swept AABB collision** axis-separated (Y → X → Z) against the grid height field and prop AABBs; step-up ≤ 0.5 m so players and bots hop onto crates and ledges without getting stuck.
+- **Tag-slow on hit**: taking damage cuts move speed to 50% for 0.5 s — penalises W-keying through gunfire.
+- **2.5D DDA raycast** for hitscan: marches through grid cells first, then tests prop AABBs, returning surface normal, material, and hit distance.
+- **Crouch** lowers eye height from 1.64 m to 1.17 m; player AABB shrinks accordingly; bots correctly clear low-ceiling tunnel cells only when crouching.
+
+### Weapons
+
+Seven weapons across three slots with individually tuned stats:
+
+| Weapon | Slot | Price | Notes |
+|:---|:---|:---|:---|
+| Knife | Knife | — | Always carried; fast switch |
+| Glock-18 | Secondary | $200 | T default; 20-round mag |
+| USP-S | Secondary | $200 | CT default; suppressed feel |
+| Desert Eagle | Secondary | $700 | High damage, slow RPM |
+| AK-47 | Primary | $2 700 | T rifle; auto, 600 RPM |
+| M4A4 | Primary | $2 900 | CT rifle; auto, 666 RPM |
+| AWP | Primary | $4 750 | Scope + FOV zoom; 41 RPM |
+
+- **RPM gate, reload, recoil**: each weapon has an independent `nextFire` timer, a timed reload sequence, and a view-punch-and-recovery system (pitch + random yaw per shot, recovery in radians/second).
+- **Spread**: base accuracy + movement penalty + airborne penalty — all modelled as cone half-angles. Crouching and standing still narrows the cone.
+- **Range falloff**: `damage × rangeModifier^(distance / 15 m)`. The AWP barely falls off at range; the Glock degrades fast.
+- **Hitgroups**: head (×4 damage, overridden to ×2.5 for AWP), body (×1), legs (×0.75, ignores armor). Armor absorbs to 0.775× for body shots (helmet required for head armor benefit). Armor durability tracked per combatant.
+- **AWP scope**: right-click zooms FOV from 73° to 30° with an overlay; sensitivity scales 0.4× scoped; hip-fire spread is severe (0.05 rad base).
+- **First-person viewmodel**: procedural box guns with bob (speed-linked), sway (mouse-linked), kick (per-shot), reload animation, and weapon-switch blend. No external assets.
+- **Kill rewards**: most weapons give $300 per kill; knife gives $1 500; AWP gives $100.
+
+### Bots
+
+- **A* pathfinding** over the same map grid used for collision: octile heuristic, binary min-heap open list, wall-hug penalty (×1.15 for wall-adjacent cells), drop-cost shaping (×1.5 for downward-drop edges), string-pull smoothing to collapse collinear waypoints. Paths compute in ~1.2 ms and are cached per bot with replanning every 2.5 s.
+- **FSM states**: objective (route to site), engage (spotted enemy), hunt (last-known-position), plant (hold E at site), defuse (CT rushes dropped bomb), guard (static hold after site capture). State transitions driven by perception events and game phase.
+- **T-side coordination**: carriers follow Long/Short/Tunnels routes with escort bots shadowing the bomb carrier; split pushes activate when teammates confirm an alternate route clear. CT side assigns bots to A or B with rotation triggers on intel (bomb drop heard, teammate death event).
+- **Perception**: staggered FOV cone (100° full / 50° half) + LOS raycast check every 0.12 s per bot, offset by bot ID to spread CPU load. Hearing range: gunshots 30 m, teammate deaths 40 m. Enemies spotted near or heard firing appear on the player's radar.
+- **Difficulty tiers**: easy (550 ms reaction, ±3.2° aim error, 45 m vision), normal (350 ms, ±1.7°, 60 m), hard (220 ms, ±0.8°, 80 m). Aim error resamples every 0.25 s; locks in and shrinks after 1.2 s on the same target. Recoil control factor scales per difficulty.
+- **Shared code**: bots run the exact same `simulateMovement` and `updateWeapon` calls as the player, driving identical physics and weapon state machines — no separate bot-movement shortcuts.
+- **Stuck recovery**: horizontal speed below 0.3 m/s for 0.7 s triggers a jump; 1.5 s of stuck triggers a full A* replan.
+
+### Rounds & economy
+
+- **5v5 bomb defusal, MR12, first to 13 wins** (24 rounds max). No halftime side swap — deliberate.
+- **Phases**: `menu` → `freeze` (5 s) → `live` (1:55) → `planted` (40 s bomb timer) → `roundEnd` (5 s) → `matchEnd`.
+- **Buy window**: buy menu accessible during freeze and the first 10 s of live. `canBuy` uses game-time `clock.now` — the source of the round-2 regression that was fixed after review.
+- **Plant / defuse**: hold E for 3.2 s inside a bombsite to plant; 10 s to defuse (5 s with kit). Bomb drop/pickup on player death. Radial explosion damage.
+- **Economy**:
+  - Starting money: $800
+  - Win reward: $3 250
+  - Loss streak: $1 400 / $1 900 / $2 400 / $2 900 / $3 400 (rounds 1–5+)
+  - Bomb plant — team bonus: $800; planter bonus: $300
+  - Max money: $16 000
+  - Prices: Glock/USP $200, Deagle $700, AK $2 700, M4A4 $2 900, AWP $4 750, Vest $650, Vest+Helmet $1 000, Defuse Kit $400
+
+### HUD & UX
+
+- **Health / armor / ammo / money** bars in the classic CS corner layout. Timer and score at the top center.
+- **Dynamic crosshair**: spread-reactive gap grows with move speed, airborne state, and recent shots. Hitmarker flash on confirmed hits; gold flash for headshots.
+- **AWP scope overlay** with full-screen dark vignette and vertical/horizontal cross lines.
+- **Damage vignette** + directional arc pointing at the attacker (bearing relative to player yaw).
+- **Killfeed**: attacker → victim entries with weapon icons, auto-expire after 5 s.
+- **Radar**: pre-rendered from the same ASCII grid as the world. Teammates always visible; enemies appear when within hearing range or near a recently heard shot. Bomb marker shown when dropped or planted. Player position + yaw arrow updates every frame.
+- **Tab scoreboard**: kills / deaths / money per player, team totals.
+- **Buy menu** (B key): nine keycap digit shortcuts — 1 USP-S · 2 Glock-18 · 3 Desert Eagle · 4 AK-47 · 5 M4A4 · 6 AWP · 7 Vest · 8 Vest+Helmet · 9 Defuse Kit. Items greyed out when unaffordable or wrong team. Digit keys 1–3 suppressed for weapon switching while the buy menu is open.
+- **Start menu**: pick CT or T side, choose difficulty. **Pause menu**: resume, restart, sensitivity slider. **Banners** for round win/loss and match end.
+- **Plant / defuse progress bar** overlaid on-screen while holding E.
+- All HUD is DOM with CSS injected from `hud.ts` at construction — no external `.css` files.
+
+### Audio
+
+- **Fully synthesized** with the Web Audio API — no audio files anywhere in the project.
+- **Per-weapon gunshots**: distinct oscillator + noise shapes per gun (AK crack vs M4 thud vs AWP boom vs pistol pop), positional attenuation from bot positions.
+- **Footsteps**: triggered by distance-threshold accumulator; walk vs run threshold; positional for bot footsteps.
+- **Hit / headshot dings**: separate tones for body-hit confirmation and headshot.
+- **Bomb beeps**: accelerate as the timer counts down toward detonation. Positional — sound is louder near the bomb.
+- **Bomb plant, defuse, explosion** cues; round-end win/loss stings.
+- `audio.unlock()` called on the first user gesture to satisfy the Web Audio autoplay policy.
+
+### Foundations (in place, not yet user-facing)
+
+- **Shared `Combatant` model** ready for any team size — `botsPerTeam` is already a `MatchOptions` field; 5v5 is just the default.
+- **Named-area system** (`NamedArea[]` in `MapData`) reusable for new maps; bot routing already references area names rather than hardcoded coordinates.
+- **Difficulty params are data-driven** (`BOT_DIFFICULTY` in `constants.ts`); adding a fourth tier is a one-line entry.
+- **`gameEvents` typed event bus** (`Emitter<GameEvents>` in `combat.ts`) ready for additional subscribers (stats tracking, replay recording, server sync).
+
+---
+
+## Upcoming features
+
+### Short term
+
+- **Halftime side swap** — teams exchange CT/T at round 13; economy resets.
+- **Grenades** — HE (radial damage), flashbang (screen whiteout + bot reaction penalty), smoke (opaque sphere, LOS blocking for bots).
+- **Bot buy variety** — bots currently eco with pistols or full-buy; add force-buy logic and occasional AWP purchases based on team economy.
+
+### Medium term
+
+- **Match-end stats screen** — full scoreboard with K/D, headshot %, MVP rounds, money spent.
+- **Wallbang penetration** — raycast continues through thin surfaces with reduced damage.
+- **Better character models / animations** — replace box-stick-figure bots with smoother low-poly meshes; add walk/run/crouch cycle.
+- **A second map** reusing the same ASCII grid format and `MapData` contract — the navgrid, renderer, and collision system all accept any conforming `MapData`.
+- **Replay / demo** — serialize `clock.now`, player inputs, and bot FSM state per tick for round playback.
+
+### Long term
+
+- **Multiplayer via WebSocket / WebRTC** — the `gameEvents` bus and `Combatant` model are already structured for networked sync.
+- **Workshop-style custom map loading** — load a `MapData`-shaped JSON at runtime; the same pipeline builds scene, navgrid, and spawns from it.
+- **Competitive ranking vs bots** — Elo-style rating adjusted per match against each difficulty tier.
+
+---
+
+## Setup
+
+Requires [Bun](https://bun.sh) ≥ 1.2.
+
+```bash
 bun install
-bun run dev
 ```
 
-Then open http://localhost:3000 in your browser.
+## Commands
+
+| Command | What it does |
+|:---|:---|
+| `bun run dev` | Start the dev server at http://localhost:3000 |
+| `bun run check` | TypeScript type-check only (`tsc --noEmit`) |
+| `bun test` | Run the test suite (98 tests) |
+| `bun run build` | Bundle for production into `dist/` (~1.1 MB) |
 
 ## Controls
 
 | Key / Input | Action |
 |:---|:---|
-| W A S D | Move forward / left / back / right |
-| Mouse | Look |
-| Left Mouse Button | Fire |
-| Right Mouse Button | Scope (AWP only) |
-| R | Reload |
-| Shift (hold) | Walk silently |
-| Ctrl (hold) | Crouch |
-| Space | Jump |
-| E (hold) | Plant / defuse bomb |
-| B | Open / close buy menu |
-| 1–9 (in buy menu) | Buy item: 1 USP-S · 2 Glock-18 · 3 Desert Eagle · 4 AK-47 · 5 M4A4 · 6 AWP · 7 Vest · 8 Vest+Helmet · 9 Defuse Kit |
-| 1 / 2 / 3 | Switch weapon slot: primary / secondary / knife |
-| Mouse wheel | Cycle weapon slots |
-| Tab (hold) | Scoreboard |
-| Esc | Pause menu (Resume · Restart · Sensitivity) |
-| F3 | Debug overlay (FPS, position, speed, phase) |
-| N | Noclip (debug) |
+| **W A S D** | Move forward / left / back / right |
+| **Mouse** | Look |
+| **Left Mouse Button** | Fire |
+| **Right Mouse Button** | Scope (AWP only) |
+| **R** | Reload |
+| **Shift (hold)** | Walk silently |
+| **Ctrl (hold)** | Crouch |
+| **Space** | Jump |
+| **E (hold)** | Plant / defuse bomb |
+| **B** | Open / close buy menu |
+| **1–9 (buy menu)** | Buy: 1 USP-S · 2 Glock-18 · 3 Desert Eagle · 4 AK-47 · 5 M4A4 · 6 AWP · 7 Vest · 8 Vest+Helmet · 9 Defuse Kit |
+| **1 / 2 / 3** | Switch weapon slot: primary / secondary / knife |
+| **Mouse wheel** | Cycle weapon slots |
+| **Tab (hold)** | Scoreboard |
+| **Esc** | Pause menu (Resume · Restart · Sensitivity) |
+| **F3** | Debug overlay (FPS, position, speed, phase) |
+| **N** | Noclip (debug) |
 
-## Gameplay
+---
 
-5v5 bomb-defusal against bots on a low-poly remake of **de_dust2**. First team to 13 rounds wins (MR12, 24 rounds max). There is no halftime side swap.
+## Architecture
 
-**Round flow**
+See [`CLAUDE.md`](./CLAUDE.md) for the full project guide. Short module summary:
 
-- Freeze / buy time: 5 s freeze + first 10 s of each round (buy menu accessible while `canBuy` is true).
-- Bomb timer: 40 s after plant; defuse takes 10 s (5 s with a defuse kit).
-- Plant duration: ~3.2 s hold on a bomb site.
-- Round end pause: 5 s before the next round starts.
-
-**Economy**
-
-| Event | Reward |
+| Module | Role |
 |:---|:---|
-| Round win | $3 250 |
-| Loss streak (1 / 2 / 3 / 4 / 5+) | $1 400 / $1 900 / $2 400 / $2 900 / $3 400 |
-| Kill reward | weapon-dependent (typically $300) |
-| Bomb plant — team bonus | $800 |
-| Bomb plant — planter bonus | $300 |
-| Starting money | $800 |
-| Maximum money | $16 000 |
+| `types.ts` | Frozen contract: `Combatant`, `MapData`, `WeaponDef`, `GameEvents` |
+| `constants.ts` | All tunable values: weapons, movement, economy, rules, bot difficulty |
+| `world.ts` | Grid-based collision (`moveAABB`) and DDA raycast |
+| `movement.ts` | CS-style ground + Quake air movement, shared by player and bots |
+| `combat.ts` | Hitscan, hitgroup damage, armor, `gameEvents` bus |
+| `weapons.ts` | RPM gate, reload, spread, recoil, scope, slot switching |
+| `game.ts` | Game state machine: phases, economy, bomb, spawn, combatant list |
+| `bots/nav.ts` | A* over the map grid with binary heap and string-pull |
+| `bots/bot.ts` | Per-bot FSM using shared movement + weapon code |
+| `hud.ts` | All UI: health, ammo, radar, buy menu, scoreboard, menus |
+| `builder.ts` | Scene construction: greedy-merged map geometry + props |
+| `main.ts` | Boot, 128 Hz fixed-step loop, camera, player wiring |
 
-**Bot difficulties**
+---
 
-| Difficulty | Reaction | Aim error | Vision range |
-|:---|:---|:---|:---|
-| Easy | 550 ms | ±3.2° | 45 m |
-| Normal | 350 ms | ±1.7° | 60 m |
-| Hard | 220 ms | ±0.8° | 80 m |
+## Tech stack
 
-## Scripts
-
-- `bun run dev` — start the Bun fullstack dev server (http://localhost:3000)
-- `bun run check` — typecheck with `tsc --noEmit`
-- `bun run build` — bundle to `dist/`
-- `bun run test` — run unit tests with `bun test`
+- **[Three.js](https://threejs.org/) 0.184** — WebGL rendering
+- **[TypeScript](https://www.typescriptlang.org/)** (strict, `noUncheckedIndexedAccess`)
+- **[Bun](https://bun.sh/) 1.3** — runtime, dev server (HTML entrypoint), bundler, test runner
+- **No external assets** — map geometry from an ASCII grid, audio synthesized with Web Audio API, all materials procedural
