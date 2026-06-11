@@ -57,6 +57,10 @@ const CROUCH_RANGE_CHANCE    = 0.4;
 const GUARD_JITTER_DIST      = 2.0;
 const DEFUSE_APPROACH_DIST   = 1.3;
 const CT_BOMB_CONVERGE_DIST  = 14;
+const BOT_SEPARATION_DIST    = 0.6;   // meters — start pushing when closer than this
+const BOT_SEPARATION_IMPULSE = 2.0;   // m/s at full overlap
+const ESCORT_STOP_DIST       = 2.0;   // stop pushing toward carrier within this dist
+const SPAWN_ZONE_MARGIN      = 6.0;   // meters padding around spawn AABBs
 
 const TURN_SPEED: Record<'easy' | 'normal' | 'hard', number> = {
   easy:   4.5,
@@ -90,7 +94,7 @@ const CT_ASSIGNMENTS: Array<{ areas: string[]; entranceDir: string }> = [
 // FSM states
 // ---------------------------------------------------------------------------
 
-type BotState = 'objective' | 'engage' | 'hunt' | 'plant' | 'defuse' | 'guard';
+export type BotState = 'objective' | 'engage' | 'hunt' | 'plant' | 'defuse' | 'guard';
 
 // ---------------------------------------------------------------------------
 // Per-bot state object
@@ -181,6 +185,12 @@ function pickRoute(): RouteName {
 // BotManager
 // ---------------------------------------------------------------------------
 
+// Axis-aligned bounding box for a spawn zone.
+interface SpawnZoneAABB {
+  minX: number; maxX: number;
+  minZ: number; maxZ: number;
+}
+
 export class BotManager {
   private readonly _game:       Game;
   private readonly _world:      World;
@@ -197,6 +207,19 @@ export class BotManager {
 
   private readonly _mapData: MapData = DUST2;
 
+  // F1: sticky retriever id when the bomb is dropped.
+  private _retrieverId: number | null = null;
+  // F1: game-time when the current retriever first entered 'engage' continuously.
+  // Sentinel -1 means the retriever is NOT currently engaging.
+  private _retrieverEngagedSince: number = -1;
+
+  // F3: spawn zone AABBs computed once at construction.
+  private readonly _ctSpawnZone: SpawnZoneAABB;
+  private readonly _tSpawnZone:  SpawnZoneAABB;
+
+  // Pre-allocated work vector for separation impulse (no per-tick heap alloc).
+  private readonly _sepWork: Vec3 = { x: 0, y: 0, z: 0 };
+
   constructor(
     game:       Game,
     world:      World,
@@ -207,6 +230,35 @@ export class BotManager {
     this._world     = world;
     this._nav       = nav;
     this._onBotShot = onBotShot;
+
+    // F3: compute spawn-zone AABBs once from map data (+ margin).
+    this._ctSpawnZone = BotManager._buildSpawnZone(DUST2.spawns.ct);
+    this._tSpawnZone  = BotManager._buildSpawnZone(DUST2.spawns.t);
+  }
+
+  /** Build an AABB over an array of spawn points plus SPAWN_ZONE_MARGIN. */
+  private static _buildSpawnZone(
+    pts: ReadonlyArray<{ x: number; z: number }>,
+  ): SpawnZoneAABB {
+    let minX = Infinity, maxX = -Infinity, minZ = Infinity, maxZ = -Infinity;
+    for (const p of pts) {
+      if (p.x < minX) minX = p.x;
+      if (p.x > maxX) maxX = p.x;
+      if (p.z < minZ) minZ = p.z;
+      if (p.z > maxZ) maxZ = p.z;
+    }
+    return {
+      minX: minX - SPAWN_ZONE_MARGIN,
+      maxX: maxX + SPAWN_ZONE_MARGIN,
+      minZ: minZ - SPAWN_ZONE_MARGIN,
+      maxZ: maxZ + SPAWN_ZONE_MARGIN,
+    };
+  }
+
+  /** Returns true when the given position is inside the specified spawn zone AABB. */
+  private static _inSpawnZone(pos: Vec3, zone: SpawnZoneAABB): boolean {
+    return pos.x >= zone.minX && pos.x <= zone.maxX &&
+           pos.z >= zone.minZ && pos.z <= zone.maxZ;
   }
 
   /**
@@ -232,6 +284,47 @@ export class BotManager {
   // Expose current target for tests.
   getBrainTarget(botId: number): Combatant | null | undefined {
     return this._brains.get(botId)?.target;
+  }
+
+  // Expose retriever id for tests (F1).
+  getRetrieverId(): number | null {
+    return this._retrieverId;
+  }
+
+  // Expose guardFacing for tests (F2).
+  getBrainGuardFacing(botId: number): number | undefined {
+    return this._brains.get(botId)?.guardFacing;
+  }
+
+  // Expose lastKnownPos for tests (F3).
+  getBrainLastKnownPos(botId: number): Vec3 | null | undefined {
+    return this._brains.get(botId)?.lastKnownPos;
+  }
+
+  // Expose spawn zone AABBs for tests (F3).
+  getSpawnZone(team: 'CT' | 'T'): SpawnZoneAABB {
+    return team === 'CT' ? this._ctSpawnZone : this._tSpawnZone;
+  }
+
+  // Force a bot's FSM state — used only by unit tests to pin a bot in a
+  // specific state without needing to drive it there through full perception.
+  // For 'engage', a non-null live target must be provided so the FSM's
+  // `target === null` guard does not immediately exit the state.
+  setBrainStateForTest(botId: number, state: BotState, now: number, target?: Combatant): void {
+    const br = this._brains.get(botId);
+    if (!br) return;
+    br.state = state;
+    if (state === 'engage') {
+      // Keep the engage state alive across ticks:
+      // - targetVisibleAt close to now so the sight-loss timer doesn't fire.
+      // - firstSeenAt in the distant past so reaction time is already elapsed.
+      // - target set to a plausible live combatant so _runFSM's null-guard passes.
+      br.targetVisibleAt = now;
+      br.firstSeenAt     = now - 9999;
+      if (target !== undefined) {
+        br.target = target;
+      }
+    }
   }
 
   // ---------------------------------------------------------------------------
@@ -342,6 +435,10 @@ export class BotManager {
     br.scopeLastToggleAt  = -999;
     br.wasBlind           = false;
 
+    // F1: reset retriever on each round start.
+    this._retrieverId = null;
+    this._retrieverEngagedSince = -1;
+
     if (br.bot.team === 'T') {
       this._assignT(br);
     } else {
@@ -421,6 +518,11 @@ export class BotManager {
     for (const [, br] of this._brains) {
       if (!br.bot.alive) continue;
       if (br.bot.team === victim.team) continue; // own team died — not relevant to hearing
+      // F3: ignore positions inside the enemy team's spawn zone to avoid luring
+      // bots into enemy spawn.  For a bot on team X, the "enemy spawn" is the
+      // spawn of the opposite team (= victim.team, which equals the enemy of br.bot).
+      const enemySpawn = br.bot.team === 'CT' ? this._tSpawnZone : this._ctSpawnZone;
+      if (BotManager._inSpawnZone(victim.pos, enemySpawn)) continue;
       const d = distance(br.bot.pos, victim.pos);
       if (d <= 40) {
         br.lastKnownPos = { ...victim.pos };
@@ -433,6 +535,9 @@ export class BotManager {
     for (const [, br] of this._brains) {
       if (!br.bot.alive) continue;
       if (br.bot.team === shooter.team) continue;
+      // F3: ignore positions inside the enemy team's spawn zone.
+      const enemySpawn = br.bot.team === 'CT' ? this._tSpawnZone : this._ctSpawnZone;
+      if (BotManager._inSpawnZone(shooter.pos, enemySpawn)) continue;
       const d = distance(br.bot.pos, shooter.pos);
       if (d <= 30 && br.state !== 'engage') {
         br.lastKnownPos = { ...shooter.pos };
@@ -470,6 +575,84 @@ export class BotManager {
 
     if (game.phase === 'freeze') return;
     if (!bot.alive) return;
+
+    // F1: sticky retriever management — run once per tick (the first live bot
+    // that executes updates the shared state; subsequent bots within the same
+    // game tick may see a stale _retrieverId but the worst-case latency is one
+    // full tick = 1/128 s, which is negligible).
+    if (game.phase === 'live' && game.bomb.state === 'dropped') {
+      const aliveTs = this._game.combatants.filter(c => c.team === 'T' && c.alive && !c.hasBomb);
+      if (aliveTs.length > 0) {
+        // Check if current retriever is still valid.
+        const currentRetriever = this._retrieverId !== null
+          ? this._game.combatants.find(c => c.id === this._retrieverId && c.alive && c.team === 'T')
+          : undefined;
+
+        if (currentRetriever === undefined) {
+          // No valid retriever — designate the closest living T bot.
+          this._retrieverEngagedSince = -1;
+          let closest: Combatant | null = null;
+          let closestD = Infinity;
+          for (const t of aliveTs) {
+            const d = distanceSq(t.pos, game.bomb.pos);
+            if (d < closestD) { closestD = d; closest = t; }
+          }
+          if (closest !== null) {
+            this._retrieverId = closest.id;
+            // Force a fresh path to the bomb for this bot.
+            const retrieverBrain = this._brains.get(closest.id);
+            if (retrieverBrain) {
+              retrieverBrain.currentPath = [];
+              retrieverBrain.pathIdx     = 0;
+              retrieverBrain.lastReplanAt = -999;
+            }
+          }
+        } else {
+          // Retriever exists — track whether it is pinned in engage.
+          const retrieverBrain = this._brains.get(currentRetriever.id);
+          const isEngaging = retrieverBrain?.state === 'engage';
+          if (isEngaging) {
+            if (this._retrieverEngagedSince < 0) {
+              // First tick entering engage — start the clock.
+              this._retrieverEngagedSince = now;
+            } else if (now - this._retrieverEngagedSince > 4) {
+              // Pinned for > 4 s — try to re-designate to a non-engaging T.
+              const freeTs = aliveTs.filter(
+                c => c.id !== currentRetriever.id &&
+                     this._brains.get(c.id)?.state !== 'engage',
+              );
+              if (freeTs.length > 0) {
+                let closest: Combatant | null = null;
+                let closestD = Infinity;
+                for (const t of freeTs) {
+                  const d = distanceSq(t.pos, game.bomb.pos);
+                  if (d < closestD) { closestD = d; closest = t; }
+                }
+                if (closest !== null) {
+                  this._retrieverId = closest.id;
+                  this._retrieverEngagedSince = -1;
+                  const newBrain = this._brains.get(closest.id);
+                  if (newBrain) {
+                    newBrain.currentPath = [];
+                    newBrain.pathIdx     = 0;
+                    newBrain.lastReplanAt = -999;
+                  }
+                }
+              }
+              // If no free bot exists, leave current retriever assigned and keep
+              // the engaged-since clock running so we re-check every tick.
+            }
+          } else {
+            // Retriever is not engaging — reset the clock.
+            this._retrieverEngagedSince = -1;
+          }
+        }
+      }
+    } else if (game.bomb.state !== 'dropped') {
+      // Bomb picked up or state changed — clear retriever.
+      this._retrieverId = null;
+      this._retrieverEngagedSince = -1;
+    }
 
     const diff = BOT_DIFFICULTY[game.difficulty];
 
@@ -519,6 +702,31 @@ export class BotManager {
     if (br.stuckJumpPending) {
       intent.jump        = true;
       br.stuckJumpPending = false;
+    }
+
+    // 4b. F4: Bot-vs-bot separation — nudge velocity before movement to prevent
+    // stacking. Only applies to living bots; never shoves mid-plant/defuse.
+    const isPlanting  = br.state === 'plant' || br.state === 'defuse';
+    if (!isPlanting) {
+      for (const [otherId, otherBr] of this._brains) {
+        if (otherId === bot.id) continue;
+        const other = otherBr.bot;
+        if (!other.alive) continue;
+        const dx = bot.pos.x - other.pos.x;
+        const dz = bot.pos.z - other.pos.z;
+        const dSq = dx * dx + dz * dz;
+        if (dSq < BOT_SEPARATION_DIST * BOT_SEPARATION_DIST && dSq > 0.0001) {
+          const d = Math.sqrt(dSq);
+          const overlap = BOT_SEPARATION_DIST - d;
+          const scale   = (overlap / BOT_SEPARATION_DIST) * BOT_SEPARATION_IMPULSE;
+          // Reuse pre-allocated work vec.
+          this._sepWork.x = (dx / d) * scale;
+          this._sepWork.y = 0;
+          this._sepWork.z = (dz / d) * scale;
+          bot.vel.x += this._sepWork.x;
+          bot.vel.z += this._sepWork.z;
+        }
+      }
     }
 
     // 5. Simulate movement.
@@ -648,6 +856,28 @@ export class BotManager {
       }
     }
 
+    // F1: if this bot is the designated retriever and the bomb is dropped,
+    // override the FSM to path toward the bomb regardless of current state
+    // (except engage/plant/defuse which take priority).
+    if (
+      bot.team === 'T' &&
+      game.bomb.state === 'dropped' &&
+      this._retrieverId === bot.id &&
+      br.state !== 'engage' && br.state !== 'plant' && br.state !== 'defuse'
+    ) {
+      const bombPos = game.bomb.pos;
+      // If path is stale, re-request via _pathToward.
+      this._pathToward(br, bombPos, now);
+      const pathOk = br.currentPath.length > 0 && br.pathIdx < br.currentPath.length;
+      if (!pathOk && br.currentPath.length === 0) {
+        // Path failed — clear retriever so another bot can try.
+        this._retrieverId = null;
+      } else {
+        this._followPath(br, intent);
+        return;
+      }
+    }
+
     // Global: all Ts guard when bomb planted (non-carrier, non-engage states).
     if (bot.team === 'T' && game.bomb.state === 'planted' &&
         br.state !== 'plant' && br.state !== 'engage' && br.state !== 'guard') {
@@ -713,7 +943,17 @@ export class BotManager {
         const d = distance(bot.pos, br.lastKnownPos);
         if (d < WAYPOINT_ARRIVE_DIST * 1.5) {
           br.lastKnownPos = null;
-          br.state        = br.guardPos !== null ? 'guard' : 'objective';
+          // F3: resume guard state anchored on the original guardPos so the bot
+          // paths back to its post rather than jittering from its current position.
+          if (br.guardPos !== null) {
+            br.state       = 'guard';
+            // Force a fresh path toward guardPos so _guard state picks it up.
+            br.currentPath = [];
+            br.pathIdx     = 0;
+            br.lastReplanAt = -999;
+          } else {
+            br.state = 'objective';
+          }
           break;
         }
         this._pathToward(br, br.lastKnownPos, now);
@@ -795,6 +1035,17 @@ export class BotManager {
             if (jitter) {
               const path = nav.findPath(bot.pos, jitter);
               if (path) { br.currentPath = path; br.pathIdx = 0; }
+              // F2b: re-derive CT guard facing from the new jitter point toward
+              // the entrance area this assignment originally used.
+              if (bot.team === 'CT' && br.routeAreas.length > 0) {
+                const entranceName = br.routeAreas[0];
+                const entArea = map.areas.find((a: { name: string }) => a.name === entranceName);
+                if (entArea && jitter) {
+                  const ex = (entArea.min.x + entArea.max.x) / 2;
+                  const ez = (entArea.min.z + entArea.max.z) / 2;
+                  br.guardFacing = Math.atan2(-(ex - jitter.x), -(ez - jitter.z));
+                }
+              }
             }
           }
           this._followPath(br, intent);
@@ -821,6 +1072,13 @@ export class BotManager {
         const movedFar    = br.escortLastPos
           ? distance(carrier.pos, br.escortLastPos) > ESCORT_REPLAN_DIST
           : true;
+
+        // F5a: within close range of the carrier, stop pushing toward them so
+        // bots don't bunch up (separation from F4 naturally spreads them).
+        if (dToCarrier <= ESCORT_STOP_DIST) {
+          // Already close enough — stand by, let separation nudge spread us.
+          return;
+        }
 
         if (dToCarrier > ESCORT_FOLLOW_DIST || movedFar || br.currentPath.length === 0) {
           const path = nav.findPath(bot.pos, carrier.pos);
@@ -868,7 +1126,18 @@ export class BotManager {
         // Final leg reached → guard.
         br.guardPos = { ...targetPt };
         br.state    = 'guard';
-        br.guardFacing = br.guardFacing; // keep existing
+        // F2a: compute guard facing toward the CT spawn centroid so T guards
+        // face the direction enemies approach from.
+        if (bot.team === 'T') {
+          const ctSpawns = map.spawns.ct;
+          let ctCx = 0; let ctCz = 0;
+          for (const sp of ctSpawns) { ctCx += sp.x; ctCz += sp.z; }
+          const n = ctSpawns.length;
+          if (n > 0) {
+            ctCx /= n; ctCz /= n;
+            br.guardFacing = Math.atan2(-(ctCx - targetPt.x), -(ctCz - targetPt.z));
+          }
+        }
       }
       return;
     }
@@ -1185,6 +1454,16 @@ export class BotManager {
       const snap = this._nav.nearestWalkable(bot.pos);
       if (snap && distance(snap, bot.pos) < 2.0) {
         bot.pos = { ...snap };
+      }
+      // F5b: if stuck while escorting, abandon escort permanently for this round
+      // so the bot becomes an independent router and avoids the snap-stuck loop.
+      if (br.escortTarget !== null) {
+        br.escortTarget  = null;
+        br.escortLastPos = null;
+        // If the bot has a route objective, force it to re-engage it.
+        if (br.routeAreas.length > 0) {
+          br.state = 'objective';
+        }
       }
     }
   }

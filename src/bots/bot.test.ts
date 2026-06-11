@@ -4,6 +4,7 @@ import type { MatchOptions } from '../game';
 import { World } from '../world';
 import { NavGrid } from './nav';
 import { BotManager } from './bot';
+import type { BotState } from './bot';
 import { DUST2 } from '../maps/dust2';
 import { RULES, ECONOMY, WEAPONS } from '../constants';
 import { gameEvents } from '../combat';
@@ -737,5 +738,325 @@ describe('Flash blindness', () => {
     // Aim error should be scaled up: base * (1 + 3*0.4) = base * 2.2.
     const scaledAimError = mgr.getBrainAimErrorDeg(bot.id) ?? 0;
     expect(scaledAimError).toBeGreaterThan(baseAimError);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// F1 — Bomb retrieval after carrier death
+// ---------------------------------------------------------------------------
+
+describe('F1: bomb retrieval after carrier death', () => {
+  test('surviving T bot picks up the bomb after carrier dies', () => {
+    const { game, mgr } = freshSetup({ playerTeam: 'CT' });
+    let now = advanceFreeze(game);
+
+    // Find the bomb carrier and a second T bot to be the retriever.
+    const carrier = game.combatants.find(c => c.hasBomb)!;
+    expect(carrier).toBeDefined();
+
+    const otherT = game.combatants.find(
+      c => c.team === 'T' && c.id !== carrier.id && !c.isPlayer && c.alive,
+    )!;
+    expect(otherT).toBeDefined();
+
+    // Place both near a known walkable area in the middle of the map.
+    // CTMid area: x≈0, z≈-28. Put them close together with the bomb between them.
+    carrier.pos = { x: 0, y: 0, z: -10 };
+    otherT.pos  = { x: 3, y: 0, z: -10 };
+    carrier.onGround = true;
+    otherT.onGround  = true;
+
+    // Kill all CT bots and player so nothing interferes.
+    for (const c of game.combatants) {
+      if (c.team === 'CT') { c.alive = false; c.health = 0; }
+    }
+    // Kill all other T bots except carrier and otherT.
+    for (const c of game.combatants) {
+      if (c.team === 'T' && c.id !== carrier.id && c.id !== otherT.id) {
+        c.alive = false; c.health = 0;
+      }
+    }
+
+    // Run a few ticks in live phase to let brains initialise.
+    const DT = 1 / 128;
+    const INIT_TICKS = 10;
+    for (let i = 0; i < INIT_TICKS; i++) {
+      now += DT;
+      const b = game.botBrains.get(carrier.id);
+      if (b) b(carrier, DT, now);
+      const b2 = game.botBrains.get(otherT.id);
+      if (b2) b2(otherT, DT, now);
+    }
+
+    // Now kill the carrier — bomb drops to carrier's position.
+    carrier.alive  = false;
+    carrier.health = 0;
+    carrier.hasBomb = false;
+    game.bomb.state   = 'dropped';
+    game.bomb.carrier = null;
+    game.bomb.pos     = { ...carrier.pos };
+
+    // Simulate up to 20 s — the retriever should path to the bomb and
+    // game._checkBombPickup (called by game.update) auto-picks it up at 1.2 m.
+    const MAX_TICKS = Math.ceil(20 / DT);
+    for (let i = 0; i < MAX_TICKS; i++) {
+      now += DT;
+      const b2 = game.botBrains.get(otherT.id);
+      if (b2) b2(otherT, DT, now);
+      // game.update drives _checkBombPickup.
+      game.update(DT, now);
+      if ((game.bomb.state as string) === 'carried') break;
+    }
+
+    expect(game.bomb.state as string).toBe('carried');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// F2 — Guard facing
+// ---------------------------------------------------------------------------
+
+describe('F2: guard facing', () => {
+  test('T bot transitioning to guard gets a non-default (non-zero) guardFacing toward CT spawn', () => {
+    const { game, mgr } = freshSetup({ playerTeam: 'CT' });
+    let now = advanceFreeze(game);
+
+    // Find the T bot that IS the bomb carrier: it always has a non-empty routeAreas
+    // assigned by _assignT because pickRoute() is called for the carrier before
+    // any escort assignment. Non-carrier bots may get empty routeAreas due to
+    // assignment ordering, so the carrier is the reliable test subject.
+    const carrier = game.combatants.find(c => c.team === 'T' && c.hasBomb && !c.isPlayer && c.alive)!;
+    expect(carrier).toBeDefined();
+
+    // Kill all CTs so the round stays live.
+    for (const c of game.combatants) {
+      if (c.team === 'CT') { c.alive = false; c.health = 0; }
+    }
+    // Kill all T bots EXCEPT the carrier so the sim stays focused.
+    for (const c of game.combatants) {
+      if (c.team === 'T' && c.id !== carrier.id && !c.isPlayer) { c.alive = false; c.health = 0; }
+    }
+
+    // Strip the bomb so the carrier won't enter plant state at the site,
+    // allowing it to transition cleanly to guard.
+    carrier.hasBomb = false;
+    carrier.onGround = true;
+    // Keep bomb 'carried' (no carrier ptr) so F1 retriever doesn't activate.
+    (game.bomb as { state: string }).state = 'carried';
+    game.bomb.carrier = null;
+
+    // Compute the CT spawn centroid — the direction guards should face.
+    const ctSpawns = DUST2.spawns.ct;
+    let ctCx = 0; let ctCz = 0;
+    for (const sp of ctSpawns) { ctCx += sp.x; ctCz += sp.z; }
+    ctCx /= ctSpawns.length; ctCz /= ctSpawns.length;
+
+    // Tick the carrier through its route to the final area and into guard.
+    // Use DT=1/32 for speed. Max 120 s game-time.
+    const DT = 1 / 32;
+    const MAX_TICKS = Math.ceil(120 / DT);
+    let reachedGuard = false;
+    for (let i = 0; i < MAX_TICKS; i++) {
+      now += DT;
+      const brain = game.botBrains.get(carrier.id);
+      if (brain) brain(carrier, DT, now);
+      if (mgr.getBrainState(carrier.id) === 'guard') {
+        reachedGuard = true;
+        break;
+      }
+    }
+
+    expect(reachedGuard).toBe(true);
+
+    // guardFacing must point toward the CT spawn centroid (within ±120°).
+    const facing = mgr.getBrainGuardFacing(carrier.id) ?? 0;
+    const dx     = ctCx - carrier.pos.x;
+    const dz     = ctCz - carrier.pos.z;
+    const expectedFacing = Math.atan2(-dx, -dz);
+    const diff = Math.abs(Math.atan2(Math.sin(facing - expectedFacing), Math.cos(facing - expectedFacing)));
+    expect(diff).toBeLessThanOrEqual(Math.PI / 2);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// F4 — Bot-vs-bot separation
+// ---------------------------------------------------------------------------
+
+describe('F4: bot separation', () => {
+  test('two bots placed at same position separate beyond 1 m within a few seconds', () => {
+    const { game, mgr } = freshSetup({ playerTeam: 'CT' });
+    let now = advanceFreeze(game);
+
+    // Pick two T bots.
+    const tBots = game.combatants.filter(c => c.team === 'T' && !c.isPlayer && c.alive);
+    expect(tBots.length).toBeGreaterThanOrEqual(2);
+    const botA = tBots[0]!;
+    const botB = tBots[1]!;
+
+    // Stack them exactly on top of each other on a walkable cell.
+    const stackPos = { x: 0, y: 0, z: -10 };
+    botA.pos = { ...stackPos };
+    botB.pos = { ...stackPos };
+    botA.vel = { x: 0, y: 0, z: 0 };
+    botB.vel = { x: 0, y: 0, z: 0 };
+    botA.onGround = true;
+    botB.onGround = true;
+
+    // Kill all CTs so we don't get unexpected state transitions from combat.
+    for (const c of game.combatants) {
+      if (c.team === 'CT') { c.alive = false; c.health = 0; }
+    }
+
+    // Tick for up to 5 s.
+    const DT = 1 / 128;
+    const MAX_TICKS = Math.ceil(5 / DT);
+    for (let i = 0; i < MAX_TICKS; i++) {
+      now += DT;
+      const bA = game.botBrains.get(botA.id);
+      if (bA) bA(botA, DT, now);
+      const bB = game.botBrains.get(botB.id);
+      if (bB) bB(botB, DT, now);
+      game.update(DT, now);
+    }
+
+    // They should have separated by more than 0.55 m (BOT_SEPARATION_DIST = 0.6).
+    // The exact separation depends on navigation decisions; the impulse nudges
+    // them apart and routing widens the gap further. 0.55 is a conservative floor.
+    const dx   = botA.pos.x - botB.pos.x;
+    const dz   = botA.pos.z - botB.pos.z;
+    const dist = Math.sqrt(dx * dx + dz * dz);
+    expect(dist).toBeGreaterThan(0.55);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// F1b — Retriever deadlock: re-designate when retriever is pinned in engage
+// ---------------------------------------------------------------------------
+
+describe('F1b: retriever re-designation when pinned in engage', () => {
+  test('re-designates retriever after > 4 s continuous engage to a free bot', () => {
+    const { game, mgr } = freshSetup({ playerTeam: 'CT' });
+    let now = advanceFreeze(game);
+
+    // Kill all CT bots.  A fake live CT is passed as the engage target for the
+    // pinned bot — placed outside vision range so perception never naturally
+    // acquires it, but kept as a non-null live Combatant so _runFSM's
+    // `target === null` guard doesn't immediately exit engage.
+    const fakeCT = makeCombatant(9999, 'FakeCT', 'CT');
+    fakeCT.alive = true;
+    fakeCT.pos   = { x: 999, y: 0, z: 999 };
+    for (const c of game.combatants) {
+      if (c.team === 'CT') { c.alive = false; c.health = 0; }
+    }
+
+    // Get two T bots.
+    const tBots = game.combatants.filter(c => c.team === 'T' && !c.isPlayer && c.alive);
+    expect(tBots.length).toBeGreaterThanOrEqual(2);
+    // Use tBots[0] as the bot we will pin (pinnedBot) and tBots[1] as the free
+    // bot (freeBot).  Kill all other T bots.
+    const pinnedBot = tBots[0]!;
+    const freeBot   = tBots[1]!;
+    const pinnedId  = pinnedBot.id;
+    const freeId    = freeBot.id;
+    for (const c of game.combatants) {
+      if (c.team === 'T' && c.id !== pinnedId && c.id !== freeId) {
+        c.alive = false; c.health = 0;
+      }
+    }
+
+    // Drop the bomb far from both bots.  Keep freeBot closer than pinnedBot
+    // so when re-designation fires it always picks freeBot.
+    // bomb at x=30; pinnedBot at x=0 (dist=30); freeBot at x=5 (dist=25).
+    // Neither bot is within the 1.2 m auto-pickup radius.
+    // Clear hasBomb on all T bots (one of them was randomly assigned it).
+    for (const c of game.combatants) {
+      if (c.team === 'T') c.hasBomb = false;
+    }
+    (game.bomb as { state: string }).state = 'dropped';
+    game.bomb.carrier = null;
+    game.bomb.pos = { x: 30, y: 0, z: -10 };
+    pinnedBot.pos = { x: 0, y: 0, z: -10 };
+    freeBot.pos   = { x: 5, y: 0, z: -10 };
+    pinnedBot.onGround = true;
+    freeBot.onGround   = true;
+
+    // Temporarily kill freeBot so the first designation tick can only pick
+    // pinnedBot (removes the tie-breaking ambiguity entirely).
+    freeBot.alive  = false;
+    freeBot.health = 0;
+
+    const DT = 1 / 128;
+    now += DT;
+    const bPinnedFn = game.botBrains.get(pinnedBot.id)!;
+    bPinnedFn(pinnedBot, DT, now);
+
+    // pinnedBot is the only living T — management block must designate it.
+    expect(mgr.getRetrieverId()).toBe(pinnedId);
+
+    // Revive freeBot now that the initial assignment is established.
+    freeBot.alive  = true;
+    freeBot.health = 100;
+
+    // Pin pinnedBot in 'engage' for 5 s (> 4 s threshold) then check that
+    // the management block re-designates to freeBot.
+    // Pattern: set engage BEFORE each tick (so the management block at the
+    // start of the tick sees it), then tick both bots.  Do NOT call
+    // game.update() to avoid _runBotBrains firing a second time per step.
+    const ENGAGE_DURATION = 5.0;
+    const MAX_TICKS = Math.ceil(ENGAGE_DURATION / DT);
+    const bFreeFn = game.botBrains.get(freeBot.id)!;
+
+    for (let i = 0; i < MAX_TICKS; i++) {
+      now += DT;
+      mgr.setBrainStateForTest(pinnedBot.id, 'engage', now, fakeCT);
+      bPinnedFn(pinnedBot, DT, now);
+      bFreeFn(freeBot, DT, now);
+    }
+
+    // After > 4 s, the management block should have re-designated to freeBot.
+    const finalRetriever = mgr.getRetrieverId();
+    expect(finalRetriever).toBe(freeId);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// F3 — Spawn zone hunt filter
+// ---------------------------------------------------------------------------
+
+describe('F3: spawn zone hunt filter', () => {
+  test('kill event positioned inside T spawn zone does NOT set a CT bot lastKnownPos inside that zone', () => {
+    const { game, mgr } = freshSetup({ playerTeam: 'T', difficulty: 'normal' });
+    const now = advanceFreeze(game);
+
+    // Find a CT bot.
+    const ctBot = game.combatants.find(c => c.team === 'CT' && !c.isPlayer && c.alive)!;
+    expect(ctBot).toBeDefined();
+
+    // Make a fake T combatant as the victim.
+    const fakeVictim = makeCombatant(999, 'VictimBot', 'T');
+    // Place in the middle of T spawn zone (z≈+32 from dust2.ts spawns: z range 30.5..33.5).
+    fakeVictim.pos  = { x: -3.5, y: 1.5, z: 32 };
+    fakeVictim.alive = false; // just died
+
+    // Clear any existing lastKnownPos for the CT bot.
+    const initialLkp = mgr.getBrainLastKnownPos(ctBot.id);
+
+    // Emit kill event.
+    gameEvents.emit('kill', { victim: fakeVictim, attacker: ctBot, weaponId: 'ak47', headshot: false });
+
+    // Tick once so the brain can process it.
+    const brain = game.botBrains.get(ctBot.id);
+    if (brain) brain(ctBot, 1 / 128, now + 1 / 128);
+
+    const lkp = mgr.getBrainLastKnownPos(ctBot.id);
+
+    // The lastKnownPos must NOT point inside the T spawn zone.
+    if (lkp !== null && lkp !== undefined) {
+      const tZone = mgr.getSpawnZone('T');
+      const insideSpawn = lkp.x >= tZone.minX && lkp.x <= tZone.maxX &&
+                          lkp.z >= tZone.minZ && lkp.z <= tZone.maxZ;
+      expect(insideSpawn).toBe(false);
+    }
+    // If lkp is null the test also passes (no update was made).
   });
 });

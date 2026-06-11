@@ -383,10 +383,22 @@ const HUD_CSS = `
   background: rgba(8,10,12,0.72);
   border-top: 1px solid rgba(255,255,255,0.07);
   text-align: center;
-  padding: 6px; font-size: 12px;
+  padding: 5px 6px 4px; font-size: 12px;
   letter-spacing: 0.06em; color: rgba(232,230,225,0.55); display: none;
 }
 #hud-spectating.visible { display: block; }
+#hud-spectating .spec-label {
+  display: block;
+}
+#hud-spectating .spec-name {
+  display: block;
+  font-size: 13px; font-weight: 700; letter-spacing: 0.10em;
+  color: #e8e6e1; text-transform: uppercase;
+}
+#hud-spectating .spec-hint {
+  display: block;
+  font-size: 10px; letter-spacing: 0.08em; opacity: 0.45; margin-top: 2px;
+}
 
 /* ── Start / Pause menus ────────────────────────────────────────── */
 .hud-menu-overlay {
@@ -967,6 +979,22 @@ export class HUD {
     setTimeout(() => arc.remove(), 600);
   }
 
+  /**
+   * Update the spectating bar content.
+   * - name non-null: show "SPECTATING — <NAME>" with a cycle hint line.
+   * - name null: show plain death-cam text.
+   * Visibility (show/hide) is still controlled by the existing logic in update().
+   */
+  setSpectateInfo(name: string | null): void {
+    if (name !== null) {
+      this._spectating.innerHTML =
+        `<span class="spec-name">SPECTATING — ${name}</span>` +
+        `<span class="spec-hint">CLICK · NEXT PLAYER</span>`;
+    } else {
+      this._spectating.innerHTML = '<span class="spec-label">You are dead</span>';
+    }
+  }
+
   // ---------------------------------------------------------------------------
   // DOM builder
   // ---------------------------------------------------------------------------
@@ -1134,7 +1162,7 @@ export class HUD {
     // ── Spectating ──
     const spec = document.createElement('div');
     spec.id = 'hud-spectating';
-    spec.textContent = 'You are dead — spectating';
+    spec.innerHTML = '<span class="spec-label">You are dead</span>';
     root.appendChild(spec);
     this._spectating = spec;
 

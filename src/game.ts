@@ -232,6 +232,8 @@ export class Game {
   private _botMeshes: Map<number, THREE.Group> = new Map();
   private _bombMesh:  THREE.Group | null = null;
   private _bombLight: THREE.PointLight | null = null;
+  /** Bot id whose mesh should be hidden (player is first-person spectating it). null = no hidden bot. */
+  private _spectateHiddenId: number | null = null;
 
   private _freezeStartAt  = 0;
   private _roundStartAt   = 0; // game-time when live began
@@ -340,6 +342,7 @@ export class Game {
     this.score       = { CT: 0, T: 0 };
     this.lossStreak  = { CT: 0, T: 0 };
     this.roundNumber = 0;
+    this._spectateHiddenId = null;
 
     // Clear match stats — fresh match, fresh slate.
     this._stats.clear();
@@ -428,6 +431,7 @@ export class Game {
     this._roundKills.clear();
     this._roundPlanter = null;
     this._roundDefuser = null;
+    this._spectateHiddenId = null;
 
     const now = this._now();
     this._freezeStartAt = now;
@@ -1003,6 +1007,8 @@ export class Game {
       const mesh = this._botMeshes.get(c.id);
       if (mesh) {
         updateCharacterMesh(mesh, c, frameDt, now);
+        // Hide the spectated bot's mesh while player is viewing from inside its head.
+        mesh.visible = c.id !== this._spectateHiddenId;
       }
     }
 
@@ -1053,6 +1059,15 @@ export class Game {
     if (this.player.hasBomb && this.bomb.state === 'carried') {
       this._dropBomb(this.player);
     }
+  }
+
+  /**
+   * Set which bot id (if any) should have its mesh hidden because the player is
+   * first-person spectating it. Pass null to restore all bot meshes to normal.
+   * The actual visibility is applied inside updateVisuals each frame.
+   */
+  setSpectateHiddenBot(id: number | null): void {
+    this._spectateHiddenId = id;
   }
 
   // ---------------------------------------------------------------------------

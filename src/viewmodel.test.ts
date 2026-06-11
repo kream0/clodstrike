@@ -12,6 +12,7 @@ import { describe, expect, test } from 'bun:test';
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import * as THREE from 'three';
+import { clone as skeletonClone } from 'three/examples/jsm/utils/SkeletonUtils.js';
 
 import {
   normalizeWeaponModel,
@@ -228,6 +229,129 @@ describe('LICENSES.md — models section', () => {
     const expected = ['glock.glb', 'usp.glb', 'deagle.glb', 'ak47.glb', 'm4a4.glb', 'awp.glb'];
     for (const file of expected) {
       expect(content).toContain(file);
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// SkeletonUtils.clone regression — skinned mesh deep copy
+//
+// Verifies the invariant that viewmodel.ts relies on: skeletonClone produces a
+// clone whose SkinnedMesh references bones that are descendants of the clone
+// root (not the original source), so they receive world-matrix updates when the
+// clone is attached to a rendered scene graph.
+// ---------------------------------------------------------------------------
+
+describe('SkeletonUtils.clone — skinned mesh bone ownership', () => {
+  /** Build a minimal skinned hierarchy:
+   *   root (Group)
+   *     boneRoot (Bone)
+   *       boneTip  (Bone)
+   *     mesh (SkinnedMesh) — skeleton bound to [boneRoot, boneTip]
+   */
+  function buildSkinnedGroup(): THREE.Group {
+    const boneRoot = new THREE.Bone();
+    boneRoot.name = 'boneRoot';
+    const boneTip = new THREE.Bone();
+    boneTip.name = 'boneTip';
+    boneRoot.add(boneTip);
+
+    const geo = new THREE.BufferGeometry();
+    // Minimal geometry with skinning attributes so SkinnedMesh is valid
+    const positions = new Float32Array([0, 0, 0, 1, 0, 0, 0, 1, 0]);
+    const skinIndices = new Uint8Array([0, 1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0]);
+    const skinWeights = new Float32Array([1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0]);
+    geo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+    geo.setAttribute('skinIndex', new THREE.BufferAttribute(skinIndices, 4));
+    geo.setAttribute('skinWeight', new THREE.BufferAttribute(skinWeights, 4));
+
+    const mesh = new THREE.SkinnedMesh(geo);
+    const skeleton = new THREE.Skeleton([boneRoot, boneTip]);
+    mesh.add(boneRoot);
+    mesh.bind(skeleton);
+
+    const root = new THREE.Group();
+    root.add(mesh);
+    return root;
+  }
+
+  test('cloned SkinnedMesh skeleton bones are NOT the same object refs as the original', () => {
+    const source = buildSkinnedGroup();
+    const cloned = skeletonClone(source);
+
+    // Find SkinnedMesh in each hierarchy
+    let srcMesh: THREE.SkinnedMesh | null = null;
+    let clonedMesh: THREE.SkinnedMesh | null = null;
+
+    source.traverse((n) => { if (n instanceof THREE.SkinnedMesh) srcMesh = n; });
+    cloned.traverse((n) => { if (n instanceof THREE.SkinnedMesh) clonedMesh = n; });
+
+    expect(srcMesh).not.toBeNull();
+    expect(clonedMesh).not.toBeNull();
+
+    // Narrowing — already asserted non-null above
+    const sm = srcMesh as unknown as THREE.SkinnedMesh;
+    const cm = clonedMesh as unknown as THREE.SkinnedMesh;
+
+    // The skeleton instance itself should differ
+    expect(cm.skeleton).not.toBe(sm.skeleton);
+
+    // Each bone in the clone must be a different object from the source bone
+    for (let i = 0; i < sm.skeleton.bones.length; i++) {
+      const srcBone = sm.skeleton.bones[i];
+      const cloneBone = cm.skeleton.bones[i];
+      expect(cloneBone).not.toBeUndefined();
+      expect(cloneBone).not.toBe(srcBone);
+    }
+  });
+
+  test('cloned bones are descendants of the cloned root (not the original)', () => {
+    const source = buildSkinnedGroup();
+    const cloned = skeletonClone(source);
+
+    let clonedMesh: THREE.SkinnedMesh | null = null;
+    cloned.traverse((n) => { if (n instanceof THREE.SkinnedMesh) clonedMesh = n; });
+    expect(clonedMesh).not.toBeNull();
+    const cm = clonedMesh as unknown as THREE.SkinnedMesh;
+
+    // Collect all descendants of the cloned root
+    const clonedDescendants = new Set<THREE.Object3D>();
+    cloned.traverse((n) => clonedDescendants.add(n));
+
+    // Every bone in the cloned skeleton must be a descendant of the cloned root
+    for (const bone of cm.skeleton.bones) {
+      expect(bone).not.toBeUndefined();
+      expect(clonedDescendants.has(bone as THREE.Object3D)).toBe(true);
+    }
+
+    // Sanity: cloned root is different object from source
+    expect(cloned).not.toBe(source);
+  });
+});
+
+describe('SkeletonUtils.clone — non-skinned group sanity', () => {
+  test('cloning a Group of plain Meshes produces an independent object with equal child count', () => {
+    // Build a plain group with 3 meshes
+    const source = new THREE.Group();
+    for (let i = 0; i < 3; i++) {
+      const mesh = new THREE.Mesh(
+        new THREE.BoxGeometry(1, 1, 1),
+        new THREE.MeshBasicMaterial({ color: 0xffffff }),
+      );
+      source.add(mesh);
+    }
+
+    const cloned = skeletonClone(source);
+
+    // Different object identity
+    expect(cloned).not.toBe(source);
+
+    // Same child count
+    expect(cloned.children).toHaveLength(source.children.length);
+
+    // Each child is a different object (deep copy at Object3D level)
+    for (let i = 0; i < source.children.length; i++) {
+      expect(cloned.children[i]).not.toBe(source.children[i]);
     }
   });
 });

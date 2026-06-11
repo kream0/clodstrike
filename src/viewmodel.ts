@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import { clone as skeletonClone } from 'three/examples/jsm/utils/SkeletonUtils.js';
 import type { Vec3, GrenadeType } from './types';
 
 // ---------------------------------------------------------------------------
@@ -333,15 +334,6 @@ function applyViewmodelMaterial(obj: THREE.Object3D): void {
   });
 }
 
-// Check if a scene has any SkinnedMesh nodes
-function hasSkinnedMesh(obj: THREE.Object3D): boolean {
-  let found = false;
-  obj.traverse((child) => {
-    if (child instanceof THREE.SkinnedMesh) found = true;
-  });
-  return found;
-}
-
 // ---------------------------------------------------------------------------
 // ViewModel class
 // ---------------------------------------------------------------------------
@@ -618,16 +610,13 @@ export class ViewModel {
 
     if (sourceModel !== undefined) {
       // --- GLB path ---
-      // Clone the model. If any SkinnedMesh is present we need SkeletonUtils;
-      // these flat-gun packs have no skinned meshes, so .clone(true) suffices.
-      // (Check is performed defensively; will warn in console if bones found.)
-      if (hasSkinnedMesh(sourceModel)) {
-        console.warn(
-          `[viewmodel] SkinnedMesh found in ${id} model — shallow clone used; ` +
-          'bones may not animate correctly. Consider importing SkeletonUtils.clone().',
-        );
-      }
-      const modelClone: THREE.Object3D = sourceModel.clone(true);
+      // Use SkeletonUtils.clone so the cloned skeleton's bones live inside the
+      // cloned subtree and receive world-matrix updates when the clone is in the
+      // scene graph.  THREE.Object3D.clone(true) shares the ORIGINAL skeleton
+      // (whose bones live in the never-rendered source gltf.scene), causing
+      // skinned vertices to transform to world origin and render nothing.
+      // SkeletonUtils.clone handles both skinned and non-skinned objects safely.
+      const modelClone: THREE.Object3D = skeletonClone(sourceModel);
 
       // Compute normalization
       const bbox = new THREE.Box3().setFromObject(sourceModel);

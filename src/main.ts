@@ -415,6 +415,13 @@ async function boot(): Promise<void> {
   let deathCamPos: THREE.Vector3 | null = null;
   let deathCamTilt = 0; // accumulated downward tilt
 
+  // Spectate state (player-only; cleared on every round start / restart).
+  let spectateTargetId: number | null = null;
+  // Game-time (clock.now) when the player died and death cam began.
+  let deathCamEnterAt  = 0;
+  // Reusable vector for spectate camera — avoids per-frame allocations.
+  const _specCamPos = new THREE.Vector3();
+
   // --- Lock / unlock handling ---
   input.onLockChange = (locked) => {
     const hint = document.getElementById('lock-hint');
@@ -444,6 +451,13 @@ async function boot(): Promise<void> {
     botManager.setSmokeQuery((a, b) => grenadeManager.isSegmentSmoked(a, b));
     grenadeManager.reset();
     prevEquippedGrenade = null;
+    // Clear spectate state on new match.
+    spectateTargetId = null;
+    deathCamPos      = null;
+    deathCamTilt     = 0;
+    deathCamEnterAt  = 0;
+    viewmodel.setVisible(true);
+    hud.setSpectateInfo(null);
     hud.hideMenus();
     input.requestLock();
     audio.unlock();
@@ -465,6 +479,14 @@ async function boot(): Promise<void> {
       botManager.setSmokeQuery((a, b) => grenadeManager.isSegmentSmoked(a, b));
       grenadeManager.reset();
       prevEquippedGrenade = null;
+      // Clear spectate state on restart.
+      spectateTargetId = null;
+      deathCamPos      = null;
+      deathCamTilt     = 0;
+      deathCamEnterAt  = 0;
+      game.setSpectateHiddenBot(null);
+      viewmodel.setVisible(true);
+      hud.setSpectateInfo(null);
       paused = false;
       hud.hideMenus();
       input.requestLock();
@@ -509,8 +531,12 @@ async function boot(): Promise<void> {
       game.onPlayerDied();
       deathCamPos = new THREE.Vector3(player.pos.x, eyeY, player.pos.z);
       deathCamTilt = 0;
+      deathCamEnterAt = clock.now;
+      spectateTargetId = null;
+      viewmodel.setVisible(false);
       viewmodel.setGrenadeView(null);
       prevEquippedGrenade = null;
+      hud.setSpectateInfo(null);
     }
   });
 
@@ -584,9 +610,17 @@ async function boot(): Promise<void> {
     const slot = player.inventory.activeSlot;
     const ws   = player.inventory[slot];
     viewmodel.setWeapon(ws?.def.id ?? 'usp');
+    viewmodel.setVisible(true);
     viewmodel.setGrenadeView(null);
     prevEquippedGrenade = null;
     grenadeManager.reset();
+    // Clear spectate state — player respawns alive next round.
+    spectateTargetId = null;
+    deathCamPos      = null;
+    deathCamTilt     = 0;
+    deathCamEnterAt  = 0;
+    game.setSpectateHiddenBot(null);
+    hud.setSpectateInfo(null);
   });
 
   // --- Lock hint ---
@@ -860,6 +894,61 @@ async function boot(): Promise<void> {
         }
       }
 
+      // ── Spectate logic (player dead only) ──────────────────────────
+      if (!playerAlive) {
+        const DEATH_CAM_DURATION = 1.2; // seconds of death-cam before auto-spectate
+
+        // Helper: find living teammates (not the player), ordered by combatants array.
+        const liveTeammates = game.combatants.filter(
+          c => !c.isPlayer && c.team === player.team && c.alive,
+        );
+
+        // Transition: death cam → spectate after DEATH_CAM_DURATION.
+        if (spectateTargetId === null && clock.now - deathCamEnterAt >= DEATH_CAM_DURATION) {
+          if (liveTeammates.length > 0) {
+            const first = liveTeammates[0]!;
+            spectateTargetId = first.id;
+            game.setSpectateHiddenBot(spectateTargetId);
+            hud.setSpectateInfo(first.name);
+          }
+          // else: no teammates alive — stay in death cam (spectateTargetId remains null).
+        }
+
+        // Auto-advance: current target died.
+        if (spectateTargetId !== null) {
+          const currentTarget = game.combatants.find(c => c.id === spectateTargetId);
+          if (currentTarget === undefined || !currentTarget.alive) {
+            // Target died — advance to next living teammate.
+            if (liveTeammates.length > 0) {
+              const next = liveTeammates[0]!;
+              spectateTargetId = next.id;
+              game.setSpectateHiddenBot(spectateTargetId);
+              hud.setSpectateInfo(next.name);
+            } else {
+              // No living teammates — fall back to death cam.
+              spectateTargetId = null;
+              game.setSpectateHiddenBot(null);
+              hud.setSpectateInfo(null);
+            }
+          }
+        }
+
+        // Cycle: left-click while spectating → advance to next living teammate.
+        if (spectateTargetId !== null && !edgesConsumed && mousePressed0) {
+          // Find current target's position in the liveTeammates list.
+          const idx = liveTeammates.findIndex(c => c.id === spectateTargetId);
+          if (liveTeammates.length > 0) {
+            const nextIdx = (idx + 1) % liveTeammates.length;
+            const next = liveTeammates[nextIdx]!;
+            spectateTargetId = next.id;
+            game.setSpectateHiddenBot(spectateTargetId);
+            hud.setSpectateInfo(next.name);
+          }
+          edgesConsumed = true;
+        }
+      }
+      // ── End spectate logic ──────────────────────────────────────────
+
       let trigger: boolean;
       if (def && def.auto) {
         trigger = input.mouseDown;
@@ -916,9 +1005,12 @@ async function boot(): Promise<void> {
 
     // --- Smooth eye height ---
     let targetEyeY: number;
-    if (!player.alive && deathCamPos) {
+    if (!player.alive && spectateTargetId === null && deathCamPos) {
       // Death cam: fixed at death position, slight downward tilt.
       deathCamTilt = Math.min(deathCamTilt + frameDt * 0.3, 0.25);
+    } else if (!player.alive && spectateTargetId !== null) {
+      // Spectating: no death cam tilt needed.
+      deathCamTilt = 0;
     } else {
       deathCamPos = null;
       deathCamTilt = 0;
@@ -938,7 +1030,16 @@ async function boot(): Promise<void> {
 
     // --- Camera placement ---
     const punch = getViewPunch(player);
-    if (!player.alive && deathCamPos) {
+    if (!player.alive && spectateTargetId !== null) {
+      // First-person spectate: view from inside the target's head.
+      const target = game.combatants.find(c => c.id === spectateTargetId);
+      if (target !== undefined) {
+        const eyeOff = target.crouching ? MOVEMENT.EYE_CROUCH : MOVEMENT.EYE_STAND;
+        _specCamPos.set(target.pos.x, target.pos.y + eyeOff, target.pos.z);
+        camera.position.copy(_specCamPos);
+        camera.rotation.set(target.pitch, target.yaw, 0, 'YXZ');
+      }
+    } else if (!player.alive && deathCamPos) {
       camera.position.copy(deathCamPos);
       camera.rotation.set(-deathCamTilt + punch.pitch, player.yaw + punch.yaw, 0, 'YXZ');
     } else {
