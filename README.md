@@ -25,6 +25,8 @@ A Counter-Strike 2–style single-player FPS — bots, bomb defusal, and a low-p
 - **CC0-textured world**: 8 open-licensed tiling materials (ambientCG + Poly Haven — sand, sandstone brick, plaster, paving stone, concrete, wood, painted metal, fabric), color + normal maps, applied across the greedy-merged map geometry with **world-anchored planar UVs** so tiles continue seamlessly across merged boxes. Per-kind prop texturing (wood crates, metal car/doors/xbox, fabric sandbags). Colors-only fallback if textures fail to load.
 - **CC0 GLB weapon viewmodels**: the six firearms use models from the "CC0 Flat Guns" packs (OpenGameArt, by Pichuliru), auto-normalized (longest-axis-to-barrel alignment + target-length scaling) under the same procedural animation anchor — bob/sway/kick/reload all still code-driven. Knife stays procedural; any model that fails to load falls back to the procedural box gun.
 - **Async boot with loading screen**: 22-asset progress bar (8 color maps, 8 normal maps, 6 weapon GLBs), parallel loading, per-asset graceful fallback — a 404 can never brick the boot.
+- **CC0 GLB character models**: Kenney "Blocky Characters" (CT blue / T tan skins, ~250 KB) with fully **code-driven animation** — idle breathing, speed-proportional walk/run cycles, crouch, death fall — on the models' separate limb nodes; no animation clips, allocation-free per frame. Visual-only: hitboxes and eye heights unchanged. Procedural box-bot fallback.
+- **Modernized HUD & menus**: translucent glass plates, tabular numerals, sand-gold accent, team-colored scoreplate/scoreboard, killfeed chips, buy-menu cards with keycap badges, segmented difficulty picker, low-health states — all still DOM + injected CSS, no images or fonts.
 - **Full credits**: every asset's source + license in [`assets/LICENSES.md`](./assets/LICENSES.md).
 
 ### Movement & gunplay
@@ -118,9 +120,9 @@ Seven weapons across three slots with individually tuned stats:
 
 ### Active track — visual & UX overhaul (user-directed)
 
-- **Open-licensed assets** — ✅ world textures shipped · ✅ weapon models shipped · ⏳ character models next. Sources: Kenney, ambientCG, Poly Haven, OpenGameArt, Quaternius, KayKit. Every asset's source + license recorded in `assets/LICENSES.md`.
-- **UI improvement** — modernized HUD and menus: typography, icons, layout, readability.
-- **Performance** — profile-guided: draw calls, texture memory, shadow cost, pixel-ratio capping.
+- **Open-licensed assets** — ✅ world textures · ✅ weapon models · ✅ character models (all shipped; credits in `assets/LICENSES.md`).
+- **UI improvement** — ✅ HUD/menu visual overhaul shipped.
+- **Performance** — ⏳ profile-guided pass: draw calls, shadow cost, pixel-ratio capping, render-cost instrumentation.
 
 ### Short term
 
@@ -132,7 +134,6 @@ Seven weapons across three slots with individually tuned stats:
 
 - **Match-end stats screen** — full scoreboard with K/D, headshot %, MVP rounds, money spent.
 - **Wallbang penetration** — raycast continues through thin surfaces with reduced damage.
-- **Better character models / animations** — replace box-stick-figure bots with smoother low-poly meshes; add walk/run/crouch cycle.
 - **A second map** reusing the same ASCII grid format and `MapData` contract — the navgrid, renderer, and collision system all accept any conforming `MapData`.
 - **Replay / demo** — serialize `clock.now`, player inputs, and bot FSM state per tick for round playback.
 
@@ -200,6 +201,7 @@ See [`CLAUDE.md`](./CLAUDE.md) for the full project guide. Short module summary:
 | `game.ts` | Game state machine: phases, economy, bomb, spawn, combatant list |
 | `bots/nav.ts` | A* over the map grid with binary heap and string-pull |
 | `bots/bot.ts` | Per-bot FSM using shared movement + weapon code |
+| `characters.ts` | GLB bot characters with code-driven animation (procedural fallback) |
 | `hud.ts` | All UI: health, ammo, radar, buy menu, scoreboard, menus |
 | `builder.ts` | Scene construction: greedy-merged map geometry + props |
 | `main.ts` | Boot, 128 Hz fixed-step loop, camera, player wiring |

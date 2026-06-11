@@ -34,7 +34,7 @@ Work through this standing track cycle by cycle with the agent workflow until ex
 
 - **Stack**: Bun 1.3, TypeScript strict (`tsc --noEmit` = `bun run check`), three@0.184. NO Vite.
 - **Entry**: `index.html` → `src/main.ts` — fixed-step simulation at 128 Hz with accumulator loop; render at RAF. Exported `clock.now` (game-time seconds) is THE time source for all game logic.
-- **Validation gate**: `bun run check && bun test && bun run build` — all three must pass before any commit. Tests baseline is **211 tests green**; never let the suite shrink.
+- **Validation gate**: `bun run check && bun test && bun run build` — all three must pass before any commit. Tests baseline is **237 tests green**; never let the suite shrink.
 - **Dev server**: `bun run dev` → http://localhost:3000 (Bun's built-in HTML entrypoint)
 - **Repo**: https://github.com/kream0/clodstrike
 
@@ -61,7 +61,7 @@ src/
   viewmodel.ts      # First-person GLB gun models (procedural fallback) + bob/sway/kick/reload anims
   effects.ts        # Pooled tracers, impacts, blood, muzzle flash, decals, explosion
   audio.ts          # Web Audio positional synthesis (gunshots, steps, bomb, stings)
-  characters.ts     # Bot character meshes (procedural colored boxes)
+  characters.ts     # GLB bot characters, code-driven limb animation (procedural fallback)
   builder.ts        # buildMapScene — greedy row-merge boxes + props; setupEnvironment
   hud.ts            # All HUD: DOM + injected CSS, radar, buy menu, scoreboard, menus
   game.ts           # Game state machine: phases, economy, bomb lifecycle, combatants
