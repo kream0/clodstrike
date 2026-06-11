@@ -189,7 +189,7 @@ async function boot(): Promise<void> {
   const { setProgress, remove: removeOverlay } = createLoadingOverlay();
 
   // --- Renderer (created early so anisotropy cap is available) ---
-  const renderer = new THREE.WebGLRenderer({ antialias: true });
+  const renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: 'high-performance' });
   renderer.shadowMap.enabled = true;
   renderer.shadowMap.type    = THREE.PCFSoftShadowMap;
   renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1.5));
@@ -592,6 +592,7 @@ async function boot(): Promise<void> {
   window.addEventListener('resize', () => {
     camera.aspect = window.innerWidth / window.innerHeight;
     camera.updateProjectionMatrix();
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1.5));
     renderer.setSize(window.innerWidth, window.innerHeight);
   });
 
@@ -863,11 +864,14 @@ async function boot(): Promise<void> {
       scoped,
     });
 
-    // --- Debug readout ---
+    renderer.render(scene, camera);
+
+    // --- Debug readout (read renderer.info AFTER render so counts are current) ---
     if (debugVisible && debugTimer >= 0.25) {
       debugTimer = 0;
       const horizSpeed  = Math.sqrt(player.vel.x ** 2 + player.vel.z ** 2);
       const activeWsDbg = player.inventory[player.inventory.activeSlot];
+      const ri = renderer.info;
       debugDiv.textContent =
         `FPS: ${displayFps}  ` +
         `pos: (${player.pos.x.toFixed(1)}, ${player.pos.y.toFixed(2)}, ${player.pos.z.toFixed(1)})  ` +
@@ -876,10 +880,9 @@ async function boot(): Promise<void> {
         `wpn: ${activeWsDbg?.def.id ?? '—'}  ` +
         `ammo: ${activeWsDbg?.ammo ?? 0}/${activeWsDbg?.reserve ?? 0}  ` +
         `phase: ${game.phase}  ` +
-        (noclip ? '  [NOCLIP]' : '');
+        (noclip ? '[NOCLIP]  ' : '') +
+        `dc: ${ri.render.calls}  tri: ${ri.render.triangles}  geo: ${ri.memory.geometries}  tex: ${ri.memory.textures}`;
     }
-
-    renderer.render(scene, camera);
     input.endFrame();
   }
 

@@ -589,6 +589,8 @@ export class HUD {
 
   // Tab scoreboard.
   private _sbVisible = false;
+  // Last game-time at which the scoreboard DOM was rebuilt (for 0.25 s rate-limit).
+  private _sbLastRenderTime = -1;
 
   // Buy menu.
   private _buyVisible = false;
@@ -707,8 +709,10 @@ export class HUD {
     }
     this._killFeedEntries = this._killFeedEntries.filter(e => now <= e.expireAt);
 
-    // Radar.
-    this._drawRadar(now);
+    // Radar — skip when fully obscured by the start/pause menu overlay.
+    if (game.phase !== 'menu') {
+      this._drawRadar(now);
+    }
 
     // Plant / defuse progress bar.
     const bomb = game.bomb;
@@ -786,8 +790,9 @@ export class HUD {
       }
     }
 
-    // Scoreboard.
-    if (this._sbVisible) {
+    // Scoreboard — rebuild DOM at most once per 0.25 s of game time.
+    if (this._sbVisible && now - this._sbLastRenderTime >= 0.25) {
+      this._sbLastRenderTime = now;
       this._renderScoreboard();
     }
   }
@@ -1177,6 +1182,7 @@ export class HUD {
       // Tab: scoreboard.
       if (e.code === 'Tab') {
         e.preventDefault();
+        this._sbLastRenderTime = -Infinity;
         this._sbVisible = true;
         this._scoreboard.classList.add('visible');
       }

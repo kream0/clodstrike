@@ -547,13 +547,18 @@ export function setupEnvironment(scene: THREE.Scene): void {
   sun.castShadow = true;
   sun.shadow.mapSize.width  = 2048;
   sun.shadow.mapSize.height = 2048;
-  sun.shadow.camera.near = 10;
-  sun.shadow.camera.far  = 200;
+  // Shadow camera tightly covers playable map bounds: x −48..48, z −44..44,
+  // plus 4 m margin and up to ~10 m height. Map origin x −48 z −44, size 96×88 m.
+  // Before: left/right ±60, top/bottom ±60 (generic 120×120 m box).
+  // After:  left/right ±52, top/bottom ±48 (~4 m margin; saves ~25% shadow texel area).
+  sun.shadow.camera.near = 1;
+  sun.shadow.camera.far  = 160;
   const sc = sun.shadow.camera as THREE.OrthographicCamera;
-  sc.left   = -60;
-  sc.right  =  60;
-  sc.top    =  60;
-  sc.bottom = -60;
+  sc.left   = -52;
+  sc.right  =  52;
+  sc.top    =  48;
+  sc.bottom = -48;
+  sc.updateProjectionMatrix();
   sun.shadow.bias = -0.0005;
   scene.add(sun);
   scene.add(sun.target);
