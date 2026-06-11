@@ -11,6 +11,7 @@ import type { MoveIntent } from './movement';
 import { clamp, yawPitchToDir, normalize } from './math';
 import { updateWeapon, getViewPunch, isScoped, switchSlot } from './weapons';
 import { gameEvents } from './combat';
+import type { ShotResult } from './combat';
 import { createCharacterMesh, updateCharacterMesh } from './characters';
 import { ViewModel } from './viewmodel';
 import { Effects } from './effects';
@@ -18,6 +19,8 @@ import { audio } from './audio';
 import { Game } from './game';
 import type { MatchOptions } from './game';
 import { HUD } from './hud';
+import { NavGrid } from './bots/nav';
+import { BotManager } from './bots/bot';
 
 // ---------------------------------------------------------------------------
 // Game-time clock (seconds) — advanced by fixed-step simulation.
@@ -103,6 +106,9 @@ function boot(): void {
   // --- World (collision) ---
   const world = new World(DUST2);
 
+  // --- NavGrid (built once at boot from DUST2, shared by all BotManagers) ---
+  const navGrid = new NavGrid(DUST2);
+
   // --- Camera ---
   const camera = new THREE.PerspectiveCamera(73, window.innerWidth / window.innerHeight, 0.05, 300);
   camera.rotation.order = 'YXZ';
@@ -133,6 +139,36 @@ function boot(): void {
   // --- ViewModel ---
   const viewmodel = new ViewModel(camera);
   viewmodel.setWeapon(player.inventory.secondary?.def.id ?? 'usp');
+
+  // --- BotManager (created/replaced on each match start) ---
+  let botManager: BotManager | null = null;
+
+  // Bot shot callback: render tracer + impact effects for bot shots.
+  function onBotShot(bot: Combatant, result: ShotResult): void {
+    // Cheap visibility cull: only render effects when player is within 80 m.
+    const dx = player.pos.x - bot.pos.x;
+    const dz = player.pos.z - bot.pos.z;
+    const distSq = dx * dx + dz * dz;
+    if (distSq > 80 * 80) return;
+
+    // Muzzle position: bot eye + forward 0.4 m.
+    const eyeOff   = bot.crouching ? 1.17 : 1.64;
+    const sinY     = Math.sin(bot.yaw);
+    const cosY     = Math.cos(bot.yaw);
+    const muzzle   = {
+      x: bot.pos.x - sinY * 0.4,
+      y: bot.pos.y + eyeOff,
+      z: bot.pos.z - cosY * 0.4,
+    };
+    effects.tracer(muzzle, result.endPoint);
+    if (result.target !== null) {
+      effects.blood(result.endPoint);
+    } else if (result.surface !== null && result.normal !== null) {
+      effects.impact(result.endPoint, result.normal, 'world');
+      effects.addDecal(result.endPoint, result.normal);
+    }
+    audio.gunshot(bot.inventory[bot.inventory.activeSlot]?.def.id ?? 'usp', bot.pos);
+  }
 
   // --- State ---
   let eyeY        = player.pos.y + MOVEMENT.EYE_STAND;
@@ -170,6 +206,10 @@ function boot(): void {
     // Reset player to chosen team default loadout (Game will reassign on round start).
     player.team = opts.playerTeam;
     game.startMatch(opts);
+    // Instantiate BotManager after startMatch so combatants exist.
+    botManager?.dispose();
+    botManager = new BotManager(game, world, navGrid, onBotShot);
+    botManager.attach();
     hud.hideMenus();
     input.requestLock();
     audio.unlock();
@@ -184,6 +224,10 @@ function boot(): void {
   hud.onRestart = () => {
     if (lastMatchOpts) {
       game.restart(lastMatchOpts);
+      // Reinstantiate BotManager after restart.
+      botManager?.dispose();
+      botManager = new BotManager(game, world, navGrid, onBotShot);
+      botManager.attach();
       paused = false;
       hud.hideMenus();
       input.requestLock();
@@ -241,6 +285,13 @@ function boot(): void {
     }
     if (ev.attacker === player && ev.victim !== player) {
       hud.notifyHit(false, ev.hitGroup === 'head');
+    }
+  });
+
+  // --- Bot footstep positional audio ---
+  gameEvents.on('footstep', (ev) => {
+    if (ev.who !== player) {
+      audio.footstep(ev.who.pos);
     }
   });
 
