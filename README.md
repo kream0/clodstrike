@@ -74,7 +74,8 @@ Seven weapons across three slots with individually tuned stats:
 - **Perception**: staggered FOV cone (100° full / 50° half) + LOS raycast check every 0.12 s per bot, offset by bot ID to spread CPU load. Hearing range: gunshots 30 m, teammate deaths 40 m. Enemies spotted near or heard firing appear on the player's radar.
 - **Difficulty tiers**: easy (550 ms reaction, ±3.2° aim error, 45 m vision), normal (350 ms, ±1.7°, 60 m), hard (220 ms, ±0.8°, 80 m). Aim error resamples every 0.25 s; locks in and shrinks after 1.2 s on the same target. Recoil control factor scales per difficulty.
 - **Shared code**: bots run the exact same `simulateMovement` and `updateWeapon` calls as the player, driving identical physics and weapon state machines — no separate bot-movement shortcuts.
-- **Stuck recovery**: horizontal speed below 0.3 m/s for 0.7 s triggers a jump; 1.5 s of stuck triggers a full A* replan.
+- **Stuck recovery**: horizontal speed below 0.3 m/s for 0.7 s triggers a jump; 1.5 s of stuck triggers a full A* replan; stuck escorts break formation permanently and route independently.
+- **Mission persistence**: a dropped bomb is actively retrieved — the closest living T is designated sticky retriever (re-designated if pinned in a fight for 4 s+); site guards face the enemy approach instead of a default angle; kill/shot intel inside enemy spawn zones is ignored (no spawn-camping detours); bot-vs-bot separation impulses prevent stacked clumps.
 - **Economy-aware buying**: per-round team strategy — eco (save), force-buy (loss streak / team-economy triggered), full-buy, and occasional AWP picks (max one fresh AWP per team per round). AWP bots scope in when engaging.
 
 ### Rounds & economy
@@ -103,6 +104,7 @@ Seven weapons across three slots with individually tuned stats:
 - **Buy menu** (B key): nine keycap digit shortcuts — 1 USP-S · 2 Glock-18 · 3 Desert Eagle · 4 AK-47 · 5 M4A4 · 6 AWP · 7 Vest · 8 Vest+Helmet · 9 Defuse Kit. Items greyed out when unaffordable or wrong team. Digit keys 1–3 suppressed for weapon switching while the buy menu is open.
 - **Start menu**: pick CT or T side, choose difficulty. **Pause menu**: resume, restart, sensitivity slider. **Banners** for round win/loss.
 - **Match-end stats screen**: full-screen panel on match end with winner headline, final score, and per-team tables — kills, deaths, headshot %, damage dealt, MVP rounds (defuser > planter > top fragger), money spent — plus a Play Again button. Stats accumulate silently all match via the `gameEvents` bus.
+- **Death spectate**: short death cam, then first-person spectate of living teammates until the round ends — click cycles targets, auto-advances when the spectated bot dies, HUD shows who you're watching.
 - **Plant / defuse progress bar** overlaid on-screen while holding E.
 - All HUD is DOM with CSS injected from `hud.ts` at construction — no external `.css` files.
 

@@ -22,11 +22,11 @@ Routine work (picking features, creating tasks, spawning agents, committing to m
 
 ## Current long-term directive (user-issued 2026-06-11 — overrides README roadmap ordering)
 
-Work through this standing track cycle by cycle with the agent workflow until exhausted or superseded:
+Work through this standing track cycle by cycle with the agent workflow until exhausted or superseded. (The original track — open-licensed assets, UI overhaul, performance — shipped in full; the directive below supersedes it.)
 
-1. **Open-licensed assets** — replace procedural visuals with real assets from open-asset sites (Kenney, ambientCG, Poly Haven, OpenGameArt, Quaternius, KayKit). Tiling textures for ALL world surfaces and props; 3D models for weapons (viewmodel) and characters (rigged/animated where possible). **License rule: CC0/public-domain strongly preferred; CC-BY acceptable only with attribution recorded.** Every asset's source URL + license goes in `assets/LICENSES.md`. Keep total added repo weight reasonable (target < ~30 MB).
-2. **UI improvement** — modernize HUD/menus (typography, layout, icons, readability, juice) while keeping the injected-CSS architecture of `hud.ts`.
-3. **Performance** — profile first, then optimize: draw calls, texture memory, shadow cost, pixel-ratio capping, pooling. Keep 128 Hz sim headroom and 60 fps render on mid hardware; the asset work above must not regress this.
+1. **Dust2 fidelity rebuild** — redo `maps/dust2.ts` based on real dust2 reference data (radar overviews / community layout data from open sources) for faithful geometry: correct route proportions, heights, chokes, site shapes. Keep the `MapData` contract, the ASCII-grid format, and the BFS connectivity suite green. (Task #28)
+2. **Realistic characters & weapons with proper animations** — ditch the voxel/blocky aesthetic: realistic open-licensed rigged characters WITH animation clips (AnimationMixer pipeline replacing code-driven limb anim), first-person arms/hands on viewmodel weapons incl. knife, higher-fidelity weapon models. **License rule unchanged: CC0/public-domain strongly preferred; CC-BY only with attribution recorded in `assets/LICENSES.md`. Actual CS2/Valve assets are copyrighted — never use them; use closest open equivalents.** (Task #29)
+3. **Asset/license/perf ground rules carry over** — every asset credited in `assets/LICENSES.md`; keep repo weight reasonable (< ~30 MB added per cycle, discuss if more needed); keep 128 Hz sim headroom and 60 fps render on mid hardware.
 
 ---
 
@@ -34,7 +34,7 @@ Work through this standing track cycle by cycle with the agent workflow until ex
 
 - **Stack**: Bun 1.3, TypeScript strict (`tsc --noEmit` = `bun run check`), three@0.184. NO Vite.
 - **Entry**: `index.html` → `src/main.ts` — fixed-step simulation at 128 Hz with accumulator loop; render at RAF. Exported `clock.now` (game-time seconds) is THE time source for all game logic.
-- **Validation gate**: `bun run check && bun test && bun run build` — all three must pass before any commit. Tests baseline is **338 tests green**; never let the suite shrink.
+- **Validation gate**: `bun run check && bun test && bun run build` — all three must pass before any commit. Tests baseline is **346 tests green**; never let the suite shrink.
 - **Dev server**: `bun run dev` → http://localhost:3000 (Bun's built-in HTML entrypoint)
 - **Repo**: https://github.com/kream0/clodstrike
 
