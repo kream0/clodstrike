@@ -68,6 +68,7 @@ Seven weapons across three slots with individually tuned stats:
 - **Difficulty tiers**: easy (550 ms reaction, ±3.2° aim error, 45 m vision), normal (350 ms, ±1.7°, 60 m), hard (220 ms, ±0.8°, 80 m). Aim error resamples every 0.25 s; locks in and shrinks after 1.2 s on the same target. Recoil control factor scales per difficulty.
 - **Shared code**: bots run the exact same `simulateMovement` and `updateWeapon` calls as the player, driving identical physics and weapon state machines — no separate bot-movement shortcuts.
 - **Stuck recovery**: horizontal speed below 0.3 m/s for 0.7 s triggers a jump; 1.5 s of stuck triggers a full A* replan.
+- **Economy-aware buying**: per-round team strategy — eco (save), force-buy (loss streak / team-economy triggered), full-buy, and occasional AWP picks (max one fresh AWP per team per round). AWP bots scope in when engaging.
 
 ### Rounds & economy
 
@@ -128,7 +129,6 @@ Seven weapons across three slots with individually tuned stats:
 
 - **Halftime side swap** — teams exchange CT/T at round 13; economy resets.
 - **Grenades** — HE (radial damage), flashbang (screen whiteout + bot reaction penalty), smoke (opaque sphere, LOS blocking for bots).
-- **Bot buy variety** — bots currently eco with pistols or full-buy; add force-buy logic and occasional AWP purchases based on team economy.
 
 ### Medium term
 
