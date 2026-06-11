@@ -83,7 +83,7 @@ Seven weapons across three slots with individually tuned stats:
 
 - **5v5 bomb defusal, MR12, first to 13 wins** (24 rounds max). No halftime side swap — deliberate.
 - **Phases**: `menu` → `freeze` (5 s) → `live` (1:55) → `planted` (40 s bomb timer) → `roundEnd` (5 s) → `matchEnd`.
-- **Buy window**: buy menu accessible during freeze and the first 10 s of live. `canBuy` uses game-time `clock.now` — the source of the round-2 regression that was fixed after review.
+- **Buy window**: 30 s from freeze start (CS2-style — outlasts the 5 s freeze into the live round). The buy menu shows the remaining window and force-closes when it expires. `canBuy` uses game-time `clock.now` — the source of the round-2 regression that was fixed after review.
 - **Plant / defuse**: hold E for 3.2 s inside a bombsite to plant; 10 s to defuse (5 s with kit). Bomb drop/pickup on player death. Radial explosion damage.
 - **Economy**:
   - Starting money: $800
@@ -166,9 +166,9 @@ bun install
 
 | Command | What it does |
 |:---|:---|
-| `bun run dev` | Start the dev server at http://localhost:3000 |
+| `bun run dev` | Dev server at http://localhost:3000 — fresh bundle on every reload (works on Bun 1.1+) |
 | `bun run check` | TypeScript type-check only (`tsc --noEmit`) |
-| `bun test` | Run the test suite (98 tests) |
+| `bun test` | Run the test suite (376 tests) |
 | `bun run build` | Bundle for production into `dist/` (~1.1 MB) |
 
 ## Controls
