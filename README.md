@@ -188,6 +188,7 @@ Team-exclusive weapons are enforced at purchase time — a CT can never buy an A
 - **Match-end stats screen**: full-screen panel on match end with winner headline, final score, and per-team tables — kills, deaths, headshot %, damage dealt, MVP rounds (defuser > planter > top fragger), money spent — plus a Play Again button. Stats accumulate silently all match via the `gameEvents` bus.
 - **Death spectate**: short death cam, then first-person spectate of living teammates until the round ends — click cycles targets, auto-advances when the spectated bot dies, HUD shows who you're watching.
 - **Round replay**: the sim is fully deterministic (per-system seeded RNG streams), so every round is re-watchable — an always-on recorder logs your per-tick inputs + the match seed, and "Watch Last Round" (pause menu) / "Watch Final Round" (match-end screen) re-simulate it through the identical engine code path, fast-forwarding to the round and playing back at exact recorded speed. Esc exits.
+- **Competitive Elo rating**: a persistent rating (starts 1000) earned against tier-rated bot teams (easy 800 / normal 1200 / hard 1600, K=32, 12–12 = draw) — shown on the start menu with your W/L record and as a colored delta on the match-end screen. Replays and mid-match restarts never count; survives page reloads via localStorage.
 - **Plant / defuse progress bar** overlaid on-screen while holding E.
 - All HUD is DOM with CSS injected from `hud.ts` at construction — no external `.css` files.
 
@@ -225,7 +226,6 @@ Team-exclusive weapons are enforced at purchase time — a CT can never buy an A
 ### Long term
 
 - **Multiplayer via WebSocket / WebRTC** — the deterministic seeded 128 Hz sim + per-tick input model (built for replay) are the groundwork; netcode model TBD.
-- **Competitive ranking vs bots** — Elo-style rating adjusted per match against each difficulty tier.
 
 ---
 
@@ -243,7 +243,7 @@ bun install
 |:---|:---|
 | `bun run dev` | Dev server at http://localhost:3000 — fresh bundle on every reload (works on Bun 1.1+) |
 | `bun run check` | TypeScript type-check only (`tsc --noEmit`) |
-| `bun test` | Run the test suite (1171 tests) |
+| `bun test` | Run the test suite (1209 tests) |
 | `bun run build` | Bundle for production into `dist/` (~1.1 MB) |
 
 ## Controls
