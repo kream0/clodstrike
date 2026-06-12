@@ -256,9 +256,10 @@ describe('one-way catwalk', () => {
 
   test('direct climb from LowerMid floor into catwalk floor is blocked (height diff > 0.5)', () => {
     // Spot-check: a cell at height M(0.0) in TopMid cannot step directly UP into c(2.25)
-    // at a known adjacent pair — col 45(M=0.0) row 40 adjacent to col 46(c=2.25) row 40
-    const [c0, r0] = [45, 40]; // TopMid cell (floor 0.0)
-    const [c1, r1] = [46, 40]; // first catwalk column (floor 2.25)
+    // at a known adjacent pair — col 47(M=0.0) row 40 adjacent to col 48(c=2.25) row 40
+    // (col47 is the east edge of mid corridor; col48 is the west edge of catwalk)
+    const [c0, r0] = [47, 40]; // TopMid cell (floor 0.0)
+    const [c1, r1] = [48, 40]; // first catwalk column (floor 2.25)
     // Only passable if climb <= 0.5; going from M(0) to c(2.25) = diff 2.25 -> blocked
     expect(passable(c0, r0, c1, r1), 'direct climb into catwalk should be blocked').toBe(false);
     // Drop direction (c(2.25) -> M(0.0)) is passable (any drop allowed)
