@@ -34,7 +34,7 @@ Work through this standing track cycle by cycle with the agent workflow until ex
 
 - **Stack**: Bun 1.3, TypeScript strict (`tsc --noEmit` = `bun run check`), three@0.184. NO Vite.
 - **Entry**: `index.html` → `src/main.ts` — fixed-step simulation at 128 Hz with accumulator loop; render at RAF. Exported `clock.now` (game-time seconds) is THE time source for all game logic.
-- **Validation gate**: `bun run check && bun test && bun run build` — all three must pass before any commit. Tests baseline is **931 tests green**; never let the suite shrink. (One known intermittent: "F2: guard facing" bot-timing flake — re-run once before treating as a regression.)
+- **Validation gate**: `bun run check && bun test && bun run build` — all three must pass before any commit. Tests baseline is **955 tests green**; never let the suite shrink. (Two known intermittents — re-run once before treating as a regression: "F2: guard facing", "Flash blindness re-acquire".)
 - **Dev server**: `bun run dev` → http://localhost:3000 (`scripts/dev.ts`, per-request Bun.build — works on Bun 1.1+)
 - **Repo**: https://github.com/kream0/clodstrike
 
@@ -61,7 +61,7 @@ src/
                     #   + grenade equip/throw state machine (updateGrenadeEquip)
   grenades.ts       # GrenadeManager — HE/flash/smoke projectiles, bounce physics,
                     #   detonation, smoke LOS queries, blindness; pooled meshes
-  viewmodel.ts      # First-person GLB gun models (procedural fallback) + bob/sway/kick/reload anims
+  viewmodel.ts      # First-person weapons_v2 GLB models for all 30 ids incl. knife (procedural fallback) + bob/sway/kick/reload anims
   effects.ts        # Pooled tracers, impacts, blood, muzzle flash, decals, explosion
   audio.ts          # Web Audio positional synthesis (gunshots, steps, bomb, stings)
   characters.ts     # Rigged GLTF chars (Quaternius), AnimationMixer FSM, wrist weapons (procedural fallback)
@@ -130,7 +130,7 @@ Every agent prompt must include:
 ### Validation gate (full)
 
 1. `bun run check` — zero TypeScript errors
-2. `bun test` — **931 or more** tests green (never let the suite shrink)
+2. `bun test` — **955 or more** tests green (never let the suite shrink)
 3. `bun run build` — completes; warn if bundle grows past 1.5 MB (baseline ~1.1 MB)
 4. Browser smoke where possible (pointer-lock caveat — see Known gotchas)
 
