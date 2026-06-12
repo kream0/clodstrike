@@ -174,12 +174,13 @@ describe('Vision gating', () => {
     tEnemy.armor   = 0;
     tEnemy.helmet  = false;
 
-    // Place both combatants in open mid area on the same floor level.
-    // CT mid (CTMid area): x≈-2, z≈-28, floor=0.
-    const botFloor = 0;
-    ctBot.pos  = { x: 0, y: botFloor, z: -28 };
-    // Place T enemy 5 m in front of ctBot (facing -Z when yaw=0).
-    tEnemy.pos = { x: 0, y: botFloor, z: -28 - 5 };
+    // Place both combatants in the open mid spine on the same floor level.
+    // Ground-truth rebuild: mid spine cells (char 'M') sit at floor 3.75 m;
+    // (5,13) and (5,8) are confirmed walkable M cells with clear LOS, 5 m apart.
+    const botFloor = 3.75;
+    ctBot.pos  = { x: 5, y: botFloor, z: 13 };
+    // Place T enemy 5 m in front of ctBot (facing -Z = north when yaw=0).
+    tEnemy.pos = { x: 5, y: botFloor, z: 8 };
     ctBot.yaw  = 0; // facing -Z toward tEnemy
     ctBot.onGround = true;
     tEnemy.onGround = true;
@@ -380,23 +381,23 @@ describe('AWP scope-pulse', () => {
    * We drive the bot brain directly (not through tickBrains) for precise control.
    */
   /**
-   * Place bot and target in open mid for reliable LOS.
-   * Verified positions (no walls, clear LOS, both on valid floor cells):
-   *   bot  : x=0, z=-28, floor=0      (CTMid area)
-   *   target: x=0, z=-33, floor=0.375  (MidDoors area, 5 m in front)
+   * Place bot and target in the open mid spine for reliable LOS.
+   * Ground-truth rebuild positions (no walls, clear LOS, both on valid floor):
+   *   bot   : x=5, z=13, floor=3.75  (mid spine, M cell)
+   *   target: x=5, z=8,  floor=3.75  (mid spine, M cell, 5 m north)
    */
   function setupAwpScenario(game: Game, mgr: BotManager) {
     const bot = game.combatants.find(c => c.team === 'CT' && !c.isPlayer && c.alive)!;
     // Equip AWP.
     bot.inventory.primary = makeWeaponState(WEAPONS.awp);
     bot.inventory.activeSlot = 'primary';
-    bot.pos = { x: 0, y: 0, z: -28 };       // floor=0
-    bot.yaw = 0;                               // facing -Z
+    bot.pos = { x: 5, y: 3.75, z: 13 };       // floor=3.75, mid spine
+    bot.yaw = 0;                               // facing -Z (north)
     bot.onGround = true;
 
     // Pick a non-player T bot as the target so killing the player doesn't kill it.
     const target = game.combatants.find(c => c.team === 'T' && !c.isPlayer && c.alive)!;
-    target.pos = { x: 0, y: 0.375, z: -33 }; // floor=0.375, 5 m in front
+    target.pos = { x: 5, y: 3.75, z: 8 };    // floor=3.75, mid spine, 5 m north
     target.alive = true;
     target.health = 100;
     target.onGround = true;
@@ -506,22 +507,22 @@ describe('AWP scope-pulse', () => {
 
 describe('Smoke LOS injection', () => {
   /**
-   * Reusable scenario: CT bot facing a T enemy 5 m ahead in open mid with
-   * clear world LOS. We use the same verified positions as the AWP tests.
-   *   bot  : x=0, z=-28, floor=0       (CTMid)
-   *   enemy: x=0, z=-33, floor=0.375   (MidDoors, 5 m in front)
+   * Reusable scenario: CT bot facing a T enemy 5 m ahead in the open mid spine
+   * with clear world LOS. Same verified positions as the AWP tests.
+   *   bot  : x=5, z=13, floor=3.75  (mid spine, M cell)
+   *   enemy: x=5, z=8,  floor=3.75  (mid spine, M cell, 5 m north)
    * Enemy health is set to 9999 so it survives being shot during the test.
    */
   function setupOpenMidScenario(game: Game) {
     const bot = game.combatants.find(c => c.team === 'CT' && !c.isPlayer && c.alive)!;
     bot.inventory.primary    = makeWeaponState(WEAPONS.m4a4);
     bot.inventory.activeSlot = 'primary';
-    bot.pos    = { x: 0, y: 0, z: -28 };
-    bot.yaw    = 0; // facing -Z
+    bot.pos    = { x: 5, y: 3.75, z: 13 };
+    bot.yaw    = 0; // facing -Z (north)
     bot.onGround = true;
 
     const enemy = game.combatants.find(c => c.team === 'T' && !c.isPlayer && c.alive)!;
-    enemy.pos    = { x: 0, y: 0.375, z: -33 };
+    enemy.pos    = { x: 5, y: 3.75, z: 8 };
     enemy.alive  = true;
     enemy.health = 9999; // effectively unkillable — prevents round-end during test
     enemy.onGround = true;
@@ -609,20 +610,23 @@ describe('Smoke LOS injection', () => {
 
 describe('Flash blindness', () => {
   /**
-   * Place a CT bot in open mid, facing a T enemy 5 m ahead (same verified
-   * positions as smoke tests). Enemy health = 9999 so it survives being shot.
-   * The player (T) is kept alive so the game phase doesn't flip to roundEnd.
+   * Place a CT bot in the open mid spine, facing a T enemy 5 m ahead (same
+   * verified positions as the smoke tests). Enemy health = 9999 so it survives
+   * being shot. The player (T) is kept alive so the phase doesn't flip to
+   * roundEnd.
+   *   bot  : x=5, z=13, floor=3.75  (mid spine, M cell)
+   *   enemy: x=5, z=8,  floor=3.75  (mid spine, M cell, 5 m north)
    */
   function setupFlashScenario(game: Game) {
     const bot = game.combatants.find(c => c.team === 'CT' && !c.isPlayer && c.alive)!;
     bot.inventory.primary    = makeWeaponState(WEAPONS.m4a4);
     bot.inventory.activeSlot = 'primary';
-    bot.pos    = { x: 0, y: 0, z: -28 };
+    bot.pos    = { x: 5, y: 3.75, z: 13 };
     bot.yaw    = 0;
     bot.onGround = true;
 
     const enemy = game.combatants.find(c => c.team === 'T' && !c.isPlayer && c.alive)!;
-    enemy.pos    = { x: 0, y: 0.375, z: -33 };
+    enemy.pos    = { x: 5, y: 3.75, z: 8 };
     enemy.alive  = true;
     enemy.health = 9999; // unkillable — prevents round-end
     enemy.onGround = true;
@@ -735,8 +739,8 @@ describe('Flash blindness', () => {
     // positions and face the bot toward the enemy so perception fires immediately
     // on the first eligible tick (nextPerceptAt may have advanced during the
     // blind phase — it will fire within one PERCEPTION_INTERVAL = 0.12 s).
-    bot.pos    = { x: 0, y: 0,     z: -28 };
-    enemy.pos  = { x: 0, y: 0.375, z: -33 };
+    bot.pos    = { x: 5, y: 3.75, z: 13 };
+    enemy.pos  = { x: 5, y: 3.75, z: 8 };
     bot.yaw    = 0;            // facing -Z toward enemy
     bot.vel    = { x: 0, y: 0, z: 0 };
     enemy.onGround = true;
@@ -811,9 +815,10 @@ describe('F1: bomb retrieval after carrier death', () => {
     expect(otherT).toBeDefined();
 
     // Place both near a known walkable area in the middle of the map.
-    // CTMid area: x≈0, z≈-28. Put them close together with the bomb between them.
-    carrier.pos = { x: 0, y: 0, z: -10 };
-    otherT.pos  = { x: 3, y: 0, z: -10 };
+    // Mid corridor (char 'M', floor=0). x=0,z=-10 straddles the col47 '#' wall
+    // (ceilingOver→0); use confirmed M cells clear of the wall boundary.
+    carrier.pos = { x: -8, y: 0, z: -20 };
+    otherT.pos  = { x: -4, y: 0, z: -20 };
     carrier.onGround = true;
     otherT.onGround  = true;
 
@@ -946,8 +951,10 @@ describe('F4: bot separation', () => {
 
     // Stack them exactly on top of each other on a walkable cell.
     // Derive Y from the map so bots are not embedded below the floor.
-    const stackY = world.floorAt(0, -10);
-    const stackPos = { x: 0, y: stackY, z: -10 };
+    // x=0,z=-10 straddles the E wall of mid (col47 '#') causing ceilingOver→0;
+    // use a confirmed mid-corridor M cell instead.
+    const stackY = world.floorAt(-8, -20);
+    const stackPos = { x: -8, y: stackY, z: -20 };
     botA.pos = { ...stackPos };
     botB.pos = { ...stackPos };
     botA.vel = { x: 0, y: 0, z: 0 };
@@ -1124,13 +1131,14 @@ describe('LOS wall-vision fix', () => {
    * These two positions are separated by solid geometry.  The test suite
    * asserts world.lineOfSight === false before relying on this assumption.
    *
-   *   botPos  : x= 6.5, y=1.5,  z=-40  (CTSpawn area, floor=1.5)
-   *   enemyPos: x=-28,  y=1.5,  z=  0  (UpperTunnels area, floor=1.5)
+   * Ground-truth rebuild positions (both confirmed WALKABLE on their floors):
+   *   botPos  : x=9,   y=0,     z=-26  (CT spawn, floor=0;     char 'C')
+   *   enemyPos: x=-31, y=4.125, z=6    (Upper Tunnels, floor=4.125; char 'u', ceil 6.5)
    *
    * The eye heights for LOS checks add 1.64 m (standing eye offset).
    */
-  const BOT_WALL_POS   = { x:  6.5, y: 1.5, z: -40 };
-  const ENEMY_WALL_POS = { x: -28,  y: 1.5, z:   0 };
+  const BOT_WALL_POS   = { x:  9, y: 0,     z: -26 };
+  const ENEMY_WALL_POS = { x: -31, y: 4.125, z:  6 };
 
   /**
    * Shared setup: one CT bot, one T enemy, all others killed.
@@ -1218,23 +1226,27 @@ describe('LOS wall-vision fix', () => {
 
   test('(b) occluded target: aim holds lastKnownPos, does not track live position', () => {
     /**
-     * Phase 1: bot and enemy are in open mid with clear LOS.
-     * Bot: x=0, y=0, z=-28 (CTMid).  Enemy: x=0, y=0.375, z=-33 (MidDoors, 5 m south).
-     * Bot yaw = 0 → facing -Z (south toward enemy).
+     * Phase 1: bot and enemy are in the open mid spine with clear LOS.
+     * Bot: x=5, y=3.75, z=13 (mid spine, M cell, floor=3.75).
+     * Enemy: x=5, y=3.75, z=8 (mid spine, M cell, 5 m north).
+     * Bot yaw = 0 → facing -Z (north, toward enemy, bearing ≈ 0).
      * The test ASSERTS LOS is clear before starting phase 1.
      *
-     * Phase 2: enemy teleports behind a wall (Upper Tunnels area, x=-28, z=0)
-     * while BOT stays in CTMid.  The test asserts that CTMid→UpperTunnels LOS
-     * is blocked.  The frozen lastKnownPos is ≈ (0, -33); the live enemy is at
-     * (-28, 0), an angular separation of ~2.4 rad from bot's position — easily
-     * distinguishable.  Lateral offset from frozen = sqrt(28²+33²) ≈ 43 m >> 10 m.
+     * Phase 2: enemy teleports into Upper Tunnels (x=-31, z=6) while BOT stays
+     * in the mid spine.  mid→tunnels LOS is blocked by solid geometry.  The
+     * frozen lastKnownPos is ≈ (5, 8) (bearing ≈ 0 from bot); the live enemy is
+     * at (-31, 6) — bearing ≈ +1.38 rad from bot, angular separation ≈ 1.38 rad
+     * > 1 rad threshold.  Lateral offset from frozen ≈ 36 m >> 10 m.
      *
      * After 1 s of occlusion the bot's yaw must still face the frozen position
-     * (south, ≈ 0 rad) and must NOT have turned northwest toward the live enemy.
+     * and must NOT have turned toward the live enemy.
      */
-    const BOT_POS        = { x:  0, y: 0,     z: -28 };   // CTMid
-    const ENEMY_OPEN_POS = { x:  0, y: 0.375, z: -33 };   // MidDoors (5 m south, visible)
-    const ENEMY_HIDE_POS = { x: -28, y: 1.5,  z:   0 };   // UpperTunnels (behind wall)
+    const BOT_POS        = { x: 5, y: 3.75, z: 13 };   // mid spine (M cell, floor=3.75)
+    const ENEMY_OPEN_POS = { x: 5, y: 3.75, z: 8 };    // mid spine (M cell, 5 m north, same col)
+    // Hide pos must be: (1) LOS-blocked from bot, (2) angularly far (> 1 rad) from visible pos.
+    // Upper Tunnels at (-31,4.125,6): LOS-blocked by solid geometry; bearing from bot
+    // ≈ +1.38 rad vs bearing-to-frozen ≈ 0 → separation ≈ 1.38 rad > 1 rad.
+    const ENEMY_HIDE_POS = { x: -31, y: 4.125, z: 6 }; // Upper Tunnels (char 'u', LOS-blocked)
 
     const { game, mgr, world } = freshSetup({ playerTeam: 'T', difficulty: 'hard' });
     let now = advanceFreeze(game);
@@ -1360,9 +1372,10 @@ describe('LOS wall-vision fix', () => {
       }
       expect(shotFired).toBe(false);
 
-      // Assert re-peek LOS premise: open-mid bot+enemy positions have clear LOS.
-      const OPEN_BOT_POS   = { x: 0, y: 0,     z: -28 };
-      const OPEN_ENEMY_POS = { x: 0, y: 0.375, z: -33 };
+      // Assert re-peek LOS premise: open mid-spine bot+enemy positions have clear LOS.
+      // Ground-truth rebuild: mid spine cells (char 'M') are at floor 3.75 m.
+      const OPEN_BOT_POS   = { x: 5, y: 3.75, z: 13 };
+      const OPEN_ENEMY_POS = { x: 5, y: 3.75, z: 8 };
       const eyeBotOpen   = { x: OPEN_BOT_POS.x,   y: OPEN_BOT_POS.y   + 1.64, z: OPEN_BOT_POS.z };
       const eyeEnemyOpen = { x: OPEN_ENEMY_POS.x, y: OPEN_ENEMY_POS.y + 1.64, z: OPEN_ENEMY_POS.z };
       expect(world.lineOfSight(eyeBotOpen, eyeEnemyOpen)).toBe(true);

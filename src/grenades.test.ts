@@ -81,10 +81,11 @@ function tickSim(
 const scene = new THREE.Scene();
 const world = new World(DUST2);
 
-// Spawn point in an open area of the map (CT spawn, roughly).
-// Floor at this cell is 1.5 m — always use OPEN_POS with y = OPEN_FLOOR.
-const OPEN_POS = { x: -38, y: 0, z: -36 };
-const OPEN_FLOOR = 1.5; // world.floorAt(OPEN_POS.x, OPEN_POS.z)
+// Spawn point in an open area of the map (A-site plateau, ground-truth rebuild).
+// A site (char 'A') is a large flat plateau at floor 4.5 m; (27,-20) is open and
+// clear for ±8 m in X, so victim placement and LOS work for all grenade tests.
+const OPEN_POS = { x: 27, y: 4.5, z: -20 };
+const OPEN_FLOOR = 4.5; // world.floorAt(OPEN_POS.x, OPEN_POS.z)
 
 // ---------------------------------------------------------------------------
 // Throw / inventory tests

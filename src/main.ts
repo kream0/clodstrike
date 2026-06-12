@@ -3,6 +3,8 @@ import type { Combatant, Inventory, WeaponDef, WeaponState } from './types';
 import type { Team } from './types';
 import { WEAPONS, MOVEMENT, ECONOMY } from './constants';
 import { DUST2 } from './maps/dust2';
+import { DUST2_POINTS, DUST2_OPENINGS, DUST2_REGIONS } from './maps/dust2_truth';
+import type { Landmark } from './maps/dust2_truth';
 import { MAPS, DEFAULT_MAP_ID, resolveMap, registerSessionMap } from './maps/index';
 import { validateMapData } from './maps/validate';
 import type { MapData } from './types';
@@ -201,6 +203,9 @@ const _urlParams = new URLSearchParams(location.search);
 const DEBUG_INSPECT_VM   = _urlParams.get('inspect') === 'vm';
 /** Mode B — bot-match spectator. Auto-start match; orbit/follow camera. */
 const DEBUG_SPECTATE     = _urlParams.get('spectate') === '1';
+/** Mode C — fidelity POV. Teleport a free camera to an iconic dust2 station for
+ *  side-by-side comparison with a real screenshot. Bypasses all match flow. */
+const DEBUG_PHOTO        = _urlParams.get('photo');
 
 async function boot(): Promise<void> {
   const { setProgress, remove: removeOverlay } = createLoadingOverlay();
@@ -462,6 +467,173 @@ async function boot(): Promise<void> {
       renderer.render(vmScene, vmCamera);
     }
     requestAnimationFrame(vmFrame);
+    return; // do not continue normal boot
+  }
+
+  // ---------------------------------------------------------------------------
+  // MODE C — ?photo=<station> : fidelity POV teleport (early-return, no match flow)
+  //
+  // Positions a FREE camera at an iconic dust2 vantage point looking toward a
+  // target landmark, for side-by-side comparison with real CS screenshots. Each
+  // station's pose is DERIVED FROM dust2_truth landmarks at runtime (so it stays
+  // correct as truth grows / when T3 rebuilds the grid to match truth):
+  //   - position = the vantage landmark's world (x, z) + its floorY + eye height
+  //   - yaw      = atan2(-(target.x - from.x), -(target.z - from.z))   [look-at]
+  //                (engine yaw: 0 faces -Z/north, +X east; see math.yawPitchToDir)
+  //   - pitch    = a small per-station tilt (look slightly down into sites, etc.)
+  // Supports &map=<id> to render a different map. Render-only RAF loop; arrow/WASD
+  // free-fly so a human can nudge the camera to match a screenshot exactly.
+  // ---------------------------------------------------------------------------
+  if (DEBUG_PHOTO !== null) {
+    const photoScene = new THREE.Scene();
+    setupEnvironment(photoScene);
+
+    // Resolve which map to render (honour &map=, default dust2).
+    const photoMapParam = _urlParams.get('map');
+    const photoMapId = (photoMapParam !== null && photoMapParam.length > 0) ? photoMapParam : DEFAULT_MAP_ID;
+    let photoMap: MapData;
+    try {
+      photoMap = resolveMap(photoMapId);
+    } catch {
+      photoMap = DUST2;
+    }
+    photoScene.add(buildMapScene(photoMap, textures, normals).group);
+
+    const photoCamera = new THREE.PerspectiveCamera(74, window.innerWidth / window.innerHeight, 0.05, 300);
+    photoCamera.rotation.order = 'YXZ';
+    photoScene.add(photoCamera);
+
+    // --- Build the station table from truth landmarks (no hand-typed coords) ---
+    const ALL_TRUTH: Landmark[] = [...DUST2_POINTS, ...DUST2_OPENINGS, ...DUST2_REGIONS];
+    const findLm = (name: string): Landmark | undefined => ALL_TRUTH.find((l) => l.name === name);
+
+    interface PhotoStation {
+      /** Vantage landmark name (camera sits here). */ from: string;
+      /** Target landmark name (camera looks here). */ to: string;
+      /** Extra height above the vantage floor (m). */ eye: number;
+      /** Extra southward (+Z) nudge so the camera sits behind the choke (m). */ backZ: number;
+      pitch: number;
+      desc: string;
+    }
+    const PHOTO_STATIONS: Record<string, PhotoStation> = {
+      'longdoors-t':  { from: 'LongDoors',     to: 'ASite',         eye: 1.6, backZ: 2, pitch: -0.05, desc: 'T at long doors, looking up A-long to A-site' },
+      'mid-from-ct':  { from: 'CTSpawnCenter', to: 'MidCenter',     eye: 1.6, backZ: 0, pitch: -0.02, desc: 'CT side of mid, looking south down mid' },
+      'bwindow':      { from: 'BWindow',       to: 'BSite',         eye: 1.4, backZ: 0, pitch: -0.18, desc: 'B window, looking down into B-site' },
+      'catwalk':      { from: 'Catwalk',       to: 'ASite',         eye: 1.6, backZ: 0, pitch:  0.02, desc: 'catwalk, looking toward A-site' },
+      'pit':          { from: 'Pit',           to: 'ASite',         eye: 1.6, backZ: 0, pitch:  0.08, desc: 'A-long pit, looking up toward A-site' },
+      'tunnels-exit': { from: 'TunnelMouth',   to: 'BSite',         eye: 1.6, backZ: 0, pitch: -0.02, desc: 'B upper-tunnels mouth, looking toward B-site' },
+      'a-site':       { from: 'ASite',         to: 'ASite',         eye: 3.0, backZ: -6, pitch: -0.30, desc: 'A-site overview (raised)' },
+      'mid-doors':    { from: 'MidCenter',     to: 'CTSpawnCenter', eye: 1.6, backZ: 0, pitch:  0.00, desc: 'mid doors, looking north toward CT' },
+      'goose':        { from: 'GooseA',        to: 'ASite',         eye: 1.6, backZ: 0, pitch:  0.00, desc: 'goose / CT, looking toward A-site' },
+    };
+    const STATION_NAMES = Object.keys(PHOTO_STATIONS);
+
+    // Selected station: the URL value, or the first station if unknown/empty.
+    let photoStationName = (DEBUG_PHOTO.length > 0 && PHOTO_STATIONS[DEBUG_PHOTO] !== undefined)
+      ? DEBUG_PHOTO
+      : (STATION_NAMES[0] ?? 'longdoors-t');
+
+    // Free-fly camera state (mutated by WASD/arrows for fine alignment).
+    let photoX = 0, photoY = 2, photoZ = 0, photoYaw = 0, photoPitch = 0;
+
+    function applyStation(name: string): void {
+      const st = PHOTO_STATIONS[name];
+      if (st === undefined) return;
+      const from = findLm(st.from);
+      const to = findLm(st.to);
+      if (from === undefined || to === undefined) return;
+      photoX = from.x;
+      photoZ = from.z + st.backZ;
+      photoY = from.floorY + st.eye;
+      // look-at yaw: dir = normalize(to - from); yaw solves sin(yaw)=-dx, cos(yaw)=-dz.
+      const dx = to.x - photoX;
+      const dz = to.z - photoZ;
+      photoYaw = Math.atan2(-dx, -dz);
+      photoPitch = st.pitch;
+    }
+    applyStation(photoStationName);
+
+    // Status label (monospace, no innerHTML).
+    const photoLabel = document.createElement('div');
+    Object.assign(photoLabel.style, {
+      position: 'fixed', top: '8px', left: '8px', color: '#e8e8e8',
+      fontSize: '13px', fontFamily: 'monospace', background: 'rgba(0,0,0,0.55)',
+      padding: '8px 12px', borderRadius: '4px', pointerEvents: 'none',
+      zIndex: '20', lineHeight: '1.6', whiteSpace: 'pre',
+    });
+    document.body.appendChild(photoLabel);
+    function photoUpdateLabel(): void {
+      const st = PHOTO_STATIONS[photoStationName];
+      const idx = STATION_NAMES.indexOf(photoStationName);
+      photoLabel.textContent =
+        `[PHOTO] ${photoStationName}  (${idx + 1}/${STATION_NAMES.length})\n` +
+        `${st?.desc ?? ''}\n` +
+        `pos (${photoX.toFixed(1)}, ${photoY.toFixed(2)}, ${photoZ.toFixed(1)})  ` +
+        `yaw ${(photoYaw * 180 / Math.PI).toFixed(0)}deg  pitch ${(photoPitch * 180 / Math.PI).toFixed(0)}deg\n` +
+        `N/P = next/prev station   WASD = move   arrows = look   QE = up/down`;
+    }
+    photoUpdateLabel();
+
+    // Plain key bindings — no pointer-lock. Track held keys for smooth free-fly.
+    const photoHeld = new Set<string>();
+    window.addEventListener('keydown', (e) => {
+      const k = e.key.toLowerCase();
+      if (k === 'n') {
+        const i = (STATION_NAMES.indexOf(photoStationName) + 1) % STATION_NAMES.length;
+        photoStationName = STATION_NAMES[i] ?? photoStationName;
+        applyStation(photoStationName); photoUpdateLabel();
+      } else if (k === 'p') {
+        const i = (STATION_NAMES.indexOf(photoStationName) - 1 + STATION_NAMES.length) % STATION_NAMES.length;
+        photoStationName = STATION_NAMES[i] ?? photoStationName;
+        applyStation(photoStationName); photoUpdateLabel();
+      } else {
+        photoHeld.add(k);
+      }
+    });
+    window.addEventListener('keyup', (e) => { photoHeld.delete(e.key.toLowerCase()); });
+
+    window.addEventListener('resize', () => {
+      photoCamera.aspect = window.innerWidth / window.innerHeight;
+      photoCamera.updateProjectionMatrix();
+      renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1.5));
+      renderer.setSize(window.innerWidth, window.innerHeight);
+    });
+
+    const PHOTO_MOVE = 8;   // m/s
+    const PHOTO_LOOK = 1.5; // rad/s
+    let photoLast = performance.now() / 1000;
+    function photoFrame(): void {
+      requestAnimationFrame(photoFrame);
+      const wallNow = performance.now() / 1000;
+      const dt = Math.min(wallNow - photoLast, 0.1);
+      photoLast = wallNow;
+
+      // Look (arrow keys).
+      if (photoHeld.has('arrowleft'))  photoYaw   += PHOTO_LOOK * dt;
+      if (photoHeld.has('arrowright')) photoYaw   -= PHOTO_LOOK * dt;
+      if (photoHeld.has('arrowup'))    photoPitch += PHOTO_LOOK * dt;
+      if (photoHeld.has('arrowdown'))  photoPitch -= PHOTO_LOOK * dt;
+      photoPitch = clamp(photoPitch, -1.5, 1.5);
+
+      // Move (WASD + QE), relative to yaw on the XZ plane.
+      const fwd = yawPitchToDir(photoYaw, 0);
+      const rightX = -fwd.z, rightZ = fwd.x; // right = forward rotated -90deg
+      let mvx = 0, mvz = 0;
+      if (photoHeld.has('w')) { mvx += fwd.x; mvz += fwd.z; }
+      if (photoHeld.has('s')) { mvx -= fwd.x; mvz -= fwd.z; }
+      if (photoHeld.has('d')) { mvx += rightX; mvz += rightZ; }
+      if (photoHeld.has('a')) { mvx -= rightX; mvz -= rightZ; }
+      const ml = Math.hypot(mvx, mvz);
+      if (ml > 1e-4) { photoX += (mvx / ml) * PHOTO_MOVE * dt; photoZ += (mvz / ml) * PHOTO_MOVE * dt; }
+      if (photoHeld.has('q')) photoY += PHOTO_MOVE * dt;
+      if (photoHeld.has('e')) photoY -= PHOTO_MOVE * dt;
+      if (mvx !== 0 || mvz !== 0 || photoHeld.size > 0) photoUpdateLabel();
+
+      photoCamera.position.set(photoX, photoY, photoZ);
+      photoCamera.rotation.set(photoPitch, photoYaw, 0, 'YXZ');
+      renderer.render(photoScene, photoCamera);
+    }
+    requestAnimationFrame(photoFrame);
     return; // do not continue normal boot
   }
 

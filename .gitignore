@@ -4,3 +4,8 @@ dist/
 
 .memorai/
 bun.lockb
+
+# Local-only reference material (copyrighted radar images, research notes) — never commit
+ref/
+HANDOFF.md
+HANDOFF-*.patch

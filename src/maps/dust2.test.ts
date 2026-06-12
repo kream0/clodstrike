@@ -206,9 +206,12 @@ describe('chokepoint routes', () => {
     expect(touches, `path to (${target.x},${target.z}) does not pass through ${mustTouch}`).toBe(true);
   }
 
-  test('T spawn -> CT mid passes through MidDoors', () => {
-    const a = area('CTMid');
-    assertForcedRoute(rectCenter(a.min, a.max), ['UpperTunnels', 'LongDoors', 'Catwalk'], 'MidDoors');
+  test('T spawn -> B site via mid passes through MidDoors', () => {
+    // Truth-rebuild: MidDoors gates the mid-spine -> mid-to-B branch (not the CT
+    // mid spine). Block the UpperTunnels approach to B; the only remaining route
+    // to B runs up mid and through MidDoors into B-doors.
+    const b = map.bombsites.find((x) => x.name === 'B')!;
+    assertForcedRoute(rectCenter(b.min, b.max), ['UpperTunnels'], 'MidDoors');
   });
 
   test('T spawn -> B site passes through UpperTunnels', () => {
@@ -239,13 +242,16 @@ describe('CT to B via BDoors', () => {
   });
 });
 
-// --- 7. one-way catwalk drop -----------------------------------------------
+// --- 7. catwalk reachability + one-way pit drop ----------------------------
+// NOTE (2026-06 ground-truth rebuild): the truth table puts the catwalk and the
+// mid spine at the SAME 3.75 m floor, so the catwalk<->mid connections are flat
+// and bidirectional (required by the SHORT_A route legs below). The genuine
+// one-way HEIGHT drop in this layout is the PIT: long (3.75) -> pit (3.0) is a
+// 0.75 m drop you fall INTO but cannot climb back, exiting via the pit ramp.
+// The one-way assertions therefore target the pit (faithful + still exercised).
 
-describe('one-way catwalk', () => {
-  // Catwalk (c = 2.25) is accessible from TopMid (M = 0.0) via short stairs,
-  // but not directly climbable from LowerMid (M = 0.0) into catwalk (diff 2.25 > 0.5).
-  // Verify the climb is blocked and the drop works.
-  test('catwalk cell is reachable from T spawn via short stairs', () => {
+describe('one-way pit drop', () => {
+  test('catwalk cell is reachable from T spawn (via short/mid)', () => {
     const tStart = map.spawns.t[0]!;
     const [sc, sr] = toCell(tStart.x, tStart.z);
     const parent = bfs(sc, sr);
@@ -254,16 +260,15 @@ describe('one-way catwalk', () => {
     expect(parent.has(cr * W + cc), 'T spawn cannot reach catwalk').toBe(true);
   });
 
-  test('direct climb from LowerMid floor into catwalk floor is blocked (height diff > 0.5)', () => {
-    // Spot-check: a cell at height M(0.0) in TopMid cannot step directly UP into c(2.25)
-    // at a known adjacent pair — col 47(M=0.0) row 40 adjacent to col 48(c=2.25) row 40
-    // (col47 is the east edge of mid corridor; col48 is the west edge of catwalk)
-    const [c0, r0] = [47, 40]; // TopMid cell (floor 0.0)
-    const [c1, r1] = [48, 40]; // first catwalk column (floor 2.25)
-    // Only passable if climb <= 0.5; going from M(0) to c(2.25) = diff 2.25 -> blocked
-    expect(passable(c0, r0, c1, r1), 'direct climb into catwalk should be blocked').toBe(false);
-    // Drop direction (c(2.25) -> M(0.0)) is passable (any drop allowed)
-    expect(passable(c1, r1, c0, r0), 'drop from catwalk should be passable').toBe(true);
+  test('direct climb from pit floor up into long is blocked (height diff > 0.5)', () => {
+    // Long lane (L = 3.75) on the west edge of the pit drops into the pit
+    // floor (8 = 3.0). Adjacent pair: long col 79 row 56 <-> pit col 80 row 56.
+    const [c0, r0] = [79, 56]; // long ledge (floor 3.75)
+    const [c1, r1] = [80, 56]; // pit floor (3.0)
+    // Climb pit(3.0) -> long(3.75) = 0.75 > 0.5 -> blocked.
+    expect(passable(c1, r1, c0, r0), 'direct climb out of pit should be blocked').toBe(false);
+    // Drop long(3.75) -> pit(3.0) is passable (any drop allowed).
+    expect(passable(c0, r0, c1, r1), 'drop into pit should be passable').toBe(true);
   });
 });
 
@@ -312,7 +317,9 @@ describe('site sanity', () => {
     expect(elevated / total, 'too few elevated cells on A site').toBeGreaterThanOrEqual(0.5);
   });
 
-  test('B site cells in legend have floor between 1.0 and 2.5 m', () => {
+  test('B site cells in legend have floor between 3.0 and 4.5 m', () => {
+    // Truth-rebuild: B site sits at 3.75 m (BombBPlant/BCar truth floorY=3.75,
+    // band 3.0-4.5), higher than the old legend's 1.5 m guess. Follow truth.
     const bsite = area('BSite');
     let valid = 0;
     let total = 0;
@@ -324,7 +331,7 @@ describe('site sanity', () => {
         const le = map.legend[map.grid[r]![c]!];
         if (!le || le.wall) continue;
         total++;
-        if (le.floor >= 1.0 && le.floor <= 2.5) valid++;
+        if (le.floor >= 3.0 && le.floor <= 4.5) valid++;
       }
     }
     expect(total, 'no walkable cells inside BSite rect').toBeGreaterThan(0);
@@ -390,13 +397,13 @@ describe('choke widths', () => {
     expect(width, `LongDoors gap width is ${width}, expected 2-4`).toBeLessThanOrEqual(4);
   });
 
-  test('MidDoors gap line is 4-8 passable cells wide at its narrowest cross-section', () => {
-    // MidDoors area: min x=-10, z=-8; max x=-2, z=4 (cols 38-46, rows 40-52).
-    // The narrowest rows within the rect (rows 45-51) contain 6 D-floor cells,
-    // which is the actual mid-corridor width.
+  test('MidDoors gap line is 1-3 passable cells wide at its narrowest cross-section', () => {
+    // Truth-rebuild: MidDoors is the narrow 2-wide doorway (truth widthCells=2)
+    // gating the mid spine <-> mid-to-B branch, not a wide corridor. The narrowest
+    // cross-section within the MidDoors rect is the 1-2 cell door tube.
     const width = minGapWidth('MidDoors');
-    expect(width, `MidDoors gap width is ${width}, expected 4-8`).toBeGreaterThanOrEqual(4);
-    expect(width, `MidDoors gap width is ${width}, expected 4-8`).toBeLessThanOrEqual(8);
+    expect(width, `MidDoors gap width is ${width}, expected 1-3`).toBeGreaterThanOrEqual(1);
+    expect(width, `MidDoors gap width is ${width}, expected 1-3`).toBeLessThanOrEqual(3);
   });
 });
 
@@ -445,5 +452,452 @@ describe('site rect areas', () => {
       const areaM2 = (site.max.x - site.min.x) * (site.max.z - site.min.z);
       expect(areaM2, `bombsite ${site.name} rect area ${areaM2} m² is below 80 m²`).toBeGreaterThanOrEqual(80);
     }
+  });
+});
+
+// --- 15. T route LONG_A — every leg bidirectional ----------------------------
+
+describe('T route LONG_A', () => {
+  const legs: [string, string][] = [
+    ['TSpawn',      'OutsideLong'],
+    ['OutsideLong', 'LongDoors'],
+    ['LongDoors',   'LongA'],
+    ['LongA',       'ARamp'],
+    ['ARamp',       'ASite'],
+  ];
+
+  for (const [from, to] of legs) {
+    test(`${from} → ${to}`, () => {
+      const a = area(from);
+      const [fc, fr] = toCell(rectCenter(a.min, a.max).x, rectCenter(a.min, a.max).z);
+      const parent = bfs(fc, fr);
+      const b = area(to);
+      const [tc, tr] = toCell(rectCenter(b.min, b.max).x, rectCenter(b.min, b.max).z);
+      expect(parent.has(tr * W + tc), `${from} BFS cannot reach ${to}`).toBe(true);
+    });
+
+    test(`${to} → ${from}`, () => {
+      const b = area(to);
+      const [fc, fr] = toCell(rectCenter(b.min, b.max).x, rectCenter(b.min, b.max).z);
+      const parent = bfs(fc, fr);
+      const a = area(from);
+      const [tc, tr] = toCell(rectCenter(a.min, a.max).x, rectCenter(a.min, a.max).z);
+      expect(parent.has(tr * W + tc), `${to} BFS cannot reach ${from}`).toBe(true);
+    });
+  }
+});
+
+// --- 16. T route SHORT_A — every leg bidirectional ---------------------------
+
+describe('T route SHORT_A', () => {
+  const legs: [string, string][] = [
+    ['TSpawn',    'LowerMid'],
+    ['LowerMid',  'Catwalk'],
+    ['Catwalk',   'AShort'],
+    ['AShort',    'ASite'],
+  ];
+
+  for (const [from, to] of legs) {
+    test(`${from} → ${to}`, () => {
+      const a = area(from);
+      const [fc, fr] = toCell(rectCenter(a.min, a.max).x, rectCenter(a.min, a.max).z);
+      const parent = bfs(fc, fr);
+      const b = area(to);
+      const [tc, tr] = toCell(rectCenter(b.min, b.max).x, rectCenter(b.min, b.max).z);
+      expect(parent.has(tr * W + tc), `${from} BFS cannot reach ${to}`).toBe(true);
+    });
+
+    test(`${to} → ${from}`, () => {
+      const b = area(to);
+      const [fc, fr] = toCell(rectCenter(b.min, b.max).x, rectCenter(b.min, b.max).z);
+      const parent = bfs(fc, fr);
+      const a = area(from);
+      const [tc, tr] = toCell(rectCenter(a.min, a.max).x, rectCenter(a.min, a.max).z);
+      expect(parent.has(tr * W + tc), `${to} BFS cannot reach ${from}`).toBe(true);
+    });
+  }
+});
+
+// --- 17. T route TUNNELS_B — every leg bidirectional ------------------------
+
+describe('T route TUNNELS_B', () => {
+  const legs: [string, string][] = [
+    ['TSpawn',          'OutsideTunnels'],
+    ['OutsideTunnels',  'UpperTunnels'],
+    ['UpperTunnels',    'BSite'],
+  ];
+
+  for (const [from, to] of legs) {
+    test(`${from} → ${to}`, () => {
+      const a = area(from);
+      const [fc, fr] = toCell(rectCenter(a.min, a.max).x, rectCenter(a.min, a.max).z);
+      const parent = bfs(fc, fr);
+      const b = area(to);
+      const [tc, tr] = toCell(rectCenter(b.min, b.max).x, rectCenter(b.min, b.max).z);
+      expect(parent.has(tr * W + tc), `${from} BFS cannot reach ${to}`).toBe(true);
+    });
+
+    test(`${to} → ${from}`, () => {
+      const b = area(to);
+      const [fc, fr] = toCell(rectCenter(b.min, b.max).x, rectCenter(b.min, b.max).z);
+      const parent = bfs(fc, fr);
+      const a = area(from);
+      const [tc, tr] = toCell(rectCenter(a.min, a.max).x, rectCenter(a.min, a.max).z);
+      expect(parent.has(tr * W + tc), `${to} BFS cannot reach ${from}`).toBe(true);
+    });
+  }
+});
+
+// --- 18. CT routes — every leg bidirectional ---------------------------------
+
+describe('CT routes', () => {
+  const legs: [string, string][] = [
+    ['CTSpawn',  'CTRamp'],
+    ['CTRamp',   'ASite'],
+    ['CTSpawn',  'CTMid'],
+    ['CTMid',    'TopMid'],
+    ['TopMid',   'MidDoors'],
+    ['MidDoors', 'LowerMid'],
+    ['CTSpawn',  'MidToB'],
+    ['MidToB',   'BDoors'],
+    ['BDoors',   'BSite'],
+  ];
+
+  for (const [from, to] of legs) {
+    test(`${from} → ${to}`, () => {
+      const a = area(from);
+      const [fc, fr] = toCell(rectCenter(a.min, a.max).x, rectCenter(a.min, a.max).z);
+      const parent = bfs(fc, fr);
+      const b = area(to);
+      const [tc, tr] = toCell(rectCenter(b.min, b.max).x, rectCenter(b.min, b.max).z);
+      expect(parent.has(tr * W + tc), `CT ${from} BFS cannot reach ${to}`).toBe(true);
+    });
+
+    test(`${to} → ${from}`, () => {
+      const b = area(to);
+      const [fc, fr] = toCell(rectCenter(b.min, b.max).x, rectCenter(b.min, b.max).z);
+      const parent = bfs(fc, fr);
+      const a = area(from);
+      const [tc, tr] = toCell(rectCenter(a.min, a.max).x, rectCenter(a.min, a.max).z);
+      expect(parent.has(tr * W + tc), `CT ${to} BFS cannot reach ${from}`).toBe(true);
+    });
+  }
+});
+
+// --- 19. All T spawns reach both bombsites ------------------------------------
+
+describe('T spawns to bombsites', () => {
+  for (let i = 0; i < map.spawns.t.length; i++) {
+    const sp = map.spawns.t[i]!;
+    test(`T spawn ${i} (${sp.x},${sp.z}) reaches A site`, () => {
+      const [sc, sr] = toCell(sp.x, sp.z);
+      const parent = bfs(sc, sr);
+      const asite = map.bombsites.find(b => b.name === 'A')!;
+      const [tc, tr] = toCell(rectCenter(asite.min, asite.max).x, rectCenter(asite.min, asite.max).z);
+      expect(parent.has(tr * W + tc), `T spawn ${i} cannot reach A site`).toBe(true);
+    });
+
+    test(`T spawn ${i} (${sp.x},${sp.z}) reaches B site`, () => {
+      const [sc, sr] = toCell(sp.x, sp.z);
+      const parent = bfs(sc, sr);
+      const bsite = map.bombsites.find(b => b.name === 'B')!;
+      const [tc, tr] = toCell(rectCenter(bsite.min, bsite.max).x, rectCenter(bsite.min, bsite.max).z);
+      expect(parent.has(tr * W + tc), `T spawn ${i} cannot reach B site`).toBe(true);
+    });
+  }
+});
+
+// --- 20. All CT spawns reach both bombsites -----------------------------------
+
+describe('CT spawns to bombsites', () => {
+  for (let i = 0; i < map.spawns.ct.length; i++) {
+    const sp = map.spawns.ct[i]!;
+    test(`CT spawn ${i} (${sp.x},${sp.z}) reaches A site`, () => {
+      const [sc, sr] = toCell(sp.x, sp.z);
+      const parent = bfs(sc, sr);
+      const asite = map.bombsites.find(b => b.name === 'A')!;
+      const [tc, tr] = toCell(rectCenter(asite.min, asite.max).x, rectCenter(asite.min, asite.max).z);
+      expect(parent.has(tr * W + tc), `CT spawn ${i} cannot reach A site`).toBe(true);
+    });
+
+    test(`CT spawn ${i} (${sp.x},${sp.z}) reaches B site`, () => {
+      const [sc, sr] = toCell(sp.x, sp.z);
+      const parent = bfs(sc, sr);
+      const bsite = map.bombsites.find(b => b.name === 'B')!;
+      const [tc, tr] = toCell(rectCenter(bsite.min, bsite.max).x, rectCenter(bsite.min, bsite.max).z);
+      expect(parent.has(tr * W + tc), `CT spawn ${i} cannot reach B site`).toBe(true);
+    });
+  }
+});
+
+// --- 21. Plantable cells in bomb sites ----------------------------------------
+
+describe('plantable cells', () => {
+  function countWalkableInRect(areaMin: { x: number; z: number }, areaMax: { x: number; z: number }): number {
+    const colMin = Math.floor((areaMin.x - map.origin.x) / map.cellSize);
+    const colMax = Math.ceil( (areaMax.x - map.origin.x) / map.cellSize);
+    const rowMin = Math.floor((areaMin.z - map.origin.z) / map.cellSize);
+    const rowMax = Math.ceil( (areaMax.z - map.origin.z) / map.cellSize);
+    let count = 0;
+    for (let r = rowMin; r <= rowMax; r++) {
+      if (r < 0 || r >= H) continue;
+      for (let c = colMin; c <= colMax; c++) {
+        if (c < 0 || c >= W) continue;
+        const le = map.legend[map.grid[r]![c]!];
+        if (le && !le.wall) count++;
+      }
+    }
+    return count;
+  }
+
+  test('A site has at least 25 walkable (plantable) cells', () => {
+    const asite = map.bombsites.find(b => b.name === 'A')!;
+    const count = countWalkableInRect(asite.min, asite.max);
+    expect(count, `A site only has ${count} walkable cells`).toBeGreaterThanOrEqual(25);
+  });
+
+  test('B site has at least 25 walkable (plantable) cells', () => {
+    const bsite = map.bombsites.find(b => b.name === 'B')!;
+    const count = countWalkableInRect(bsite.min, bsite.max);
+    expect(count, `B site only has ${count} walkable cells`).toBeGreaterThanOrEqual(25);
+  });
+
+  test('all cells inside A site rect that are walkable are reachable from T spawn 0', () => {
+    const sp = map.spawns.t[0]!;
+    const [sc, sr] = toCell(sp.x, sp.z);
+    const parent = bfs(sc, sr);
+    const asite = map.bombsites.find(b => b.name === 'A')!;
+    const colMin = Math.floor((asite.min.x - map.origin.x) / map.cellSize);
+    const colMax = Math.ceil( (asite.max.x - map.origin.x) / map.cellSize);
+    const rowMin = Math.floor((asite.min.z - map.origin.z) / map.cellSize);
+    const rowMax = Math.ceil( (asite.max.z - map.origin.z) / map.cellSize);
+    let unreachable = 0;
+    for (let r = rowMin; r <= rowMax; r++) {
+      if (r < 0 || r >= H) continue;
+      for (let c = colMin; c <= colMax; c++) {
+        if (c < 0 || c >= W) continue;
+        const le = map.legend[map.grid[r]![c]!];
+        if (!le || le.wall) continue;
+        if (!parent.has(r * W + c)) unreachable++;
+      }
+    }
+    expect(unreachable, `${unreachable} walkable A site cells unreachable from T spawn`).toBe(0);
+  });
+
+  test('all cells inside B site rect that are walkable are reachable from T spawn 0', () => {
+    const sp = map.spawns.t[0]!;
+    const [sc, sr] = toCell(sp.x, sp.z);
+    const parent = bfs(sc, sr);
+    const bsite = map.bombsites.find(b => b.name === 'B')!;
+    const colMin = Math.floor((bsite.min.x - map.origin.x) / map.cellSize);
+    const colMax = Math.ceil( (bsite.max.x - map.origin.x) / map.cellSize);
+    const rowMin = Math.floor((bsite.min.z - map.origin.z) / map.cellSize);
+    const rowMax = Math.ceil( (bsite.max.z - map.origin.z) / map.cellSize);
+    let unreachable = 0;
+    for (let r = rowMin; r <= rowMax; r++) {
+      if (r < 0 || r >= H) continue;
+      for (let c = colMin; c <= colMax; c++) {
+        if (c < 0 || c >= W) continue;
+        const le = map.legend[map.grid[r]![c]!];
+        if (!le || le.wall) continue;
+        if (!parent.has(r * W + c)) unreachable++;
+      }
+    }
+    expect(unreachable, `${unreachable} walkable B site cells unreachable from T spawn`).toBe(0);
+  });
+});
+
+// --- 22. One-way drops verified -----------------------------------------------
+
+describe('one-way drops', () => {
+  // Long → pit drop: long ledge (L = 3.75) to pit floor (8 = 3.0) col79→col80 is
+  // a 0.75 m drop (ok); the reverse climb is blocked by the height difference.
+  // (Truth-rebuild: catwalk/mid are co-planar at 3.75, so the pit is the genuine
+  //  one-way height drop — see block 7.)
+  test('long→pit drop (col79→col80, row56): drop direction passes', () => {
+    const [c0, r0] = [79, 56]; // long ledge (floor 3.75)
+    const [c1, r1] = [80, 56]; // pit floor (3.0)
+    expect(passable(c0, r0, c1, r1), 'drop long→pit should be passable').toBe(true);
+  });
+
+  test('pit→long climb (col80→col79, row56): climb 0.75m is blocked', () => {
+    const [c0, r0] = [80, 56]; // pit floor (3.0)
+    const [c1, r1] = [79, 56]; // long ledge (3.75)
+    expect(passable(c0, r0, c1, r1), 'climb pit→long should be blocked (diff 0.75 > 0.5)').toBe(false);
+  });
+
+  test('T spawn plateau→fan-out: bot can leave T spawn toward the routes', () => {
+    // T spawn (S=4.5 rows 80-88) opens north onto the fan-out plateau (f=4.5):
+    // same height, both walkable, at the spawn exit gap.
+    expect(passable(42, 80, 42, 79), 'T spawn north exit should be passable').toBe(true);
+  });
+
+  test('LongA→Pit drop: BFS from LongA reaches Pit via the one-way drop', () => {
+    // Pit is accessible via a drop from LongA; exact boundary cells vary by row.
+    // The Pit area starts at col 89, row 19 (approx). Verify BFS from LongA can reach Pit.
+    const longA = area('LongA');
+    const [lc, lr] = toCell(rectCenter(longA.min, longA.max).x, rectCenter(longA.min, longA.max).z);
+    const parent = bfs(lc, lr);
+    const pit = area('Pit');
+    const [pc, pr] = toCell(rectCenter(pit.min, pit.max).x, rectCenter(pit.min, pit.max).z);
+    expect(parent.has(pr * W + pc), 'LongA cannot reach Pit via drop').toBe(true);
+  });
+});
+
+// --- 23. Additional choke widths ----------------------------------------------
+
+describe('additional choke widths', () => {
+  // UpperTunnels corridor must be at least 5 cells wide (generous — covers u cells).
+  test('UpperTunnels corridor is at least 5 passable cells wide in NS direction', () => {
+    const ut = area('UpperTunnels');
+    // Count non-wall cells in a column through the middle of UpperTunnels.
+    const midCol = Math.floor((rectCenter(ut.min, ut.max).x - map.origin.x) / map.cellSize);
+    const rowMin = Math.floor((ut.min.z - map.origin.z) / map.cellSize);
+    const rowMax = Math.ceil( (ut.max.z - map.origin.z) / map.cellSize);
+    let count = 0;
+    for (let r = rowMin; r <= rowMax; r++) {
+      if (r < 0 || r >= H) continue;
+      if (!isWallCell(midCol, r)) count++;
+    }
+    expect(count, `UpperTunnels NS depth is only ${count} cells`).toBeGreaterThanOrEqual(5);
+  });
+
+  // T spawn plateau must be at least 10 cells wide EW.
+  test('T spawn plateau is at least 10 cells wide (EW)', () => {
+    const tSpawn = area('TSpawn');
+    const midRow = Math.floor((rectCenter(tSpawn.min, tSpawn.max).z - map.origin.z) / map.cellSize);
+    const colMin = Math.floor((tSpawn.min.x - map.origin.x) / map.cellSize);
+    const colMax = Math.ceil( (tSpawn.max.x - map.origin.x) / map.cellSize);
+    let count = 0;
+    for (let c = colMin; c <= colMax; c++) {
+      if (c < 0 || c >= W) continue;
+      if (!isWallCell(c, midRow)) count++;
+    }
+    expect(count, `T spawn EW width is only ${count} cells`).toBeGreaterThanOrEqual(10);
+  });
+
+  // B site must be at least 8 cells wide EW and 8 NS (solid site footprint).
+  test('B site is at least 8x8 cells of walkable terrain', () => {
+    const bsite = area('BSite');
+    const colMin = Math.floor((bsite.min.x - map.origin.x) / map.cellSize);
+    const colMax = Math.ceil( (bsite.max.x - map.origin.x) / map.cellSize);
+    const rowMin = Math.floor((bsite.min.z - map.origin.z) / map.cellSize);
+    const rowMax = Math.ceil( (bsite.max.z - map.origin.z) / map.cellSize);
+    const ewWidth = colMax - colMin;
+    const nsDepth = rowMax - rowMin;
+    expect(ewWidth, `B site EW span too narrow: ${ewWidth}`).toBeGreaterThanOrEqual(8);
+    expect(nsDepth, `B site NS depth too shallow: ${nsDepth}`).toBeGreaterThanOrEqual(8);
+  });
+
+  // A site must be at least 15 cells wide EW (it spans cols ~62-88 = 26 cells).
+  test('A site is at least 15 cells wide (EW)', () => {
+    const asite = area('ASite');
+    const colMin = Math.floor((asite.min.x - map.origin.x) / map.cellSize);
+    const colMax = Math.ceil( (asite.max.x - map.origin.x) / map.cellSize);
+    const ewWidth = colMax - colMin;
+    expect(ewWidth, `A site EW span too narrow: ${ewWidth}`).toBeGreaterThanOrEqual(15);
+  });
+});
+
+// --- 24. Forced cross-team routes (CT side access validation) -----------------
+
+describe('CT side forced routes', () => {
+  function ctBfs(spawnIdx: number): Map<number, number> {
+    const sp = map.spawns.ct[spawnIdx]!;
+    const [sc, sr] = toCell(sp.x, sp.z);
+    return bfs(sc, sr);
+  }
+
+  test('CT spawn 0 can reach UpperTunnels (via MidToB)', () => {
+    const parent = ctBfs(0);
+    const ut = area('UpperTunnels');
+    const [tc, tr] = toCell(rectCenter(ut.min, ut.max).x, rectCenter(ut.min, ut.max).z);
+    expect(parent.has(tr * W + tc), 'CT spawn cannot reach UpperTunnels').toBe(true);
+  });
+
+  test('CT spawn 0 can reach LongA (via CT ramp or A site)', () => {
+    const parent = ctBfs(0);
+    const la = area('LongA');
+    const [tc, tr] = toCell(rectCenter(la.min, la.max).x, rectCenter(la.min, la.max).z);
+    expect(parent.has(tr * W + tc), 'CT spawn cannot reach LongA').toBe(true);
+  });
+
+  test('CT spawn 0 can reach Catwalk', () => {
+    const parent = ctBfs(0);
+    const cat = area('Catwalk');
+    const [tc, tr] = toCell(rectCenter(cat.min, cat.max).x, rectCenter(cat.min, cat.max).z);
+    expect(parent.has(tr * W + tc), 'CT spawn cannot reach Catwalk').toBe(true);
+  });
+
+  test('CT spawn 0 can reach OutsideTunnels', () => {
+    const parent = ctBfs(0);
+    const ot = area('OutsideTunnels');
+    const [tc, tr] = toCell(rectCenter(ot.min, ot.max).x, rectCenter(ot.min, ot.max).z);
+    expect(parent.has(tr * W + tc), 'CT spawn cannot reach OutsideTunnels').toBe(true);
+  });
+
+  test('CT spawn 0 can reach OutsideLong', () => {
+    const parent = ctBfs(0);
+    const ol = area('OutsideLong');
+    const [tc, tr] = toCell(rectCenter(ol.min, ol.max).x, rectCenter(ol.min, ol.max).z);
+    expect(parent.has(tr * W + tc), 'CT spawn cannot reach OutsideLong').toBe(true);
+  });
+});
+
+// --- 25. Cross-route connectivity (mid ↔ tunnels ↔ long) ----------------------
+
+describe('cross-route connectivity', () => {
+  test('MidDoors ↔ LowerTunnels connected (mid-to-B passage)', () => {
+    const md = area('MidDoors');
+    const [mc, mr] = toCell(rectCenter(md.min, md.max).x, rectCenter(md.min, md.max).z);
+    const parent = bfs(mc, mr);
+    const lt = area('LowerTunnels');
+    const [tc, tr] = toCell(rectCenter(lt.min, lt.max).x, rectCenter(lt.min, lt.max).z);
+    expect(parent.has(tr * W + tc), 'MidDoors BFS cannot reach LowerTunnels').toBe(true);
+  });
+
+  test('LowerTunnels ↔ UpperTunnels connected (tunnels passage)', () => {
+    const lt = area('LowerTunnels');
+    const [lc, lr] = toCell(rectCenter(lt.min, lt.max).x, rectCenter(lt.min, lt.max).z);
+    const parent = bfs(lc, lr);
+    const ut = area('UpperTunnels');
+    const [tc, tr] = toCell(rectCenter(ut.min, ut.max).x, rectCenter(ut.min, ut.max).z);
+    expect(parent.has(tr * W + tc), 'LowerTunnels BFS cannot reach UpperTunnels').toBe(true);
+  });
+
+  test('reverse: UpperTunnels ↔ LowerTunnels (both directions)', () => {
+    const ut = area('UpperTunnels');
+    const [uc, ur] = toCell(rectCenter(ut.min, ut.max).x, rectCenter(ut.min, ut.max).z);
+    const parent = bfs(uc, ur);
+    const lt = area('LowerTunnels');
+    const [tc, tr] = toCell(rectCenter(lt.min, lt.max).x, rectCenter(lt.min, lt.max).z);
+    expect(parent.has(tr * W + tc), 'UpperTunnels BFS cannot reach LowerTunnels').toBe(true);
+  });
+
+  test('TopMid ↔ Catwalk connected', () => {
+    const tm = area('TopMid');
+    const [tc2, tr2] = toCell(rectCenter(tm.min, tm.max).x, rectCenter(tm.min, tm.max).z);
+    const parent = bfs(tc2, tr2);
+    const cat = area('Catwalk');
+    const [cc, cr] = toCell(rectCenter(cat.min, cat.max).x, rectCenter(cat.min, cat.max).z);
+    expect(parent.has(cr * W + cc), 'TopMid BFS cannot reach Catwalk').toBe(true);
+  });
+
+  test('AShort ↔ ASite connected', () => {
+    const ash = area('AShort');
+    const [ac, ar] = toCell(rectCenter(ash.min, ash.max).x, rectCenter(ash.min, ash.max).z);
+    const parent = bfs(ac, ar);
+    const asite = area('ASite');
+    const [tc, tr] = toCell(rectCenter(asite.min, asite.max).x, rectCenter(asite.min, asite.max).z);
+    expect(parent.has(tr * W + tc), 'AShort BFS cannot reach ASite').toBe(true);
+  });
+
+  test('CTRamp ↔ ASite connected (CT route to A)', () => {
+    const ramp = area('CTRamp');
+    const [rc, rr] = toCell(rectCenter(ramp.min, ramp.max).x, rectCenter(ramp.min, ramp.max).z);
+    const parent = bfs(rc, rr);
+    const asite = area('ASite');
+    const [tc, tr] = toCell(rectCenter(asite.min, asite.max).x, rectCenter(asite.min, asite.max).z);
+    expect(parent.has(tr * W + tc), 'CTRamp BFS cannot reach ASite').toBe(true);
   });
 });

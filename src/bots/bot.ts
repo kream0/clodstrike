@@ -9,12 +9,12 @@
  *   5. updateWeapon(bot, world, targets, input, now, dt)
  */
 
-import type { Combatant, Vec3, MapData } from '../types';
+import type { Combatant, Vec3, MapData, NamedArea } from '../types';
 import type { World } from '../world';
 import type { Game } from '../game';
 import type { ShotResult } from '../combat';
 import { gameEvents } from '../combat';
-import { BOT_DIFFICULTY, WEAPONS, ECONOMY } from '../constants';
+import { BOT_DIFFICULTY, WEAPONS, ECONOMY, MOVEMENT } from '../constants';
 import { simulateMovement } from '../movement';
 import type { MoveIntent } from '../movement';
 import { updateWeapon, getViewPunch, switchSlot, isScoped } from '../weapons';
@@ -43,7 +43,25 @@ const FOOTSTEP_DISTANCE      = 2.3;   // meters between footstep events
 const STUCK_VEL_THRESHOLD    = 0.3;   // m/s horizontal below = stuck
 const STUCK_DETECT_TIME      = 0.7;   // seconds of stuck before jump
 const STUCK_REPLAN_TIME      = 1.5;   // seconds of stuck before full replan
+// Net-displacement guard (catches micro-lurch wedges the speed timer misses).
+const STUCK_NET_WINDOW       = 1.0;   // seconds over which net travel is measured
+const STUCK_NET_DIST         = 0.6;   // min net XZ travel (m) expected in that window
+// Goal-progress leash: catches a navigating bot that moves at full speed yet
+// never reaches its goal — oscillating between two targets (route ping-pong) or
+// wall-sliding at a choke. It must REDUCE its straight-line goal distance by
+// STUCK_GOAL_PROGRESS within the window or _breakLoop fires. A bot inside (or at
+// the mouth of) its objective bombsite uses the SHORTER site window (it's
+// effectively "arrived — hold"); elsewhere the longer window tolerates the
+// transient goal-distance increase of a legitimately winding route.
+const STUCK_GOAL_WINDOW      = 3.0;   // general goal-approach window (seconds)
+const STUCK_GOAL_WINDOW_SITE = 2.0;   // in/near-site goal-approach window (seconds)
+const SITE_MOUTH_MARGIN      = 3.0;   // m; a bot within this of the site rect counts as "arrived"
+const STUCK_GOAL_PROGRESS    = 0.75;  // min reduction (m) in goal distance expected in the window
 const SIGHT_LOSE_TIME        = 1.5;   // seconds after losing sight before hunt
+// After a hunt ends (reached / abandoned), suppress NEW speculative hunts from
+// heard shots for this long so the bot commits to its objective and leaves the
+// choke rather than flip-flopping objective↔hunt in place.
+const HUNT_COOLDOWN          = 6.0;   // seconds
 const AIM_ERROR_RESAMPLE     = 0.25;  // seconds between aim error resamples
 const AIM_LOCK_TIME          = 1.2;   // seconds on same target before error shrinks
 const AIM_LOCK_SHRINK        = 0.65;
@@ -61,6 +79,18 @@ const BOT_SEPARATION_DIST    = 0.6;   // meters — start pushing when closer th
 const BOT_SEPARATION_IMPULSE = 2.0;   // m/s at full overlap
 const ESCORT_STOP_DIST       = 2.0;   // stop pushing toward carrier within this dist
 const SPAWN_ZONE_MARGIN      = 6.0;   // meters padding around spawn AABBs
+
+// ---------------------------------------------------------------------------
+// Prop-aware navigation.
+//
+// The NavGrid is now PROP-AWARE: findPath / nearestWalkable both return
+// prop-clean results (cells whose standing footprint a collidable prop occupies
+// are marked unwalkable, and string-pulled segments never graze a crate corner).
+// So bot routing no longer needs its own prop-geometry layer — _planPath is a
+// thin findPath wrapper, and the net-displacement guard in _detectStuck /
+// _forceUnstick survives as a general (non-prop) safety net for any residual
+// wedge (e.g. a tight wall corner the grid still permits).
+// ---------------------------------------------------------------------------
 
 // ---------------------------------------------------------------------------
 // Bot economy: tiered buy pools (CS2-style)
@@ -176,13 +206,15 @@ const T_ROUTE_KEYS: readonly RouteName[] = ['LONG_A', 'SHORT_A', 'TUNNELS_B'] as
 const _routeKeysExhaustive: Record<RouteName, true> = { LONG_A: true, SHORT_A: true, TUNNELS_B: true };
 void _routeKeysExhaustive;
 
-// CT position assignments (cycled by bot index).
-const CT_ASSIGNMENTS: Array<{ areas: string[]; entranceDir: string }> = [
-  { areas: ['ASite', 'GooseA'],     entranceDir: 'LongA'       },
-  { areas: ['ARamp', 'ASite'],      entranceDir: 'ARamp'       },
-  { areas: ['BSite', 'BPlat'],      entranceDir: 'BDoors'      },
-  { areas: ['BSite', 'MidToB'],     entranceDir: 'UpperTunnels'},
-  { areas: ['CTMid',  'TopMid'],    entranceDir: 'MidDoors'    },
+// CT position assignments (cycled by bot index). `site` is the bombsite this
+// hold defends — used as a map-agnostic fallback destination when the named
+// dust2-only areas are absent on the current map.
+const CT_ASSIGNMENTS: Array<{ areas: string[]; entranceDir: string; site: 'A' | 'B' }> = [
+  { areas: ['ASite', 'GooseA'],     entranceDir: 'LongA',        site: 'A' },
+  { areas: ['ARamp', 'ASite'],      entranceDir: 'ARamp',        site: 'A' },
+  { areas: ['BSite', 'BPlat'],      entranceDir: 'BDoors',       site: 'B' },
+  { areas: ['BSite', 'MidToB'],     entranceDir: 'UpperTunnels', site: 'B' },
+  { areas: ['CTMid',  'TopMid'],    entranceDir: 'MidDoors',     site: 'A' },
 ];
 
 // ---------------------------------------------------------------------------
@@ -206,6 +238,8 @@ interface BotBrain {
   routeAreas:       string[];
   routeAreaIdx:     number;
   routeSite:        'A' | 'B' | null;
+  /** Cached random target inside the current routeArea — regenerated only when the area changes. */
+  currentAreaTarget: Vec3 | null;
   escortTarget:     Combatant | null;
   escortLastPos:    Vec3 | null;
   guardPos:         Vec3 | null;
@@ -239,6 +273,26 @@ interface BotBrain {
   stuckJumpPending: boolean;
   stuckJumpedAt:    number;
 
+  // Net-displacement stuck guard: a bot that micro-lurches (each lurch resets the
+  // instantaneous-speed timer) can stay pinned with ~0 NET movement. We checkpoint
+  // a position + time and force a prop-clear snap if it fails to travel
+  // STUCK_NET_DIST within STUCK_NET_WINDOW while continuously wanting to move.
+  netCheckPos:      Vec3;
+  netCheckAt:       number;
+  // Goal-progress leash anchor: straight-line distance to the nav goal at the
+  // last reset, the bot's position then, and the reset time. The leash re-anchors
+  // only when the BOT physically advanced toward the goal — not merely when goal
+  // distance dropped (a moving enemy walking toward a wedged bot would otherwise
+  // falsely re-anchor it forever). It trips when the bot fails to make that
+  // approach within the window — catching route ping-pong and wall-sliding (lots
+  // of motion, no net approach) that the speed/short-net guards miss.
+  goalCheckPos:     Vec3;
+  goalCheckDist:    number;
+  goalCheckAt:      number;
+  // Last hard-un-stick position. A new un-stick near it ("repeat") means the
+  // goal-ward route is blocked, so the escape biases away from the goal instead.
+  unstickPos:       Vec3;
+
   // Footstep accumulator.
   stepAccum:        number;
 
@@ -252,6 +306,14 @@ interface BotBrain {
   // wasBlind: true if the bot was blinded on the previous tick. Used to detect
   // the transition from blind→not-blind so we can trigger a fresh reaction.
   wasBlind: boolean;
+
+  // Hunt cooldown: game-time until which the bot will NOT enter 'hunt' from a
+  // heard shot/kill. Set when a hunt ends (target reached or abandoned) so the
+  // bot commits to its objective and physically leaves the choke instead of
+  // flip-flopping objective↔hunt in place each time it hears another shot
+  // (the objective↔hunt oscillation the stuck harness flags). LOS-confirmed
+  // engagement is never suppressed — this only gates speculative hunts.
+  huntCooldownUntil: number;
 }
 
 // ---------------------------------------------------------------------------
@@ -502,6 +564,7 @@ export class BotManager {
       routeAreas:        [],
       routeAreaIdx:      0,
       routeSite:         null,
+      currentAreaTarget: null,
       escortTarget:      null,
       escortLastPos:     null,
       guardPos:          null,
@@ -524,6 +587,12 @@ export class BotManager {
       stuckStartAt:      0,
       stuckJumpPending:  false,
       stuckJumpedAt:     -999,
+      netCheckPos:       { ...bot.pos },
+      netCheckAt:        0,
+      goalCheckPos:      { ...bot.pos },
+      goalCheckDist:     Infinity,
+      goalCheckAt:       0,
+      unstickPos:        { ...bot.pos },
       stepAccum:         0,
       // Stagger perception by bot id to spread CPU across bots.
       nextPerceptAt:     (bot.id % 12) * (PERCEPTION_INTERVAL / 12),
@@ -531,6 +600,7 @@ export class BotManager {
       scopeLastToggleAt: -999,
 
       wasBlind:          false,
+      huntCooldownUntil: -999,
     };
   }
 
@@ -698,13 +768,21 @@ export class BotManager {
     br.currentPath        = [];
     br.pathIdx            = 0;
     br.lastReplanAt       = -999;
+    br.currentAreaTarget  = null;
     br.burstRemaining     = 0;
     br.shouldCrouch       = false;
     br.stuckMoveWanted    = false;
     br.stuckStartAt       = 0;
     br.stuckJumpPending   = false;
+    br.netCheckPos        = { ...br.bot.pos };
+    br.netCheckAt         = -999;
+    br.goalCheckDist      = Infinity;
+    br.goalCheckAt        = -999;
+    br.goalCheckPos       = { ...br.bot.pos };
+    br.unstickPos         = { ...br.bot.pos };
     br.scopeLastToggleAt  = -999;
     br.wasBlind           = false;
+    br.huntCooldownUntil  = -999;
 
     // F1: reset retriever on each round start.
     this._retrieverId = null;
@@ -764,7 +842,10 @@ export class BotManager {
     const assign = CT_ASSIGNMENTS[Math.abs(idx) % CT_ASSIGNMENTS.length];
 
     br.routeAreas   = [...assign.areas];
-    br.routeSite    = null;
+    // Carry the hold's bombsite so _resolveRouteArea can fall back to it on maps
+    // that lack the dust2 area names (map-agnostic CT routing). On dust2 the named
+    // areas exist, so the fallback is never reached and behavior is unchanged.
+    br.routeSite    = assign.site ?? null;
     br.routeAreaIdx = 0;
     br.escortTarget = null;
 
@@ -813,7 +894,22 @@ export class BotManager {
       const d = distance(br.bot.pos, shooter.pos);
       if (d <= 30 && br.state !== 'engage') {
         br.lastKnownPos = { ...shooter.pos };
-        if (br.state === 'objective' || br.state === 'guard') {
+        // A bot guarding INSIDE its objective bombsite holds the site rather than
+        // chasing a shot heard OUTSIDE it — running out to investigate distant
+        // shots is both poor defending and a source of guard→hunt→guard looping
+        // around the site mouth (the oscillation the harness flags). It still
+        // records lastKnownPos so a later LOS contact aims correctly.
+        const guardingOwnSite = br.state === 'guard' && br.routeSite !== null &&
+                                this._withinSite(br.bot.pos, br.routeSite, SITE_MOUTH_MARGIN);
+        const shooterInOwnSite = br.routeSite !== null &&
+                                 this._withinSite(shooter.pos, br.routeSite, SITE_MOUTH_MARGIN);
+        if (guardingOwnSite && !shooterInOwnSite) continue;
+        // Only START a speculative hunt if not on cooldown. The cooldown stops a
+        // bot from flip-flopping objective↔hunt in place each time it hears a
+        // shot near a choke (the oscillation the stuck harness flags). lastKnownPos
+        // is still updated so a later genuine engagement aims correctly.
+        if ((br.state === 'objective' || br.state === 'guard') &&
+            this._lastNow >= br.huntCooldownUntil) {
           br.state = 'hunt';
         }
       }
@@ -1004,6 +1100,27 @@ export class BotManager {
 
     // 5. Simulate movement.
     const moveEv = simulateMovement(bot, intent, this._world, dt, now);
+
+    // 5b. Underground-recovery: world.ceilingOver returns 0 when ANY wall cell
+    // is in the bot's AABB footprint, causing moveAABB to teleport the bot to
+    // y = 0 − PLAYER_HEIGHT = −1.83.  Detect and correct this here so bots
+    // don't get stuck below the floor.
+    if (bot.pos.y < -1.0) {
+      const snap = this._nav.nearestWalkable(bot.pos);
+      if (snap) {
+        bot.pos.x = snap.x;
+        bot.pos.z = snap.z;
+        bot.pos.y = snap.y;
+      }
+      bot.vel.x = 0;
+      bot.vel.z = 0;
+      bot.vel.y = 0;
+      // Clear the path so the next tick replans from the recovered position.
+      br.currentPath   = [];
+      br.pathIdx       = 0;
+      br.lastReplanAt  = -999;
+      br.currentAreaTarget = null;
+    }
 
     // 6. Footstep events.
     if (bot.onGround && !bot.walking) {
@@ -1215,9 +1332,28 @@ export class BotManager {
           br.state = 'objective';
           break;
         }
+        // Site defender hold: a bot already inside (or at the mouth of) its own
+        // objective bombsite does NOT leave it to chase a last-known-pos OUTSIDE
+        // the site. Leaving the site to hunt a distant contact is both poor
+        // defending and the source of the in-site→site-mouth hunt oscillation the
+        // harness flags (the bot wall-slides at the mouth chasing a target it can't
+        // reach, then returns). Drop the hunt, hold, and cool down further hunts.
+        if (
+          br.routeSite !== null &&
+          this._withinSite(bot.pos, br.routeSite, SITE_MOUTH_MARGIN) &&
+          !this._withinSite(br.lastKnownPos, br.routeSite, SITE_MOUTH_MARGIN)
+        ) {
+          br.lastKnownPos      = null;
+          br.huntCooldownUntil = now + HUNT_COOLDOWN;
+          this._guardInPlace(br, now);
+          break;
+        }
         const d = distance(bot.pos, br.lastKnownPos);
         if (d < WAYPOINT_ARRIVE_DIST * 1.5) {
           br.lastKnownPos = null;
+          // Hunt resolved — start the cooldown so the next heard shot doesn't
+          // immediately yank us back into hunt at the same choke.
+          br.huntCooldownUntil = now + HUNT_COOLDOWN;
           // F3: resume guard state anchored on the original guardPos so the bot
           // paths back to its post rather than jittering from its current position.
           if (br.guardPos !== null) {
@@ -1309,7 +1445,7 @@ export class BotManager {
               this._rng.botNav,
             );
             if (jitter) {
-              const path = nav.findPath(bot.pos, jitter);
+              const path = this._planPath(bot.pos, jitter);
               if (path) { br.currentPath = path; br.pathIdx = 0; }
               // F2b: re-derive CT guard facing from the new jitter point toward
               // the entrance area this assignment originally used.
@@ -1337,27 +1473,38 @@ export class BotManager {
     const nav = this._nav;
     const map = this._mapData;
 
-    // Escort logic.
+    // Escort logic. A dead OR pinned carrier must NEVER be allowed to freeze the
+    // escort — in either case we drop the escort and fall through to our own
+    // objective routing (the escort shares the carrier's routeAreas/routeSite, so
+    // it heads to the same objective independently). This is the deadlock break:
+    // previously a stalled carrier within ESCORT_STOP_DIST left the escort
+    // standing still with zero intent forever.
     if (br.escortTarget !== null) {
       const carrier = br.escortTarget;
+      const dToCarrier    = distance(bot.pos, carrier.pos);
+      const carrierSpd    = Math.sqrt(carrier.vel.x ** 2 + carrier.vel.z ** 2);
+      const carrierMoving = carrierSpd >= STUCK_VEL_THRESHOLD;
+
       if (!carrier.alive) {
-        br.escortTarget = null;
+        br.escortTarget  = null;
+        br.escortLastPos = null;
         // Fall through to normal route below.
+      } else if (dToCarrier <= ESCORT_STOP_DIST && !carrierMoving) {
+        // Carrier is pinned right next to us — drop escort and route to the
+        // objective ourselves so we don't deadlock together.
+        br.escortTarget  = null;
+        br.escortLastPos = null;
+        // Fall through to normal route below.
+      } else if (dToCarrier <= ESCORT_STOP_DIST) {
+        // F5a: close to a MOVING carrier — stand by; separation (F4) spreads us.
+        return;
       } else {
-        const dToCarrier  = distance(bot.pos, carrier.pos);
-        const movedFar    = br.escortLastPos
+        // Follow the carrier.
+        const movedFar = br.escortLastPos
           ? distance(carrier.pos, br.escortLastPos) > ESCORT_REPLAN_DIST
           : true;
-
-        // F5a: within close range of the carrier, stop pushing toward them so
-        // bots don't bunch up (separation from F4 naturally spreads them).
-        if (dToCarrier <= ESCORT_STOP_DIST) {
-          // Already close enough — stand by, let separation nudge spread us.
-          return;
-        }
-
         if (dToCarrier > ESCORT_FOLLOW_DIST || movedFar || br.currentPath.length === 0) {
-          const path = nav.findPath(bot.pos, carrier.pos);
+          const path = this._planPath(bot.pos, carrier.pos);
           if (path) {
             br.currentPath    = path;
             br.pathIdx        = 0;
@@ -1370,31 +1517,78 @@ export class BotManager {
       }
     }
 
-    if (br.routeAreas.length === 0) return;
+    // Resolve the current route waypoint to a real destination on THIS map.
+    // On dust2 every named area exists, so this returns the named area and the
+    // route advances waypoint-by-waypoint exactly as before. On a map missing the
+    // named area (e.g. mirage with dust2 route names), it falls back to the
+    // objective bombsite rectangle so the bot heads to its goal instead of idling.
+    const named = br.routeAreas[br.routeAreaIdx] !== undefined
+      ? map.areas.find(a => a.name === br.routeAreas[br.routeAreaIdx])
+      : undefined;
+    const area = named ?? this._resolveRouteArea(br);
 
-    const areaName = br.routeAreas[br.routeAreaIdx];
-    const area     = map.areas.find((a: { name: string }) => a.name === areaName);
-    if (!area) {
-      br.routeAreaIdx = Math.min(br.routeAreaIdx + 1, br.routeAreas.length - 1);
+    // The named waypoint is absent on this map and we fell back to the bombsite
+    // (or have no site at all). Treat the bombsite as the FINAL leg so arrival
+    // promotes to guard rather than skipping intermediate dust2-only waypoints.
+    const usingFallback = named === undefined && area !== null;
+    if (usingFallback) {
+      br.routeAreaIdx = Math.max(0, br.routeAreas.length - 1);
+    }
+
+    // Degraded-route site hold. When this route references area names that DON'T
+    // exist on the current map (a dust2 route running on mirage), its sub-area
+    // structure is meaningless here, so once the bot is inside the objective
+    // bombsite it has reached the only meaningful goal — hold there rather than
+    // chasing a random point across the (large) site, which on a foreign map can
+    // route across an internal wall the bot then wedges on (mirage B's site
+    // mouth). Gated on _routeIsDegraded: on dust2 every route area exists, so the
+    // route is never degraded and this NEVER fires — dust2 behavior is unchanged.
+    if (
+      area !== null &&
+      br.routeSite !== null &&
+      this._activeSite(bot.pos) === br.routeSite &&
+      this._areaIsSite(area, br.routeSite) &&
+      this._routeIsDegraded(br)
+    ) {
+      this._guardInPlace(br, now);
       return;
     }
 
-    // Pick a random point in the target area.
-    let targetPt = nav.randomPointInRect(area.min, area.max, this._rng.botNav);
-    if (!targetPt) {
-      targetPt = nav.nearestWalkable({
-        x: (area.min.x + area.max.x) / 2,
-        y: 0,
-        z: (area.min.z + area.max.z) / 2,
-      });
+    if (!area) {
+      // No resolvable destination on this map (no site, no known area) — guard at
+      // current position so the bot doesn't stand idle in 'objective' state.
+      br.guardPos = nav.nearestWalkable(bot.pos) ?? { ...bot.pos };
+      br.state    = 'guard';
+      return;
     }
-    if (!targetPt) return;
+
+    // Pick a stable random point in the target area — cache it so the bot
+    // has a fixed destination and the arrival check is consistent each tick.
+    // The target is regenerated only when the area index changes (area arrival
+    // clears currentAreaTarget below) or when the area is newly entered.
+    if (!br.currentAreaTarget) {
+      let pt = nav.randomPointInRect(area.min, area.max, this._rng.botNav);
+      if (!pt) {
+        pt = nav.nearestWalkable({
+          x: (area.min.x + area.max.x) / 2,
+          y: 0,
+          z: (area.min.z + area.max.z) / 2,
+        });
+      }
+      if (!pt) return;
+      // The nav grid is prop-aware: randomPointInRect / nearestWalkable only
+      // return prop-clear cells, so the destination is always one the bot can
+      // stand on — no extra nudge needed.
+      br.currentAreaTarget = pt;
+    }
+    const targetPt = br.currentAreaTarget;
 
     // Check if arrived at area.
     const dToArea = distance(bot.pos, targetPt);
     if (dToArea < WAYPOINT_ARRIVE_DIST * 3) {
       if (br.routeAreaIdx < br.routeAreas.length - 1) {
         br.routeAreaIdx++;
+        br.currentAreaTarget = null;   // clear cached target so next area gets a fresh point
         br.currentPath  = [];
         br.pathIdx      = 0;
         br.lastReplanAt = -999;
@@ -1423,11 +1617,35 @@ export class BotManager {
                        br.pathIdx >= br.currentPath.length ||
                        now - br.lastReplanAt > REPLAN_INTERVAL;
     if (needReplan) {
-      const path = nav.findPath(bot.pos, targetPt);
+      const path = this._planPath(bot.pos, targetPt);
       if (path) {
         br.currentPath  = path;
         br.pathIdx      = 0;
         br.lastReplanAt = now;
+        // If velocity was zeroed by a stuck-snap, immediately face the first
+        // waypoint so the bot doesn't drift into a wall due to stale yaw.
+        if (bot.vel.x === 0 && bot.vel.z === 0 && path.length > 0) {
+          const wp = path[0]!;
+          const dx = wp.x - bot.pos.x;
+          const dz = wp.z - bot.pos.z;
+          if (dx * dx + dz * dz > 0.01) {
+            bot.yaw = Math.atan2(-dx, -dz);
+          }
+        }
+      } else {
+        // Path failed — update lastReplanAt so we don't spam retries every tick.
+        // Also snap the bot to the nearest walkable cell so future retries have a
+        // valid start node.
+        br.lastReplanAt = now;
+        const snap = nav.nearestWalkable(bot.pos);
+        if (snap) {
+          bot.pos   = { ...snap };
+          bot.vel.x = 0;
+          bot.vel.y = 0;
+          bot.vel.z = 0;
+        }
+        // Pick a fresh target on next tick.
+        br.currentAreaTarget = null;
       }
     }
 
@@ -1439,11 +1657,23 @@ export class BotManager {
   // ---------------------------------------------------------------------------
 
   private _pathToward(br: BotBrain, target: Vec3, now: number): void {
+    // Destination-drift check: a path inherited from a previous state/target
+    // (e.g. a leftover guard-jitter path when freshly transitioning to hunt) can
+    // lead AWAY from the current target — the bot then follows the stale route in
+    // the wrong direction until REPLAN_INTERVAL elapses, oscillating. If the
+    // path's endpoint no longer matches `target`, it is stale → replan now.
+    const endWp = br.currentPath.length > 0
+      ? br.currentPath[br.currentPath.length - 1]
+      : undefined;
+    const drifted = endWp !== undefined &&
+                    distance(endWp, target) > WAYPOINT_ARRIVE_DIST * 2;
+
     const needReplan = br.currentPath.length === 0 ||
                        br.pathIdx >= br.currentPath.length ||
+                       drifted ||
                        now - br.lastReplanAt > REPLAN_INTERVAL;
     if (needReplan) {
-      const path = this._nav.findPath(br.bot.pos, target);
+      const path = this._planPath(br.bot.pos, target);
       if (path) {
         br.currentPath  = path;
         br.pathIdx      = 0;
@@ -1717,17 +1947,148 @@ export class BotManager {
   }
 
   // ---------------------------------------------------------------------------
+  // Path planning
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Thin wrapper over the (now prop-aware) NavGrid.findPath. The grid marks
+   * prop-occupied footprints unwalkable and prunes corner-clipping string-pull
+   * segments, so the returned path is already followable without wedging on a
+   * crate/car. Returns null when no route exists.
+   */
+  private _planPath(from: Vec3, to: Vec3): Vec3[] | null {
+    return this._nav.findPath(from, to);
+  }
+
+  /**
+   * Picks a relocation cell for a hard un-stick. Probes a ring of directions at
+   * growing radius for prop-aware walkable cells (nav.nearestWalkable) that are a
+   * MEANINGFUL distance away, so the bot actually leaves the wedge cell. When
+   * `toward` is given, the qualifying cell that makes the most progress toward
+   * the goal is preferred — escape distance dominates, with a mild goal pull so a
+   * forward escape wins WHEN one exists (the goal-ward direction is often the
+   * blocked one, e.g. a tight wall corner). Deterministic (fixed probe order).
+   * Falls back to nav.nearestWalkable. NOTE: this is general escape geometry — no
+   * prop math here; the grid already encodes prop occupancy.
+   */
+  private _escapeCell(from: Vec3, toward?: Vec3): Vec3 | null {
+    const step = MOVEMENT.PLAYER_RADIUS;
+    let best: Vec3 | null = null;
+    let bestScore = -Infinity;
+
+    let tux = 0, tuz = 0;
+    if (toward) {
+      const tdx = toward.x - from.x, tdz = toward.z - from.z;
+      const tl = Math.sqrt(tdx * tdx + tdz * tdz);
+      if (tl > 1e-6) { tux = tdx / tl; tuz = tdz / tl; }
+    }
+
+    for (let radius = step * 2; radius <= 4.0 + 1e-6; radius += step) {
+      for (let k = 0; k < 12; k++) {
+        const ang = (k / 12) * Math.PI * 2;
+        const cx = from.x + Math.cos(ang) * radius;
+        const cz = from.z + Math.sin(ang) * radius;
+        const snap = this._nav.nearestWalkable({ x: cx, y: from.y, z: cz });
+        if (!snap) continue;
+        const dxs = snap.x - from.x, dzs = snap.z - from.z;
+        const esc = Math.sqrt(dxs * dxs + dzs * dzs);
+        if (esc < step * 1.5) continue; // must clearly leave the wedge cell
+        const score = esc + (toward ? (dxs * tux + dzs * tuz) * 0.5 : 0);
+        if (score > bestScore) { bestScore = score; best = snap; }
+      }
+    }
+    if (best) return best;
+    return this._nav.nearestWalkable(from); // last resort
+  }
+
+  // ---------------------------------------------------------------------------
   // Stuck detection
   // ---------------------------------------------------------------------------
 
   private _detectStuck(br: BotBrain, dt: number, now: number, intent: MoveIntent): void {
     const bot     = br.bot;
-    const moving  = intent.forward !== 0 || intent.strafe !== 0;
+
+    // "Wants to move" is NOT just instantaneous intent: a bot in a navigating
+    // state (objective / hunt) that has not reached its destination inherently
+    // wants to travel, even on a tick where _followPath produced zero intent
+    // because the path is empty/exhausted/blocked. Gating purely on intent !== 0
+    // let exactly that case slip through — the bot froze with an empty path and
+    // the stuck escalation never fired (the permanent-deadlock bug). So treat a
+    // navigating bot as wanting to move regardless of this tick's intent.
+    //
+    // 'hunt' ALWAYS paths to last-known-pos (the escort logic only runs in
+    // 'objective'), so a hunting bot is navigating even if escortTarget is still
+    // set — otherwise a T escort that enters hunt and wedges at a choke gets no
+    // stuck escalation at all. In 'objective' an actively-escorting bot is NOT
+    // navigating: it may legitimately stand by next to a moving carrier.
+    const navigating = br.state === 'hunt' ||
+                       (br.state === 'objective' && br.escortTarget === null);
+    const moving = intent.forward !== 0 || intent.strafe !== 0 || navigating;
 
     if (!moving) {
       br.stuckMoveWanted = false;
       br.stuckStartAt    = now;
+      br.netCheckPos = { ...bot.pos };
+      br.netCheckAt  = now;
       return;
+    }
+
+    // ----- Net-displacement guard -----
+    // A wedged bot can micro-lurch each replan (briefly exceeding the speed
+    // threshold below, resetting that timer) yet make ~0 NET progress, so the
+    // speed timer alone never escalates. Measure net travel over STUCK_NET_WINDOW;
+    // if it falls short while continuously wanting to move, force a prop-clear
+    // un-stick — the reliable escape when the prop-blind path keeps dragging the
+    // bot back into the same prop/wall corner.
+    if (br.netCheckAt < 0) {
+      br.netCheckAt  = now;
+      br.netCheckPos = { ...bot.pos };
+    } else if (now - br.netCheckAt >= STUCK_NET_WINDOW) {
+      const moved = distance(bot.pos, br.netCheckPos);
+      if (moved < STUCK_NET_DIST) this._forceUnstick(br, now);
+      br.netCheckAt  = now;
+      br.netCheckPos = { ...bot.pos };
+    }
+
+    // ----- Goal-progress leash (navigating bots only) -----
+    // Catches a bot that travels at full speed yet never reaches its goal:
+    // oscillating between two targets (route ping-pong) or wall-sliding at a choke
+    // it cannot pass. The speed timer never trips (it's moving). Measure progress
+    // TOWARD THE GOAL: anchor the goal distance, re-anchor on genuine closure
+    // (STUCK_GOAL_PROGRESS), trip after the window. A bot wedged INSIDE/at the
+    // mouth of its objective bombsite uses a SHORTER window (effectively "arrived
+    // — hold"); the longer window elsewhere tolerates a legitimately winding
+    // route's transient straight-line-distance increase so it isn't false-tripped.
+    if (navigating) {
+      const goal = this._navGoal(br);
+      const gDist = goal !== null ? distance(bot.pos, goal) : Infinity;
+      const nearSite = br.routeSite !== null &&
+                       this._withinSite(bot.pos, br.routeSite, SITE_MOUTH_MARGIN);
+      const win = nearSite ? STUCK_GOAL_WINDOW_SITE : STUCK_GOAL_WINDOW;
+      // Re-anchor only when the bot has BOTH closed on the goal AND physically
+      // moved STUCK_GOAL_PROGRESS from where it anchored — so an enemy walking
+      // toward a wedged bot (goal distance drops, bot stationary) can't keep
+      // re-anchoring the leash and masking the wedge.
+      const closedGoal = gDist <= br.goalCheckDist - STUCK_GOAL_PROGRESS;
+      const botMoved   = distance(bot.pos, br.goalCheckPos) >= STUCK_GOAL_PROGRESS;
+      if (br.goalCheckAt < 0 || goal === null) {
+        br.goalCheckAt   = now;
+        br.goalCheckDist = gDist;
+        br.goalCheckPos  = { ...bot.pos };
+      } else if (closedGoal && botMoved) {
+        br.goalCheckAt   = now;
+        br.goalCheckDist = gDist;
+        br.goalCheckPos  = { ...bot.pos };
+      } else if (now - br.goalCheckAt >= win) {
+        this._breakLoop(br, now);
+        br.goalCheckAt   = now;
+        br.goalCheckDist = distance(bot.pos, this._navGoal(br) ?? bot.pos);
+        br.goalCheckPos  = { ...bot.pos };
+      }
+    } else {
+      br.goalCheckAt   = now;
+      br.goalCheckDist = Infinity;
+      br.goalCheckPos  = { ...bot.pos };
     }
 
     const horizSpd = Math.sqrt(bot.vel.x ** 2 + bot.vel.z ** 2);
@@ -1750,27 +2111,266 @@ export class BotManager {
     }
 
     if (stuckTime >= STUCK_REPLAN_TIME) {
-      br.stuckMoveWanted = false;
-      br.stuckStartAt    = now;
-      br.currentPath     = [];
-      br.pathIdx         = 0;
-      br.lastReplanAt    = -999;
-      // Snap to nearest walkable cell.
-      const snap = this._nav.nearestWalkable(bot.pos);
-      if (snap && distance(snap, bot.pos) < 2.0) {
-        bot.pos = { ...snap };
-      }
-      // F5b: if stuck while escorting, abandon escort permanently for this round
-      // so the bot becomes an independent router and avoids the snap-stuck loop.
-      if (br.escortTarget !== null) {
-        br.escortTarget  = null;
-        br.escortLastPos = null;
-        // If the bot has a route objective, force it to re-engage it.
-        if (br.routeAreas.length > 0) {
-          br.state = 'objective';
-        }
+      this._forceUnstick(br, now);
+    }
+  }
+
+  /**
+   * Hard un-stick: clear the path, force a fresh target, and snap the bot to a
+   * prop-aware walkable escape cell. Shared by the speed-timer and
+   * net-displacement stuck paths.
+   */
+  private _forceUnstick(br: BotBrain, now: number): void {
+    const bot = br.bot;
+
+    // A "repeat" un-stick near the same spot means the goal-ward route keeps
+    // dragging the bot back into a wedge it cannot pass (e.g. a tight wall
+    // corner): the goal-ward direction is the blocked one.
+    const repeat = distance(bot.pos, br.unstickPos) < 2.5;
+    br.unstickPos = { ...bot.pos };
+
+    // Escape cell: a far, reachable walkable cell. Bias toward the goal on a
+    // first wedge (forward progress); on a repeat the goal side is the blocked
+    // one, so escape purely by distance.
+    const toward = repeat ? undefined : (br.currentPath[br.pathIdx]
+      ?? br.currentAreaTarget
+      ?? undefined);
+    const escape = this._escapeCell(bot.pos, toward ?? undefined);
+
+    br.stuckMoveWanted    = false;
+    br.stuckStartAt       = now;
+    br.currentPath        = [];
+    br.pathIdx            = 0;
+    br.lastReplanAt       = -999;
+    br.currentAreaTarget  = null;  // force a new random target within the area
+    br.netCheckPos        = { ...bot.pos };
+    br.netCheckAt         = now;
+    br.goalCheckDist      = Infinity;
+    br.goalCheckAt        = now;
+    br.goalCheckPos       = { ...bot.pos };
+
+    // A repeated wedge while hunting means the last-known position is effectively
+    // unreachable from here — abandon the hunt so the bot reverts to objective
+    // routing instead of grinding back into the same corner.
+    if (repeat && br.state === 'hunt') {
+      br.lastKnownPos      = null;
+      br.state             = 'objective';
+      br.huntCooldownUntil = now + HUNT_COOLDOWN;
+    }
+
+    if (escape) {
+      bot.pos   = { ...escape };
+      bot.vel.x = 0;
+      bot.vel.y = 0;
+      bot.vel.z = 0;
+      br.netCheckPos  = { ...escape };
+      br.unstickPos   = { ...escape };
+    }
+
+    // F5b: if stuck while escorting, abandon escort permanently for this round so
+    // the bot becomes an independent router and avoids the snap-stuck loop.
+    if (br.escortTarget !== null) {
+      br.escortTarget  = null;
+      br.escortLastPos = null;
+      if (br.routeAreas.length > 0) br.state = 'objective';
+    }
+  }
+
+  /**
+   * Break a navigation loop: a bot oscillating at full speed between two
+   * destinations (e.g. hunt last-known-pos pulling it back toward an objective
+   * target it just left) covers ~0 NET ground. Unlike _forceUnstick this does NOT
+   * teleport — the bot is not wedged, just looping — it hands the bot a fresh
+   * destination so the ping-pong is broken: an unreachable hunt is abandoned, and
+   * an objective bot gets a new random target inside its area on the next tick.
+   * Deterministic (no RNG consumed here; the fresh target is drawn next tick).
+   */
+  private _breakLoop(br: BotBrain, now: number): void {
+    const bot = br.bot;
+
+    if (br.state === 'hunt') {
+      // The last-known position keeps yanking the bot back — give it up and
+      // resume objective routing, with a cooldown so a heard shot doesn't
+      // immediately re-trigger the same hunt.
+      br.lastKnownPos      = null;
+      br.state             = 'objective';
+      br.huntCooldownUntil = now + HUNT_COOLDOWN;
+    }
+
+    // If the bot is looping while ALREADY inside its objective bombsite, it has
+    // effectively reached its goal region — hold here instead of re-rolling a
+    // target across the site (the far random point may sit behind an obstacle the
+    // bot keeps wedging on). This only fires on a detected loop, so the normal
+    // (non-looping) dust2 route flow is unaffected — that's the key difference
+    // from a blanket arrival check: dust2 bots that route smoothly never reach it.
+    if (br.routeSite !== null && this._withinSite(bot.pos, br.routeSite, SITE_MOUTH_MARGIN)) {
+      this._guardInPlace(br, now);
+      return;
+    }
+
+    // A REPEAT break near the last break spot means a fresh target alone won't
+    // free the bot — it is genuinely wedged at a wall corner the route keeps
+    // leading it back into. Escalate to the hard un-stick (teleport to a far
+    // reachable cell), which guarantees displacement.
+    if (distance(bot.pos, br.unstickPos) < 2.5) {
+      this._forceUnstick(br, now);
+      return;
+    }
+    br.unstickPos = { ...bot.pos };
+
+    // Force a fresh objective target + replan so the bot stops bouncing toward
+    // the same flip-flopping point. For a bot heading to a bombsite, aim at the
+    // site point NEAREST the bot rather than re-rolling a random far corner: a
+    // far random in-site point can require a winding cross-site route the bot
+    // can't traverse, re-creating the loop. The nearest-side entry is the most
+    // reachable and stops the wind-up. RNG-free (deterministic).
+    let fresh: Vec3 | null = null;
+    if (br.routeSite !== null) {
+      const sa = this._siteArea(br.routeSite);
+      if (sa) {
+        const tx = clamp(bot.pos.x, sa.min.x, sa.max.x);
+        const tz = clamp(bot.pos.z, sa.min.z, sa.max.z);
+        fresh = this._nav.nearestWalkable({ x: tx, y: bot.pos.y, z: tz });
       }
     }
+    br.currentAreaTarget = fresh;   // null → next tick draws a fresh random point
+    br.currentPath       = [];
+    br.pathIdx           = 0;
+    br.lastReplanAt      = -999;
+    br.goalCheckDist     = Infinity;
+    br.goalCheckAt       = now;
+    br.goalCheckPos      = { ...bot.pos };
+  }
+
+  /**
+   * Promote the bot to guard at its current position, facing the enemy approach.
+   * Shared by the "reached objective site" short-circuits. Clears the path and
+   * resets the stuck/loop checkpoints so the new guard phase starts clean.
+   */
+  private _guardInPlace(br: BotBrain, now: number): void {
+    const bot = br.bot;
+    br.guardPos = this._nav.nearestWalkable(bot.pos) ?? { ...bot.pos };
+    br.state    = 'guard';
+    const enemy = bot.team === 'T' ? this._mapData.spawns.ct : this._mapData.spawns.t;
+    let ecx = 0, ecz = 0;
+    for (const sp of enemy) { ecx += sp.x; ecz += sp.z; }
+    if (enemy.length > 0) {
+      ecx /= enemy.length; ecz /= enemy.length;
+      br.guardFacing = Math.atan2(-(ecx - bot.pos.x), -(ecz - bot.pos.z));
+    }
+    br.currentPath   = [];
+    br.pathIdx       = 0;
+    br.goalCheckDist = Infinity;
+    br.goalCheckAt   = now;
+    br.goalCheckPos  = { ...bot.pos };
+  }
+
+  // ---------------------------------------------------------------------------
+  // Helper: map-agnostic objective resolution
+  // ---------------------------------------------------------------------------
+
+  /**
+   * The bombsite rectangle for `site` as a NamedArea, or null if the map has no
+   * such site. Every MapData carries `bombsites` (the validator enforces it), so
+   * this is the universal, map-independent destination for a T attack route —
+   * it never depends on a hard-coded area NAME (LowerMid/Catwalk/… are dust2-only).
+   */
+  private _siteArea(site: 'A' | 'B'): NamedArea | null {
+    const bs = this._mapData.bombsites.find(b => b.name === site);
+    if (!bs) return null;
+    return { name: `Site${site}`, min: bs.min, max: bs.max };
+  }
+
+  /**
+   * True when `area` IS the given bombsite — either the synthetic site rect from
+   * _siteArea (fallback), or a named area whose rectangle coincides with the
+   * bombsite (on dust2/mirage the area named "ASite"/"BSite" equals the bombsite
+   * rect). Used to fire the "reached objective site → guard" short-circuit only
+   * when the bot's actual target is the site, not a sub-area inside or beyond it.
+   */
+  private _areaIsSite(area: NamedArea, site: 'A' | 'B'): boolean {
+    const bs = this._mapData.bombsites.find(b => b.name === site);
+    if (!bs) return false;
+    // Mutual-centre containment — robust to the small (≤1 m) boundary mismatch
+    // between an "ASite"/"BSite" area and the bombsite rect on real maps, while
+    // still rejecting a small sub-area (GooseA/BPlat) or an adjacent corridor.
+    const aCx = (area.min.x + area.max.x) / 2, aCz = (area.min.z + area.max.z) / 2;
+    const bCx = (bs.min.x + bs.max.x) / 2,     bCz = (bs.min.z + bs.max.z) / 2;
+    const areaCentreInSite =
+      aCx >= bs.min.x && aCx <= bs.max.x && aCz >= bs.min.z && aCz <= bs.max.z;
+    const siteCentreInArea =
+      bCx >= area.min.x && bCx <= area.max.x && bCz >= area.min.z && bCz <= area.max.z;
+    return areaCentreInSite && siteCentreInArea;
+  }
+
+  /**
+   * True when `pos` is inside the given bombsite rectangle expanded by `margin`
+   * (meters). margin=0 is exact containment; a small margin also catches a bot
+   * wedged right at the site mouth, which is effectively "arrived".
+   */
+  private _withinSite(pos: Vec3, site: 'A' | 'B', margin: number): boolean {
+    const bs = this._mapData.bombsites.find(b => b.name === site);
+    if (!bs) return false;
+    return pos.x >= bs.min.x - margin && pos.x <= bs.max.x + margin &&
+           pos.z >= bs.min.z - margin && pos.z <= bs.max.z + margin;
+  }
+
+  /**
+   * Resolve the bot's CURRENT route waypoint to a real, reachable destination on
+   * THIS map. Returns the named area when it exists; otherwise, for an attacking
+   * route with a known site, substitutes the bombsite rectangle so the bot heads
+   * to its objective instead of stalling on a dust2-only area name. Returns null
+   * only when there is genuinely no destination (no site, no known area).
+   *
+   * Keeps dust2 behavior identical: every dust2 route area exists, so the named
+   * lookup always succeeds and this never reaches the bombsite fallback.
+   */
+  /**
+   * True when the bot's route references at least one area name that does NOT
+   * exist on the current map — i.e. the route was authored for another map (the
+   * dust2 route tables running on mirage). On such a "degraded" route the named
+   * sub-area structure is meaningless, so the bot should fall back to map-agnostic
+   * objective behavior (head to / hold the bombsite). On dust2 every route area
+   * exists, so this returns false and dust2 keeps its exact named-route behavior.
+   */
+  private _routeIsDegraded(br: BotBrain): boolean {
+    const map = this._mapData;
+    for (const name of br.routeAreas) {
+      if (!map.areas.some(a => a.name === name)) return true;
+    }
+    return false;
+  }
+
+  private _resolveRouteArea(br: BotBrain): NamedArea | null {
+    const map = this._mapData;
+    const name = br.routeAreas[br.routeAreaIdx];
+    if (name !== undefined) {
+      const area = map.areas.find(a => a.name === name);
+      if (area) return area;
+    }
+    // Named area missing on this map — fall back to the objective bombsite.
+    if (br.routeSite !== null) return this._siteArea(br.routeSite);
+    return null;
+  }
+
+  /**
+   * The bot's current navigation goal in world space, or null if it has none.
+   * Used by the loop guard to measure progress TOWARD the goal (not raw motion),
+   * which catches a bot wall-sliding sideways — covering ground but never closing
+   * on its target. objective → cached area target; hunt → last-known enemy pos.
+   */
+  private _navGoal(br: BotBrain): Vec3 | null {
+    if (br.state === 'objective') {
+      return br.currentAreaTarget
+          ?? br.currentPath[br.currentPath.length - 1]
+          ?? null;
+    }
+    if (br.state === 'hunt') {
+      return br.lastKnownPos
+          ?? br.currentPath[br.currentPath.length - 1]
+          ?? null;
+    }
+    return null;
   }
 
   // ---------------------------------------------------------------------------

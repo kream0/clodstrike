@@ -1,6 +1,9 @@
 import { describe, test, expect } from 'bun:test';
 import { NavGrid } from './nav';
 import { DUST2 } from '../maps/dust2';
+import { MIRAGE } from '../maps/mirage';
+import { MOVEMENT } from '../constants';
+import type { MapData, Vec3 } from '../types';
 
 // ---------------------------------------------------------------------------
 // Shared setup
@@ -227,5 +230,149 @@ describe('findPath performance', () => {
     const elapsed = performance.now() - start;
 
     expect(elapsed).toBeLessThan(250);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Prop-aware navigation
+//
+// NavGrid builds collidable prop AABBs from map.props and refuses to route a bot
+// into a prop it cannot traverse. These tests pin the behaviour on the MIRAGE
+// A-site crate cluster (the original wedge bug) plus map-agnostic invariants.
+// ---------------------------------------------------------------------------
+
+const R       = MOVEMENT.PLAYER_RADIUS;
+const STEP    = 0.5; // nav STEP_HEIGHT (kept in sync with nav.ts)
+
+/** Build the collidable prop AABB list the same way World / NavGrid does. */
+function collidableBoxes(map: MapData): Array<{
+  minX: number; maxX: number; minZ: number; maxZ: number; minY: number; maxY: number;
+}> {
+  const out = [];
+  for (const p of map.props) {
+    if (p.collide === false) continue;
+    const [px, py, pz] = p.pos;
+    const [sx, sy, sz] = p.size;
+    out.push({
+      minX: px - sx / 2, maxX: px + sx / 2,
+      minZ: pz - sz / 2, maxZ: pz + sz / 2,
+      minY: py,          maxY: py + sy,
+    });
+  }
+  return out;
+}
+
+/** Local floor (cell legend) at a world XZ — mirrors World.floorAt for tests. */
+function floorAtCell(map: MapData, x: number, z: number): number {
+  const col = Math.floor((x - map.origin.x) / map.cellSize);
+  const row = Math.floor((z - map.origin.z) / map.cellSize);
+  const r = map.grid[row];
+  if (r === undefined) return Infinity;
+  const ch = r[col];
+  if (ch === undefined) return Infinity;
+  const leg = map.legend[ch];
+  if (!leg || leg.wall) return Infinity;
+  return leg.floor;
+}
+
+/** True if a standing footprint at (x,z) overlaps a non-traversable prop. */
+function footprintHitsProp(map: MapData, x: number, z: number): boolean {
+  const floor = floorAtCell(map, x, z);
+  if (!isFinite(floor)) return false;
+  const minX = x - R, maxX = x + R, minZ = z - R, maxZ = z + R;
+  for (const b of collidableBoxes(map)) {
+    if (b.maxX <= minX || b.minX >= maxX) continue;
+    if (b.maxZ <= minZ || b.minZ >= maxZ) continue;
+    if (b.maxY > floor + STEP) return true; // non-traversable (top too tall to step onto)
+  }
+  return false;
+}
+
+/** Sample a straight XZ segment; true if every sample is prop-clear. */
+function segPropClear(map: MapData, a: Vec3, b: Vec3): boolean {
+  const dx = b.x - a.x, dz = b.z - a.z;
+  const len = Math.sqrt(dx * dx + dz * dz);
+  const ux = len < 1e-6 ? 0 : dx / len;
+  const uz = len < 1e-6 ? 0 : dz / len;
+  for (let t = 0; t <= len + 1e-6; t += R) {
+    if (footprintHitsProp(map, a.x + ux * t, a.z + uz * t)) return false;
+  }
+  return true;
+}
+
+describe('prop-aware: MIRAGE A-site crate cluster', () => {
+  test('nearestWalkable never returns a cell occupied by a crate', () => {
+    const n = new NavGrid(MIRAGE);
+    // The big A-site crate is at world X[-2,2] Z[22,24] (floor 1.5). Query points
+    // straight inside it: nearestWalkable must relocate to a prop-clear cell.
+    for (const q of [
+      { x: 0,   y: 1.5, z: 23 },
+      { x: -1,  y: 1.5, z: 23 },
+      { x: 1,   y: 1.5, z: 23 },
+      { x: 3,   y: 1.5, z: 22 }, // small crate X[2.25,3.75] Z[21.25,22.75]
+    ]) {
+      const w = n.nearestWalkable(q);
+      expect(w).not.toBeNull();
+      expect(footprintHitsProp(MIRAGE, w!.x, w!.z)).toBe(false);
+    }
+  });
+
+  test('randomPointInRect over A-site returns only prop-clear cells (100 samples)', () => {
+    const n = new NavGrid(MIRAGE);
+    const a = MIRAGE.areas.find(ar => ar.name === 'ASite')!;
+    for (let i = 0; i < 100; i++) {
+      const pt = n.randomPointInRect(a.min, a.max);
+      if (pt === null) continue;
+      expect(footprintHitsProp(MIRAGE, pt.x, pt.z)).toBe(false);
+    }
+  });
+
+  test('findPath across the crate cluster never crosses a prop on any segment', () => {
+    const n = new NavGrid(MIRAGE);
+    // West side of the cluster → a clear cell east of it; the straight bot route
+    // would clip the crates, so the path must detour and every segment stays clear.
+    const path = n.findPath({ x: -16.5, y: 1.5, z: 22.5 }, { x: 6.5, y: 1.5, z: 24.5 });
+    expect(path).not.toBeNull();
+    for (let i = 1; i < path!.length; i++) {
+      expect(segPropClear(MIRAGE, path![i - 1], path![i])).toBe(true);
+    }
+  });
+});
+
+describe('prop-aware: invariants on both maps', () => {
+  for (const { label, map } of [
+    { label: 'dust2',  map: DUST2 },
+    { label: 'mirage', map: MIRAGE },
+  ]) {
+    test(`${label}: prop-awareness empties no named area and severs no area-pair route`, () => {
+      const n = new NavGrid(map);
+      // Every named area still has at least one walkable cell.
+      for (const a of map.areas) {
+        expect(n.randomPointInRect(a.min, a.max), `area ${a.name} has no walkable cell`).not.toBeNull();
+      }
+      // Every ordered area-centre pair is still reachable.
+      for (const a of map.areas) {
+        for (const b of map.areas) {
+          if (a === b) continue;
+          const from = { x: (a.min.x + a.max.x) / 2, y: 0, z: (a.min.z + a.max.z) / 2 };
+          const to   = { x: (b.min.x + b.max.x) / 2, y: 0, z: (b.min.z + b.max.z) / 2 };
+          expect(n.findPath(from, to), `${label}: ${a.name}→${b.name} unreachable`).not.toBeNull();
+        }
+      }
+    });
+  }
+
+  test('every findPath waypoint sits on a prop-clear footprint (mirage T→A)', () => {
+    const n = new NavGrid(MIRAGE);
+    const t = MIRAGE.spawns.t[0];
+    const a = MIRAGE.areas.find(ar => ar.name === 'ASite')!;
+    const path = n.findPath(
+      { x: t.x, y: 0, z: t.z },
+      { x: (a.min.x + a.max.x) / 2, y: 0, z: (a.min.z + a.max.z) / 2 },
+    );
+    expect(path).not.toBeNull();
+    for (const wp of path!) {
+      expect(footprintHitsProp(MIRAGE, wp.x, wp.z)).toBe(false);
+    }
   });
 });

@@ -11,10 +11,31 @@
  *   - Climbing: floorB − floorA <= 0.5 m (STEP_HEIGHT).
  *   - Drops: floorA − floorB <= 4.0 m (one-way, from high to low).
  *   - Diagonals: both orthogonal neighbors must be passable (no corner-cutting).
+ *
+ * Prop awareness (added 2026-06: root-cause fix for path-through-prop wedging):
+ *   The grid above is prop-blind, so A* used to route a bot straight through a
+ *   crate/car AABB. World.moveAABB then rejects the swept move every tick (the
+ *   prop top rises > STEP_HEIGHT above the feet) and the bot wedges. NavGrid now
+ *   builds the collidable prop AABBs from map.props at construction (same rule
+ *   as World) and marks any cell whose standing footprint is occupied by a
+ *   non-traversable prop as NOT walkable — for A*, neighbor edges, string-pull,
+ *   nearestWalkable, and randomPointInRect alike. An edge between two clear cells
+ *   is additionally pruned when a prop straddling the shared boundary narrows the
+ *   traversable gap below a bot width. All checks are precomputed at build time;
+ *   the hot A* inner loop reads a boolean and never touches the prop list.
+ *
+ *   "Non-traversable" matches World.moveAABB / _maxSurface exactly: a prop blocks
+ *   a footprint when its top rises more than STEP_HEIGHT above the local floor.
+ *   moveAABB takes the raw max prop top and never inspects the prop's bottom, so
+ *   it does NOT model walking UNDER a raised prop — and neither do we. Exempting a
+ *   high overhang in nav would route the bot into a guaranteed wedge (mirage's
+ *   A-site big crate sits 2 m above the floor, clearing standing height, yet
+ *   collision still blocks it).
  */
 
-import type { MapData, Vec2, Vec3 } from '../types';
+import type { MapData, Vec2, Vec3, MapProp } from '../types';
 import type { RngStream } from '../rng';
+import { MOVEMENT } from '../constants';
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -25,6 +46,22 @@ const MAX_DROP        = 4.0;   // max one-way downward drop
 const MIN_HEADROOM    = 1.9;   // minimum ceil-floor for covered cells
 const WALL_PENALTY    = 1.15;  // cost multiplier for cells adjacent to a wall
 const DROP_COST_MULT  = 1.5;   // extra cost for drop edges
+
+// Prop-occlusion tuning (meters). PLAYER_RADIUS is the AABB half-width used by
+// simulateMovement / moveAABB; a prop within this distance of a standing bot's
+// centre obstructs it.
+const BOT_RADIUS      = MOVEMENT.PLAYER_RADIUS;  // 0.4 m half-width
+const PROP_BLOCK_RISE = STEP_HEIGHT;             // top above floor that is too tall to step onto
+
+// ---------------------------------------------------------------------------
+// Internal AABB (XZ + Y range) for collidable props
+// ---------------------------------------------------------------------------
+
+interface PropAABB {
+  minX: number; maxX: number;
+  minZ: number; maxZ: number;
+  minY: number; maxY: number;
+}
 
 // ---------------------------------------------------------------------------
 // Internal cell descriptor
@@ -117,6 +154,7 @@ export class NavGrid {
   private readonly _cells: NavCell[];        // flat [row * cols + col]
   private readonly _neighbors: Edge[][];     // pre-built neighbor lists per cell
   private readonly _heap: MinHeap;
+  private readonly _props: PropAABB[];       // collidable prop AABBs (from map.props)
 
   // Reusable A* arrays (reset each call via a generation counter).
   private readonly _gScore:   Float64Array;
@@ -131,7 +169,13 @@ export class NavGrid {
 
     const N = this._cols * this._rows;
 
-    // Build cell descriptors.
+    // Build collidable prop AABBs (same rule as World: skip collide===false,
+    // pos = bottom-centre, size = full extents). Built BEFORE cells so cell
+    // walkability can consult them.
+    this._props = NavGrid._buildPropBoxes(map.props);
+
+    // Build cell descriptors. A cell is walkable only if the grid says so AND
+    // no non-traversable prop occupies the standing footprint there.
     this._cells = new Array(N);
     for (let row = 0; row < this._rows; row++) {
       for (let col = 0; col < this._cols; col++) {
@@ -149,6 +193,11 @@ export class NavGrid {
             floor = leg.floor;
             const headroom = (leg.ceil !== undefined) ? (leg.ceil - leg.floor) : Infinity;
             walkable = headroom >= MIN_HEADROOM;
+            // Prop occlusion: a non-traversable prop on this cell's footprint
+            // makes the cell unwalkable (matches World.moveAABB rejection).
+            if (walkable && this._footprintBlocked(col, row, floor)) {
+              walkable = false;
+            }
           }
         }
         this._cells[idx] = { col, row, floor, walkable, isWall };
@@ -167,6 +216,99 @@ export class NavGrid {
     this._fScore  = new Float64Array(N).fill(Infinity);
     this._parent  = new Int32Array(N).fill(-1);
     this._visited = new Uint8Array(N);
+  }
+
+  // ---------------------------------------------------------------------------
+  // Prop-occlusion helpers (build-time only — never called in the hot A* loop)
+  // ---------------------------------------------------------------------------
+
+  /** Build the collidable prop AABB list from map.props (mirrors World). */
+  private static _buildPropBoxes(props: ReadonlyArray<MapProp>): PropAABB[] {
+    const out: PropAABB[] = [];
+    for (const prop of props) {
+      if (prop.collide === false) continue;
+      const [px, py, pz] = prop.pos;
+      const [sx, sy, sz] = prop.size;
+      out.push({
+        minX: px - sx / 2, maxX: px + sx / 2,
+        minZ: pz - sz / 2, maxZ: pz + sz / 2,
+        minY: py,          maxY: py + sy,
+      });
+    }
+    return out;
+  }
+
+  /**
+   * True if `box` is a non-traversable obstacle for a bot standing on `floor`.
+   * Matches World.moveAABB / _maxSurface EXACTLY: that collision path takes the
+   * raw maximum prop top over the footprint and blocks the swept move whenever
+   * that top rises more than STEP_HEIGHT above the feet — it never inspects the
+   * prop's bottom, so it does NOT model walking UNDER a raised prop. A prop low
+   * enough to step onto (top ≤ floor+STEP) is the only traversable case.
+   *
+   * NOTE: we deliberately do NOT exempt high overhangs (bottom ≥ floor+height).
+   * Geometrically a bot could duck under such a prop, but moveAABB still rejects
+   * the move, so exempting it in nav would route the bot into a guaranteed wedge
+   * (this was the mirage A-site crate-cluster bug: the big crate sits 2.0 m above
+   * the floor, just clearing standing height, yet collision blocks it). The
+   * BOT_HEIGHT constant is retained for documentation / future collision changes.
+   */
+  private _propIsObstacle(box: PropAABB, floor: number): boolean {
+    return box.maxY > floor + PROP_BLOCK_RISE;
+  }
+
+  /**
+   * True if a non-traversable prop overlaps the standing footprint centred at
+   * cell (col,row) — i.e. the bot's AABB (centre ± BOT_RADIUS) intersects the
+   * prop's XZ extent. Inclusive of the radius so a prop edge within BOT_RADIUS
+   * of the cell centre counts as occupying it.
+   */
+  private _footprintBlocked(col: number, row: number, floor: number): boolean {
+    if (this._props.length === 0) return false;
+    const cx = this._map.origin.x + col * this._map.cellSize + this._map.cellSize * 0.5;
+    const cz = this._map.origin.z + row * this._map.cellSize + this._map.cellSize * 0.5;
+    const minX = cx - BOT_RADIUS, maxX = cx + BOT_RADIUS;
+    const minZ = cz - BOT_RADIUS, maxZ = cz + BOT_RADIUS;
+    for (const box of this._props) {
+      if (box.maxX <= minX || box.minX >= maxX) continue;
+      if (box.maxZ <= minZ || box.minZ >= maxZ) continue;
+      if (this._propIsObstacle(box, floor)) return true;
+    }
+    return false;
+  }
+
+  /**
+   * True if a non-traversable prop straddles the boundary between two adjacent
+   * cell centres such that the remaining sideways gap a bot could squeeze
+   * through is narrower than a full bot width (2 × BOT_RADIUS). This prunes the
+   * edge even when neither cell centre is itself footprint-blocked (a crate
+   * sitting just off-centre between two cells, leaving a sub-bot-width slot).
+   *
+   * We sample the midpoint of the segment between the two cell centres and test
+   * a bot-width footprint there: if a prop obstacle overlaps that swept slot,
+   * the transition cannot be taken cleanly.
+   */
+  private _edgeBlocked(
+    fromCol: number, fromRow: number, toCol: number, toRow: number, floor: number,
+  ): boolean {
+    if (this._props.length === 0) return false;
+    const cs = this._map.cellSize;
+    const ox = this._map.origin.x;
+    const oz = this._map.origin.z;
+    const ax = ox + fromCol * cs + cs * 0.5;
+    const az = oz + fromRow * cs + cs * 0.5;
+    const bx = ox + toCol * cs + cs * 0.5;
+    const bz = oz + toRow * cs + cs * 0.5;
+    const mx = (ax + bx) * 0.5;
+    const mz = (az + bz) * 0.5;
+    const minX = mx - BOT_RADIUS, maxX = mx + BOT_RADIUS;
+    const minZ = mz - BOT_RADIUS, maxZ = mz + BOT_RADIUS;
+    for (const box of this._props) {
+      if (box.maxX <= minX || box.minX >= maxX) continue;
+      if (box.maxZ <= minZ || box.minZ >= maxZ) continue;
+      if (this._propIsObstacle(box, floor)) return true;
+    }
+    return false;
   }
 
   // ---------------------------------------------------------------------------
@@ -390,6 +532,14 @@ export class NavGrid {
         if (!c2 || !c2.walkable) continue;
       }
 
+      // Prop boundary gap: prune the edge when a non-traversable prop straddles
+      // the cell boundary, leaving a sub-bot-width slot (both cell centres are
+      // clear but the bot cannot fit between). Use the lower of the two floors
+      // so the obstacle test is conservative (a prop tall above the lower floor
+      // still blocks even when the higher cell could step over it).
+      const edgeFloor = Math.min(cell.floor, neighbor.floor);
+      if (this._edgeBlocked(col, row, nc, nr, edgeFloor)) continue;
+
       // Base movement cost.
       let cost = d.diag ? Math.SQRT2 : 1.0;
       if (isDrop) cost *= DROP_COST_MULT;
@@ -447,7 +597,11 @@ export class NavGrid {
   /**
    * Check if a straight line between two cell indices is walkable via
    * Bresenham cell walk. Drops mid-segment are only allowed when monotonic
-   * (height strictly decreasing throughout).
+   * (height strictly decreasing throughout). Additionally rejects the segment
+   * when the swept bot footprint grazes a non-traversable prop — so a
+   * string-pulled segment between two clear cell centres can never clip a crate
+   * corner that lives in an adjacent cell (the bot follows these straight lines
+   * literally; a clipped corner is exactly where it would wedge).
    */
   private _straightWalkable(fromIdx: number, toIdx: number): boolean {
     if (fromIdx === toIdx) return true;
@@ -492,6 +646,48 @@ export class NavGrid {
       if (e2 <  dx) { err += dx; y0 += sy; }
     }
 
+    // Continuous swept-footprint prop test along the straight segment (only when
+    // the map has collidable props). The cell walk above already rejects any
+    // blocked cell centre; this catches the corner-clip case where both endpoints
+    // and every visited cell centre are clear but the bot body would graze a prop
+    // mid-segment.
+    if (this._props.length > 0 && !this._segPropClear(fc, tc)) return false;
+
+    return true;
+  }
+
+  /**
+   * True when a bot footprint swept along the straight XZ segment between two
+   * cell centres never overlaps a non-traversable prop. Samples every BOT_RADIUS
+   * along the segment; the obstacle floor reference is the lower of the two cell
+   * floors (conservative). Build-time only (string-pull) — not on the A* hot path.
+   */
+  private _segPropClear(fc: NavCell, tc: NavCell): boolean {
+    const cs = this._map.cellSize;
+    const ox = this._map.origin.x;
+    const oz = this._map.origin.z;
+    const ax = ox + fc.col * cs + cs * 0.5;
+    const az = oz + fc.row * cs + cs * 0.5;
+    const bx = ox + tc.col * cs + cs * 0.5;
+    const bz = oz + tc.row * cs + cs * 0.5;
+    const floor = Math.min(fc.floor, tc.floor);
+
+    const ddx = bx - ax, ddz = bz - az;
+    const len = Math.sqrt(ddx * ddx + ddz * ddz);
+    const ux = len < 1e-6 ? 0 : ddx / len;
+    const uz = len < 1e-6 ? 0 : ddz / len;
+    const stepLen = BOT_RADIUS; // sample at half the footprint width
+
+    for (let t = 0; t <= len + 1e-6; t += stepLen) {
+      const sx = ax + ux * t, sz = az + uz * t;
+      const minX = sx - BOT_RADIUS, maxX = sx + BOT_RADIUS;
+      const minZ = sz - BOT_RADIUS, maxZ = sz + BOT_RADIUS;
+      for (const box of this._props) {
+        if (box.maxX <= minX || box.minX >= maxX) continue;
+        if (box.maxZ <= minZ || box.minZ >= maxZ) continue;
+        if (this._propIsObstacle(box, floor)) return false;
+      }
+    }
     return true;
   }
 
