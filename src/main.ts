@@ -1065,7 +1065,7 @@ async function boot(): Promise<void> {
           trigger,
           reloadPressed: reloadEdge,
           scopePressed:  scopeEdge,
-        }, clock.now, FIXED_DT);
+        }, clock.now, FIXED_DT, game.rng.combat);
       }
 
       if (shotResult !== null) {

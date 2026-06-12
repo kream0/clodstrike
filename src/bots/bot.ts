@@ -25,8 +25,8 @@ import {
   distanceSq,
   angleDiff,
   clamp,
-  randSpread,
 } from '../math';
+import type { GameRng, RngStream } from '../rng';
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -168,6 +168,14 @@ const T_ROUTES: Record<RouteName, RouteSpec> = {
   TUNNELS_B: { weight: 0.3, areas: ['OutsideTunnels', 'UpperTunnels', 'BSite'], site: 'B' },
 };
 
+// Explicit ordered array of route keys — iteration order is deterministic.
+// NEVER derive from Object.keys(T_ROUTES) which may vary across engines/specs.
+const T_ROUTE_KEYS: readonly RouteName[] = ['LONG_A', 'SHORT_A', 'TUNNELS_B'] as const;
+
+// Compile-time exhaustiveness: adding a RouteName without listing it in T_ROUTE_KEYS is a type error.
+const _routeKeysExhaustive: Record<RouteName, true> = { LONG_A: true, SHORT_A: true, TUNNELS_B: true };
+void _routeKeysExhaustive;
+
 // CT position assignments (cycled by bot index).
 const CT_ASSIGNMENTS: Array<{ areas: string[]; entranceDir: string }> = [
   { areas: ['ASite', 'GooseA'],     entranceDir: 'LongA'       },
@@ -260,10 +268,10 @@ function headPos(c: Combatant): Vec3 {
   return { x: c.pos.x, y: c.pos.y + 1.65, z: c.pos.z };
 }
 
-function pickRoute(): RouteName {
-  let r = Math.random();
-  for (const [name, spec] of Object.entries(T_ROUTES) as [RouteName, RouteSpec][]) {
-    r -= spec.weight;
+function pickRoute(rng: RngStream): RouteName {
+  let r = rng.next();
+  for (const name of T_ROUTE_KEYS) {
+    r -= T_ROUTES[name].weight;
     if (r <= 0) return name;
   }
   return 'TUNNELS_B';
@@ -284,6 +292,8 @@ export class BotManager {
   private readonly _world:      World;
   private readonly _nav:        NavGrid;
   private readonly _onBotShot?: (bot: Combatant, result: ShotResult) => void;
+  /** Reference to the per-match GameRng — supplied by the Game instance. */
+  private readonly _rng:        GameRng;
 
   private _brains:  Map<number, BotBrain> = new Map();
   private _unsubs:  Array<() => void>     = [];
@@ -320,6 +330,8 @@ export class BotManager {
     this._nav       = nav;
     this._onBotShot = onBotShot;
     this._mapData   = mapData;
+    // Pull the game's per-match RNG (already initialised by startMatch).
+    this._rng       = game.rng;
 
     // F3: compute spawn-zone AABBs once from map data (+ margin).
     this._ctSpawnZone = BotManager._buildSpawnZone(mapData.spawns.ct);
@@ -584,7 +596,7 @@ export class BotManager {
       const FORCE_BUDGET = 1400; // enough for any force SMG; vest added on top when live money still allows
       if (money >= FORCE_BUDGET) {
         // 20% chance of shotgun instead of SMG on force buys.
-        const useShotgun = Math.random() < 0.20;
+        const useShotgun = this._rng.round.chance(0.20);
         const rawPool = useShotgun ? BUY_POOL_FORCE_SHOTGUN : BUY_POOL_FORCE_SMG;
         // Filter by team eligibility.
         const pool = rawPool.filter(id => {
@@ -593,7 +605,7 @@ export class BotManager {
         });
         if (pool.length > 0) {
           // Try in random order until one fits the budget.
-          const shuffled = pool.slice().sort(() => Math.random() - 0.5);
+          const shuffled = this._rng.round.shuffle(pool.slice());
           for (const id of shuffled) {
             const def = WEAPONS[id];
             if (def && money >= def.price) {
@@ -618,8 +630,8 @@ export class BotManager {
         });
         if (ecoPool.length > 0) {
           // 60% chance to actually spend (sometimes just save).
-          if (Math.random() < 0.60) {
-            const id = ecoPool[Math.floor(Math.random() * ecoPool.length)]!;
+          if (this._rng.round.chance(0.60)) {
+            const id = this._rng.round.pick(ecoPool as string[]);
             game.buy(c, id, now);
           }
         }
@@ -657,7 +669,7 @@ export class BotManager {
       richDef !== undefined &&
       richId !== undefined &&
       money >= richDef.price + armorCost &&
-      Math.random() < 0.25
+      this._rng.round.chance(0.25)
     ) {
       // Swap: use game.buy which replaces primary slot.
       game.buy(c, richId, now);
@@ -712,7 +724,7 @@ export class BotManager {
 
     if (!carrier || carrier.id === bot.id) {
       // This bot is the carrier.
-      const route = T_ROUTES[pickRoute()];
+      const route = T_ROUTES[pickRoute(this._rng.botNav)];
       br.routeAreas    = [...route.areas];
       br.routeSite     = route.site;
       br.routeAreaIdx  = 0;
@@ -733,10 +745,11 @@ export class BotManager {
       br.routeSite     = carrierBr?.routeSite ?? null;
       br.routeAreaIdx  = 0;
     } else {
-      // Push a different site.
+      // Push a different site — use explicit ordered keys for determinism.
       const carrierSite = this._brains.get(carrier.id)?.routeSite ?? 'A';
-      const alts = (Object.values(T_ROUTES) as RouteSpec[]).filter(r => r.site !== carrierSite);
-      const route = alts.length > 0 ? alts[Math.floor(Math.random() * alts.length)] : T_ROUTES.TUNNELS_B;
+      const altKeys = T_ROUTE_KEYS.filter(k => T_ROUTES[k].site !== carrierSite);
+      const altKey = altKeys.length > 0 ? this._rng.botNav.pick(altKeys) : 'TUNNELS_B';
+      const route = T_ROUTES[altKey];
       br.routeAreas    = [...route.areas];
       br.routeSite     = route.site;
       br.routeAreaIdx  = 0;
@@ -1009,7 +1022,7 @@ export class BotManager {
 
     // 9. Weapon update.
     const weapInput = this._weaponInput(br, now, diff, fullBlind, blind ? blindIntensity : 0);
-    const shotResult = updateWeapon(bot, this._world, game.combatants, weapInput, now, dt);
+    const shotResult = updateWeapon(bot, this._world, game.combatants, weapInput, now, dt, this._rng.combat);
     if (shotResult !== null && this._onBotShot) {
       this._onBotShot(bot, shotResult);
     }
@@ -1067,10 +1080,10 @@ export class BotManager {
       if (br.target !== nearest) {
         br.firstSeenAt        = now;
         br.aimOnTargetSince   = now;
-        br.aimHeadEngagement  = (game.difficulty === 'hard' && Math.random() < HEAD_AIM_CHANCE_HARD);
+        br.aimHeadEngagement  = (game.difficulty === 'hard' && this._rng.botDecision.chance(HEAD_AIM_CHANCE_HARD));
         br.shouldCrouch       = (
           game.difficulty === 'hard' &&
-          Math.random() < CROUCH_RANGE_CHANCE &&
+          this._rng.botDecision.chance(CROUCH_RANGE_CHANCE) &&
           distance(bot.pos, nearest.pos) > 15
         );
       }
@@ -1146,9 +1159,9 @@ export class BotManager {
       const bPos = game.bomb.pos;
       if (br.guardPos === null) {
         const jitter = nav.nearestWalkable({
-          x: bPos.x + (Math.random() * 8 - 4),
+          x: bPos.x + this._rng.botNav.nextRange(-4, 4),
           y: bPos.y,
-          z: bPos.z + (Math.random() * 8 - 4),
+          z: bPos.z + this._rng.botNav.nextRange(-4, 4),
         });
         br.guardPos = jitter ?? { ...bPos };
       }
@@ -1181,7 +1194,7 @@ export class BotManager {
         // Jiggle flip.
         if (now >= br.jiggleFlipAt) {
           br.jiggleDir  = br.jiggleDir === 1 ? -1 : 1;
-          br.jiggleFlipAt = now + JIGGLE_INTERVAL_MIN + Math.random() * (JIGGLE_INTERVAL_MAX - JIGGLE_INTERVAL_MIN);
+          br.jiggleFlipAt = now + JIGGLE_INTERVAL_MIN + this._rng.botDecision.nextRange(0, JIGGLE_INTERVAL_MAX - JIGGLE_INTERVAL_MIN);
         }
         // Movement: strafe/stop logic.
         const d        = distance(bot.pos, br.target.pos);
@@ -1228,9 +1241,9 @@ export class BotManager {
           // Assign guard post near bomb.
           const bPos = game.bomb.pos;
           br.guardPos = nav.nearestWalkable({
-            x: bPos.x + (Math.random() * 8 - 4),
+            x: bPos.x + this._rng.botNav.nextRange(-4, 4),
             y: bPos.y,
-            z: bPos.z + (Math.random() * 8 - 4),
+            z: bPos.z + this._rng.botNav.nextRange(-4, 4),
           }) ?? { ...bPos };
           br.state = 'guard';
           break;
@@ -1293,6 +1306,7 @@ export class BotManager {
             const jitter = nav.randomPointInRect(
               { x: gp.x - GUARD_JITTER_DIST, z: gp.z - GUARD_JITTER_DIST },
               { x: gp.x + GUARD_JITTER_DIST, z: gp.z + GUARD_JITTER_DIST },
+              this._rng.botNav,
             );
             if (jitter) {
               const path = nav.findPath(bot.pos, jitter);
@@ -1366,7 +1380,7 @@ export class BotManager {
     }
 
     // Pick a random point in the target area.
-    let targetPt = nav.randomPointInRect(area.min, area.max);
+    let targetPt = nav.randomPointInRect(area.min, area.max, this._rng.botNav);
     if (!targetPt) {
       targetPt = nav.nearestWalkable({
         x: (area.min.x + area.max.x) / 2,
@@ -1543,7 +1557,7 @@ export class BotManager {
 
     // Target point.
     const aimPt  = br.aimHeadEngagement ? headPos(target) : chestPos(target);
-    const errRad = randSpread(br.aimErrorDeg) * (Math.PI / 180);
+    const errRad = this._rng.botAim.nextSpread(br.aimErrorDeg) * (Math.PI / 180);
 
     // Recoil compensation. Partial blind: halve recoil control.
     const punch     = getViewPunch(bot);
@@ -1690,7 +1704,7 @@ export class BotManager {
         trigger = true;
         br.burstRemaining--;
       } else {
-        const len = BURST_LEN_MIN + Math.floor(Math.random() * (BURST_LEN_MAX - BURST_LEN_MIN + 1));
+        const len = BURST_LEN_MIN + Math.floor(this._rng.botDecision.nextRange(0, BURST_LEN_MAX - BURST_LEN_MIN + 1));
         br.burstRemaining = len - 1;
         trigger = true;
       }

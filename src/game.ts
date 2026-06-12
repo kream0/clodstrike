@@ -7,6 +7,7 @@ import type { World } from './world';
 import { gameEvents } from './combat';
 import { createCharacterMesh, updateCharacterMesh } from './characters';
 import { resetAim, switchSlot } from './weapons';
+import { GameRng, makeMatchSeed } from './rng';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -107,6 +108,12 @@ export interface MatchOptions {
   botsPerTeam?: number; // default 4 teammates + 5 enemies (5v5 total)
   /** Map id from the registry (e.g. 'dust2', 'mirage'). Defaults to 'dust2'. */
   mapId?: string;
+  /**
+   * Master RNG seed for this match. When provided (e.g. by a replay system),
+   * the simulation will be deterministic given identical inputs.
+   * Omit to let the game derive a random seed from Math.random().
+   */
+  seed?: number;
 }
 
 interface BombState {
@@ -125,7 +132,9 @@ interface BombState {
 // Helpers (module-local)
 // ---------------------------------------------------------------------------
 
-let _nextId = 200; // player gets id 0; bots start at 200
+// _nextId is no longer a module-level counter; bot IDs are managed per-match
+// by Game._nextBotId, which resets to BOT_ID_BASE at each startMatch.
+// This guarantees cross-match id determinism for a given masterSeed.
 
 function makeWeaponState(def: WeaponDef): WeaponState {
   return {
@@ -232,6 +241,10 @@ export class Game {
   // ----- Private -----
   private _world: World;
   private _map: MapData = DUST2;
+  /** Per-match deterministic RNG. Created/replaced each startMatch call. */
+  private _rng: GameRng = new GameRng(makeMatchSeed());
+  /** Per-match bot ID counter — resets to BOT_ID_BASE at each startMatch. */
+  private _nextBotId: number = 200;
   private _scene: THREE.Scene | null;
   private _botMeshes: Map<number, THREE.Group> = new Map();
   private _bombMesh:  THREE.Group | null = null;
@@ -289,6 +302,11 @@ export class Game {
       if (attacker === null || attacker.id === ev.victim.id) return;
       this.statsFor(attacker).damageDealt += ev.amount;
     });
+  }
+
+  /** Expose the per-match RNG for consumers (BotManager, main.ts weapon call). */
+  get rng(): GameRng {
+    return this._rng;
   }
 
   /**
@@ -356,6 +374,13 @@ export class Game {
     this.difficulty = opts.difficulty;
     const botsPerTeam = opts.botsPerTeam ?? 4;
 
+    // Initialise per-match deterministic RNG.
+    this._rng = new GameRng(opts.seed ?? makeMatchSeed());
+
+    // Reset bot ID counter so IDs are deterministic per match.
+    // Player always gets id 0; bots start at 200 (BOT_ID_BASE).
+    this._nextBotId = 200;
+
     // Reset global state.
     this.score       = { CT: 0, T: 0 };
     this.lossStreak  = { CT: 0, T: 0 };
@@ -400,20 +425,16 @@ export class Game {
     // Assign starting money.
     this.player.money = ECONOMY.START_MONEY;
 
-    // Bot names pool — shuffle copy.
+    // Bot names pool — shuffle copy (round stream for determinism).
     const namePool = [...BOT_NAMES];
-    // Simple shuffle (Fisher-Yates).
-    for (let i = namePool.length - 1; i > 0; i--) {
-      const j = Math.floor(Math.random() * (i + 1));
-      [namePool[i], namePool[j]] = [namePool[j], namePool[i]];
-    }
+    this._rng.round.shuffle(namePool);
     let nameIdx = 0;
 
     this.combatants = [this.player];
 
     // Create player-team bots.
     for (let i = 0; i < botsPerTeam; i++) {
-      const bot = createCombatant(_nextId++, namePool[nameIdx++ % namePool.length], playerTeam, false);
+      const bot = createCombatant(this._nextBotId++, namePool[nameIdx++ % namePool.length], playerTeam, false);
       this.combatants.push(bot);
       if (this._scene) {
         const mesh = createCharacterMesh(playerTeam);
@@ -425,7 +446,7 @@ export class Game {
     // Create enemy bots (one extra to match 5v5 when botsPerTeam=4).
     const enemyCount = botsPerTeam + 1;
     for (let i = 0; i < enemyCount; i++) {
-      const bot = createCombatant(_nextId++, namePool[nameIdx++ % namePool.length], enemyTeam, false);
+      const bot = createCombatant(this._nextBotId++, namePool[nameIdx++ % namePool.length], enemyTeam, false);
       this.combatants.push(bot);
       if (this._scene) {
         const mesh = createCharacterMesh(enemyTeam);
@@ -510,10 +531,10 @@ export class Game {
       }
     }
 
-    // Assign bomb to a random T.
+    // Assign bomb to a random T (round stream for determinism).
     const ts = this.combatants.filter(c => c.team === 'T' && c.alive);
     if (ts.length > 0) {
-      const bomber = ts[Math.floor(Math.random() * ts.length)];
+      const bomber = this._rng.round.pick(ts);
       bomber.hasBomb = true;
       this.bomb = {
         state:         'carried',
@@ -562,7 +583,7 @@ export class Game {
           hasPrimary,
           teamAvgMoney,
           lossStreak:   streak,
-          roll:         Math.random(),
+          roll:         this._rng.round.next(),
           awpAllowed,
         });
 

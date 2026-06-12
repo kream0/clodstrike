@@ -14,6 +14,7 @@
  */
 
 import type { MapData, Vec2, Vec3 } from '../types';
+import type { RngStream } from '../rng';
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -212,7 +213,15 @@ export class NavGrid {
   // Public: randomPointInRect
   // ---------------------------------------------------------------------------
 
-  randomPointInRect(min: Vec2, max: Vec2): Vec3 | null {
+  /**
+   * Pick a uniformly random walkable cell inside the given rectangle.
+   *
+   * @param min  - min corner (x/z) of the query rect in world coords.
+   * @param max  - max corner (x/z) of the query rect in world coords.
+   * @param rng  - Seeded stream for deterministic selection.
+   *               Defaults to Math.random() when omitted (legacy callers / tests).
+   */
+  randomPointInRect(min: Vec2, max: Vec2, rng?: RngStream): Vec3 | null {
     const colMin = Math.max(0, Math.floor((min.x - this._map.origin.x) / this._map.cellSize));
     const colMax = Math.min(this._cols - 1, Math.floor((max.x - this._map.origin.x) / this._map.cellSize));
     const rowMin = Math.max(0, Math.floor((min.z - this._map.origin.z) / this._map.cellSize));
@@ -228,8 +237,11 @@ export class NavGrid {
     }
     if (candidates.length === 0) return null;
 
-    const [cc, cr] = candidates[Math.floor(Math.random() * candidates.length)];
-    const cell = this._cells[cr * this._cols + cc];
+    const pick = rng !== undefined
+      ? Math.floor(rng.next() * candidates.length)
+      : Math.floor(Math.random() * candidates.length);
+    const [cc, cr] = candidates[pick]!;
+    const cell = this._cells[cr * this._cols + cc]!;
     return this._cellCenter(cc, cr, cell.floor);
   }
 

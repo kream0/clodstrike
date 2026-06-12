@@ -1,9 +1,10 @@
 import type { Combatant, WeaponDef, WeaponSlot, GrenadeType } from './types';
 import type { World } from './world';
-import { clamp, randSpread, yawPitchToDir, normalize } from './math';
+import { clamp, yawPitchToDir, normalize } from './math';
 import { fireHitscan, knifeAttack } from './combat';
 import type { ShotResult } from './combat';
 import { gameEvents } from './combat';
+import { RngStream } from './rng';
 
 // ---------------------------------------------------------------------------
 // Per-combatant aim state (internal to this module)
@@ -155,6 +156,10 @@ export function resetAim(c: Combatant): void {
 // Main update
 // ---------------------------------------------------------------------------
 
+// Module-level fallback stream — used when no rng is passed (legacy callers / tests
+// that don't care about determinism of spread values).
+const _fallbackStream: RngStream = new RngStream(0xdeadbeef);
+
 export function updateWeapon(
   c: Combatant,
   world: World,
@@ -162,6 +167,7 @@ export function updateWeapon(
   input: { trigger: boolean; reloadPressed: boolean; scopePressed: boolean },
   now: number,
   dt: number,
+  rng?: RngStream,
 ): ShotResult | null {
   const inv = c.inventory;
   const slot = inv.activeSlot;
@@ -255,8 +261,9 @@ export function updateWeapon(
 
   const spread = def.isKnife ? 0 : computeSpread(c, def, aim.scoped, ws.shotsFired);
 
-  const spreadYaw   = randSpread(spread);
-  const spreadPitch = randSpread(spread);
+  const _rng = rng ?? _fallbackStream;
+  const spreadYaw   = _rng.nextSpread(spread);
+  const spreadPitch = _rng.nextSpread(spread);
 
   const shootDir = yawPitchToDir(baseYaw + spreadYaw, basePitch + spreadPitch);
   const normDir  = normalize(shootDir);
@@ -268,7 +275,7 @@ export function updateWeapon(
     const idx   = Math.min(ws.shotsFired - 1, pattern.length - 1);
     const entry = pattern[idx]!;
     const DEG_TO_RAD = Math.PI / 180;
-    const jitter     = 1 + randSpread(0.15);  // ±15% determinism noise
+    const jitter     = 1 + _rng.nextSpread(0.15);  // ±15% determinism noise
     aim.viewPunchPitch += entry[0] * DEG_TO_RAD * jitter;
     aim.viewPunchYaw   += entry[1] * DEG_TO_RAD * jitter;
   } else {
