@@ -584,6 +584,37 @@ const HUD_CSS = `
 }
 #hud-matchstats.visible { display: flex; pointer-events: none; }
 
+/* ── Replay overlay ─────────────────────────────────────────────── */
+#hud-replay-badge {
+  position: fixed; top: 16px; left: 50%; transform: translateX(-50%);
+  background: rgba(180,24,24,0.80);
+  border: 1px solid rgba(224,91,75,0.50);
+  border-radius: 4px;
+  padding: 4px 18px;
+  font-size: 12px; font-weight: 700;
+  letter-spacing: 0.16em; text-transform: uppercase;
+  color: #fff; display: none;
+  pointer-events: none; z-index: 300;
+}
+#hud-replay-badge.visible { display: block; }
+#hud-replay-badge .replay-hint {
+  display: block;
+  font-size: 9px; font-weight: 400;
+  letter-spacing: 0.08em; opacity: 0.75; margin-top: 2px;
+}
+#hud-replay-finished {
+  position: fixed; top: 35%; left: 50%; transform: translateX(-50%);
+  background: rgba(6,8,12,0.85);
+  border: 1px solid rgba(255,255,255,0.12);
+  border-radius: 6px;
+  padding: 14px 40px;
+  font-size: 18px; font-weight: 700;
+  letter-spacing: 0.12em; text-transform: uppercase;
+  color: #e8e6e1; display: none;
+  pointer-events: none; z-index: 300;
+}
+#hud-replay-finished.visible { display: block; }
+
 .ms-panel {
   background: rgba(10,12,18,0.95);
   border: 1px solid rgba(255,255,255,0.10);
@@ -738,11 +769,13 @@ export class HUD {
   private _progressLabel!:HTMLElement;
   private _bombWarning!:  HTMLElement;
   private _spectating!:   HTMLElement;
-  private _startMenu!:    HTMLElement;
-  private _pauseMenu!:    HTMLElement;
-  private _flashOverlay!: HTMLElement;
-  private _grenPips!:     HTMLElement;
-  private _matchStats!:   HTMLElement;
+  private _startMenu!:      HTMLElement;
+  private _pauseMenu!:      HTMLElement;
+  private _flashOverlay!:   HTMLElement;
+  private _grenPips!:       HTMLElement;
+  private _matchStats!:     HTMLElement;
+  private _replayBadge!:    HTMLElement;
+  private _replayFinished!: HTMLElement;
 
   // State.
   private _hitmarkerTimer   = 0;
@@ -779,9 +812,13 @@ export class HUD {
   private _buyCategory: number | null = null;
 
   // Callbacks.
-  onStart?:   (opts: MatchOptions) => void;
-  onResume?:  () => void;
-  onRestart?: () => void;
+  onStart?:        (opts: MatchOptions) => void;
+  onResume?:       () => void;
+  onRestart?:      () => void;
+  onWatchReplay?:  (which: 'last' | 'final') => void;
+
+  // Replay state.
+  private _replayAvailable = false;
 
   // Game-time provider — set by main.ts to use clock.now instead of wall time.
   getNow: () => number = () => performance.now() / 1000;
@@ -1068,6 +1105,49 @@ export class HUD {
     }
   }
 
+  /**
+   * Enable or disable the REPLAY badge + Esc hint overlay.
+   * Show when entering replay mode; hide when leaving.
+   */
+  setReplayOverlay(visible: boolean): void {
+    if (visible) {
+      this._replayBadge.classList.add('visible');
+    } else {
+      this._replayBadge.classList.remove('visible');
+      this._replayFinished.classList.remove('visible');
+    }
+  }
+
+  /**
+   * Show the "Replay finished" banner (auto-hides with the overlay).
+   */
+  showReplayFinished(): void {
+    this._replayFinished.classList.add('visible');
+  }
+
+  /**
+   * Update whether replay buttons are enabled (a completed round exists).
+   * Called by main.ts when a roundEnd fires.
+   */
+  setReplayAvailable(available: boolean): void {
+    this._replayAvailable = available;
+    this._updateWatchLastRoundBtn();
+  }
+
+  private _updateWatchLastRoundBtn(): void {
+    const btn = this._pauseMenu.querySelector<HTMLButtonElement>('#hud-watch-replay-btn');
+    if (!btn) return;
+    if (this._replayAvailable) {
+      btn.disabled = false;
+      btn.style.opacity = '';
+      btn.style.cursor  = '';
+    } else {
+      btn.disabled = true;
+      btn.style.opacity = '0.4';
+      btn.style.cursor  = 'not-allowed';
+    }
+  }
+
   // ---------------------------------------------------------------------------
   // DOM builder
   // ---------------------------------------------------------------------------
@@ -1258,6 +1338,20 @@ export class HUD {
     this._matchStats = msDiv;
     this._wireMatchStats();
 
+    // ── Replay badge overlay ──
+    const replayBadge = document.createElement('div');
+    replayBadge.id = 'hud-replay-badge';
+    replayBadge.innerHTML = `REPLAY<span class="replay-hint">Esc · exit replay</span>`;
+    root.appendChild(replayBadge);
+    this._replayBadge = replayBadge;
+
+    // ── Replay finished banner ──
+    const replayFinished = document.createElement('div');
+    replayFinished.id = 'hud-replay-finished';
+    replayFinished.textContent = 'Replay Finished';
+    root.appendChild(replayFinished);
+    this._replayFinished = replayFinished;
+
     // ── Start menu ──
     const startMenu = document.createElement('div');
     startMenu.id = 'hud-start-menu';
@@ -1303,6 +1397,7 @@ export class HUD {
         <h1>Paused</h1>
         <button class="menu-btn primary" id="hud-resume-btn">Resume</button>
         <button class="menu-btn secondary" id="hud-restart-btn">Restart Match</button>
+        <button class="menu-btn secondary" id="hud-watch-replay-btn" disabled style="opacity:0.4;cursor:not-allowed;">Watch Last Round (ends current match)</button>
         <div class="sens-row">
           <label>Sensitivity</label>
           <input type="range" id="hud-sens-slider" min="1" max="10" step="0.1" value="5">
@@ -1386,6 +1481,11 @@ export class HUD {
 
     menu.querySelector('#hud-restart-btn')!.addEventListener('click', () => {
       this.onRestart?.();
+    });
+
+    menu.querySelector('#hud-watch-replay-btn')!.addEventListener('click', () => {
+      if (!this._replayAvailable) return;
+      this.onWatchReplay?.('last');
     });
 
     const slider = menu.querySelector<HTMLInputElement>('#hud-sens-slider')!;
@@ -1496,9 +1596,20 @@ export class HUD {
         ${buildTable('CT')}
         <div class="ms-team-label t">Terrorists</div>
         ${buildTable('T')}
-        <button class="menu-btn primary ms-play-again">Play Again</button>
+        <div style="display:flex;gap:8px;margin-top:8px;">
+          <button class="menu-btn primary ms-play-again" style="flex:1">Play Again</button>
+          <button class="menu-btn secondary ms-watch-final" style="flex:1">Watch Final Round</button>
+        </div>
       </div>
     `;
+    // Wire Watch Final Round button.
+    const watchBtn = this._matchStats.querySelector<HTMLElement>('.ms-watch-final');
+    if (watchBtn) {
+      watchBtn.addEventListener('click', () => {
+        this._hideMatchStats();
+        this.onWatchReplay?.('final');
+      });
+    }
     this._matchStats.classList.add('visible');
   }
 

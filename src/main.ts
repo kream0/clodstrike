@@ -32,6 +32,9 @@ import {
   loadGLB,
 } from './assets';
 import type { LoadedTextures, TextureSlot } from './assets';
+import { makeMatchSeed } from './rng';
+import { ReplayRecorder, ReplayCursor } from './replay';
+import type { ReplayTickInput, ReplayLog } from './replay';
 
 // ---------------------------------------------------------------------------
 // Game-time clock (seconds) — advanced by fixed-step simulation.
@@ -492,6 +495,24 @@ async function boot(): Promise<void> {
   // Track the previously equipped grenade type to detect changes for viewmodel sync.
   let prevEquippedGrenade: import('./types').GrenadeType | null = null;
 
+  // --- Replay state ---
+  const recorder = new ReplayRecorder();
+  // Global tick counter (counts all sim ticks since the last startMatch/restart).
+  let globalTick = 0;
+  // Replay mode: null = live play; non-null = replaying a log.
+  let replayLog: ReplayLog | null = null;
+  let replayCursor: ReplayCursor | null = null;
+  // Fast-forward state: tick target to reach before switching to real-time playback.
+  let replayFfTarget = 0;
+  let replayFfDone   = false;
+  // Show "Replay finished" briefly before returning to menu.
+  let replayFinishedAt = 0; // clock.now when replay ended; 0 = not finished
+  const REPLAY_FINISH_DELAY = 2.0; // seconds to show "Replay finished" banner
+  // Real-time replay: in-progress frame and tick index within it.
+  // Held across RAF calls so we consume exactly one recorded tick per accumulator slot.
+  let replayCurrentFrame: import('./replay').ReplayFrame | null = null;
+  let replayTickIdx = 0;
+
   // Death cam state.
   let deathCamPos: THREE.Vector3 | null = null;
   let deathCamTilt = 0; // accumulated downward tilt
@@ -521,13 +542,25 @@ async function boot(): Promise<void> {
 
   // --- HUD callbacks ---
   hud.onStart = (opts) => {
+    // Exit any active replay before starting a fresh match.
+    replayLog    = null;
+    replayCursor = null;
+    replayFfDone = false;
+    replayFinishedAt = 0;
+    hud.setReplayOverlay(false);
+    hud.setReplayAvailable(false);
+
     lastMatchOpts = opts;
+    // Resolve seed NOW so main.ts knows it before startMatch runs.
+    const resolvedSeed = opts.seed ?? makeMatchSeed();
+    const optsWithSeed: MatchOptions = { ...opts, seed: resolvedSeed };
+
     // Swap map if selection changed (builds new scene, world, navGrid, radar).
     swapMap(opts.mapId ?? DEFAULT_MAP_ID);
     // Reset player to chosen team default loadout (Game will reassign on round start).
     player.team = opts.playerTeam;
     viewmodel.setArmsTeam(opts.playerTeam);
-    game.startMatch(opts, clock.now);
+    game.startMatch(optsWithSeed, clock.now);
     // Instantiate BotManager after startMatch so combatants exist.
     botManager?.dispose();
     botManager = new BotManager(game, world, navGrid, onBotShot, currentMap);
@@ -545,6 +578,15 @@ async function boot(): Promise<void> {
     hud.hideMenus();
     input.requestLock();
     audio.unlock();
+
+    // Begin recording.
+    globalTick = 0;
+    recorder.beginMatch(resolvedSeed, {
+      playerTeam:  opts.playerTeam,
+      difficulty:  opts.difficulty,
+      botsPerTeam: opts.botsPerTeam,
+      mapId:       opts.mapId,
+    });
   };
 
   hud.onResume = () => {
@@ -554,8 +596,18 @@ async function boot(): Promise<void> {
   };
 
   hud.onRestart = () => {
+    // Exit any active replay before restarting.
+    replayLog    = null;
+    replayCursor = null;
+    replayFfDone = false;
+    replayFinishedAt = 0;
+    hud.setReplayOverlay(false);
+    hud.setReplayAvailable(false);
+
     if (lastMatchOpts) {
-      game.restart(lastMatchOpts, clock.now);
+      const resolvedSeed = makeMatchSeed();
+      const optsWithSeed: MatchOptions = { ...lastMatchOpts, seed: resolvedSeed };
+      game.restart(optsWithSeed, clock.now);
       // Reinstantiate BotManager after restart (map unchanged — lastMatchOpts keeps mapId).
       botManager?.dispose();
       botManager = new BotManager(game, world, navGrid, onBotShot, currentMap);
@@ -574,7 +626,105 @@ async function boot(): Promise<void> {
       paused = false;
       hud.hideMenus();
       input.requestLock();
+
+      // Begin new recording.
+      globalTick = 0;
+      recorder.beginMatch(resolvedSeed, {
+        playerTeam:  lastMatchOpts.playerTeam,
+        difficulty:  lastMatchOpts.difficulty,
+        botsPerTeam: lastMatchOpts.botsPerTeam,
+        mapId:       lastMatchOpts.mapId,
+      });
     }
+  };
+
+  /**
+   * Enter replay mode for the given completed-round index (0-based).
+   * Abandons the current live match state.
+   * Reconstructs game + BotManager from the recorded log, then fast-forwards
+   * headlessly to the round's start tick.
+   */
+  function enterReplay(roundIndex: number): void {
+    const log = recorder.endMatch();
+    if (log === null || log.frames.length === 0) {
+      console.warn('[replay] No log available to replay.');
+      return;
+    }
+
+    // Flush then grab the current log (endMatch already flushed and returned it).
+    replayLog = log;
+
+    // Reset globalTick FIRST so the FF loop starts from 0 and reaches replayFfTarget.
+    globalTick = 0;
+    noclip = false;
+
+    // Determine the global tick to seek to (start of requested round).
+    // roundStartTicks[0] = round 1 start, [1] = round 2, etc.
+    // roundIndex 0 means "last/final completed round" → use the last roundStart tick.
+    const clampedIdx = Math.max(0, Math.min(roundIndex, log.roundStartTicks.length - 1));
+    const seekTick   = log.roundStartTicks[clampedIdx] ?? 0;
+    replayFfTarget   = seekTick;
+    replayFfDone     = false;
+    replayFinishedAt = 0;
+
+    // Release pointer lock (replay doesn't need it).
+    document.exitPointerLock();
+    paused = false;
+
+    // Reconstruct game + BotManager with recorded seed.
+    swapMap(log.opts.mapId ?? DEFAULT_MAP_ID);
+    player.team = log.opts.playerTeam;
+    viewmodel.setArmsTeam(log.opts.playerTeam);
+
+    game.startMatch({
+      playerTeam:  log.opts.playerTeam,
+      difficulty:  log.opts.difficulty,
+      botsPerTeam: log.opts.botsPerTeam,
+      mapId:       log.opts.mapId,
+      seed:        log.seed,
+    }, 0);
+
+    // Reset clock so the replay runs from time 0.
+    clock.now = 0;
+
+    botManager?.dispose();
+    botManager = new BotManager(game, world, navGrid, onBotShot, currentMap);
+    botManager.attach();
+    botManager.setSmokeQuery((a, b) => grenadeManager.isSegmentSmoked(a, b));
+    grenadeManager.reset();
+    prevEquippedGrenade = null;
+    spectateTargetId    = null;
+    deathCamPos         = null;
+    deathCamTilt        = 0;
+    deathCamEnterAt     = 0;
+    stepAccum           = 0;
+    game.setSpectateHiddenBot(null);
+    viewmodel.setVisible(true);
+    hud.setSpectateInfo(null);
+    hud.hideMenus();
+
+    // Build cursor and seek to the round boundary.
+    replayCursor = new ReplayCursor(log);
+    replayCursor.seekTick(seekTick);
+
+    // Show REPLAY badge.
+    hud.setReplayOverlay(true);
+
+    // Reset accumulator and in-progress frame state so the frame loop starts cleanly.
+    accumulator         = 0;
+    lastTime            = performance.now() / 1000;
+    replayCurrentFrame  = null;
+    replayTickIdx       = 0;
+  }
+
+  // Wire HUD replay callbacks.
+  hud.onWatchReplay = (which) => {
+    // 'last' = from pause menu: watch the most recently completed round.
+    // 'final' = from match-end screen: watch the last round.
+    // Both map to the last recorded roundStart index.
+    const lastRoundIdx = recorder.lastCompletedRound - 1;
+    if (lastRoundIdx < 0) return; // no completed round yet
+    enterReplay(lastRoundIdx);
   };
 
   hud.setSensitivityHook(
@@ -697,6 +847,15 @@ async function boot(): Promise<void> {
   gameEvents.on('roundEnd', (ev) => {
     const win = (ev.winner === player.team);
     audio.roundEnd(win);
+    // Notify recorder so lastCompletedRound increments.
+    recorder.notifyRoundEnd();
+    // Update HUD button availability.
+    hud.setReplayAvailable(recorder.lastCompletedRound > 0);
+  });
+
+  // Record round-start tick boundary.
+  gameEvents.on('roundStart', () => {
+    recorder.markRoundStart(globalTick);
   });
 
   // Sync viewmodel to active weapon on round start (handles respawn weapon resets).
@@ -776,6 +935,72 @@ async function boot(): Promise<void> {
   // --- Start with menu ---
   hud.showMenu('start');
 
+  // ---------------------------------------------------------------------------
+  // Replay sim tick helper — mirrors the live-play tick body but takes
+  // pre-recorded inputs. No audio, no effects, no viewmodel during fast-forward.
+  // `edgesConsumed` is true for ticks beyond the first in a frame.
+  // NOTE: mirror changes here in the live tick body below (search "LIVE PLAY below").
+  // ---------------------------------------------------------------------------
+  function _replaySimTick(inp: ReplayTickInput, edgesConsumed: boolean): void {
+    const isFreeze    = game.phase === 'freeze';
+    const playerAlive = player.alive;
+
+    if (playerAlive && !isFreeze && !noclip) {
+      simulateMovement(player, {
+        forward: inp.forward,
+        strafe:  inp.strafe,
+        jump:    inp.jump,
+        crouch:  inp.crouch,
+        walk:    inp.walk,
+      }, world, FIXED_DT, clock.now);
+    }
+
+    if (playerAlive && !isFreeze) {
+      game.useHeld(player, inp.eHeld, clock.now, FIXED_DT);
+    }
+
+    // --- Grenade equip / throw (first tick only, mirrors live path) ---
+    if (playerAlive && !isFreeze && !edgesConsumed) {
+      const grenadeEquipped = isGrenadeEquipped(player);
+      const grenadeInp: GrenadeControlInput = {
+        equipPressed:      inp.digit4Pressed,
+        firePressed:       grenadeEquipped ? inp.mousePressed : false,
+        slotSwitchPressed: inp.slotSwitchThisFrame,
+      };
+      const throwRequest = updateGrenadeEquip(player, grenadeInp, clock.now);
+      if (throwRequest !== null) {
+        const eyeHeight = player.crouching ? MOVEMENT.EYE_CROUCH : MOVEMENT.EYE_STAND;
+        const throwDir = yawPitchToDir(player.yaw, player.pitch);
+        const origin = {
+          x: player.pos.x + throwDir.x * 0.3,
+          y: player.pos.y + eyeHeight + throwDir.y * 0.3,
+          z: player.pos.z + throwDir.z * 0.3,
+        };
+        grenadeManager.throwGrenade(player, throwRequest.type, origin, throwDir, clock.now);
+      }
+    }
+
+    const reloadEdge = inp.reloadEdge;
+    // Block gun trigger when a grenade is equipped (LMB routed to grenade machine above).
+    const grenadeBlocked = isGrenadeEquipped(player);
+    const trigger    = (!grenadeBlocked) && (
+      player.inventory[player.inventory.activeSlot]?.def.auto
+        ? inp.mouseDown
+        : (!edgesConsumed && inp.mousePressed)
+    );
+
+    if (playerAlive && !isFreeze) {
+      updateWeapon(player, world, game.combatants, {
+        trigger,
+        reloadPressed: reloadEdge,
+        scopePressed:  !edgesConsumed && inp.mouse2Pressed,
+      }, clock.now, FIXED_DT, game.rng.combat);
+    }
+
+    game.update(FIXED_DT, clock.now);
+    grenadeManager.update(FIXED_DT, clock.now, game.combatants);
+  }
+
   // --- Fixed timestep loop ---
   const FIXED_DT  = 1 / 128;
   let accumulator = 0;
@@ -784,6 +1009,8 @@ async function boot(): Promise<void> {
   let fpsTimer    = 0;
   let displayFps  = 0;
   let debugTimer  = 0;
+  // Maximum replay ticks to simulate per RAF frame during fast-forward (keeps tab responsive).
+  const REPLAY_FF_TICKS_PER_FRAME = 2000;
 
   function frame(): void {
     requestAnimationFrame(frame);
@@ -810,8 +1037,126 @@ async function boot(): Promise<void> {
       debugDiv.style.display = debugVisible ? 'block' : 'none';
     }
 
-    // Noclip (debug, N key).
-    if (input.wasPressed('KeyN')) noclip = !noclip;
+    // Noclip (debug, N key) — disabled in replay.
+    if (input.wasPressed('KeyN') && replayLog === null) noclip = !noclip;
+
+    // Escape during replay: exit back to start menu.
+    if (replayLog !== null && input.wasPressed('Escape')) {
+      replayLog    = null;
+      replayCursor = null;
+      replayFfDone = false;
+      replayFinishedAt = 0;
+      hud.setReplayOverlay(false);
+      accumulator = 0;
+      hud.showMenu('start');
+      input.endFrame();
+      return; // Prevent live-path code from running with stale replay state this RAF call.
+    }
+
+    // --- REPLAY MODE ---
+    if (replayLog !== null && replayCursor !== null) {
+      // Consume the accumulator to keep real-time cadence but drive from cursor.
+      const isFF = !replayFfDone;
+
+      if (isFF) {
+        // Fast-forward: batch-simulate up to REPLAY_FF_TICKS_PER_FRAME ticks per RAF frame.
+        let ffTicksThisFrame = 0;
+        while (globalTick < replayFfTarget && ffTicksThisFrame < REPLAY_FF_TICKS_PER_FRAME) {
+          // Pull next frame from cursor if needed.
+          if (replayCursor.done) {
+            replayFfDone = true;
+            break;
+          }
+          const rframe = replayCursor.nextFrame();
+          if (rframe === null) { replayFfDone = true; break; }
+
+          // Apply yaw/pitch for this frame.
+          player.yaw   = rframe.yaw;
+          player.pitch = rframe.pitch;
+
+          for (let fi = 0; fi < rframe.ticks.length; fi++) {
+            if (globalTick >= replayFfTarget || ffTicksThisFrame >= REPLAY_FF_TICKS_PER_FRAME) break;
+            const rTick = rframe.ticks[fi]!;
+            clock.now += FIXED_DT;
+            globalTick++;
+            ffTicksThisFrame++;
+
+            // Simulate: movement + weapon + game update (mirrors live tick body).
+            if (game.phase !== 'menu') {
+              _replaySimTick(rTick, fi > 0);
+            }
+          }
+        }
+        if (globalTick >= replayFfTarget) {
+          replayFfDone = true;
+        }
+      } else {
+        // Real-time playback: consume EXACTLY one recorded tick per accumulator slot.
+        // replayCurrentFrame / replayTickIdx persist across RAF calls so multi-tick
+        // frames are spread over multiple accumulator slots at the correct cadence.
+        while (accumulator >= FIXED_DT) {
+          accumulator -= FIXED_DT;
+
+          if (game.phase === 'menu') continue;
+
+          // Advance to the next frame when the current one is exhausted.
+          if (replayCurrentFrame === null || replayTickIdx >= replayCurrentFrame.ticks.length) {
+            if (replayCursor.done) {
+              // Replay finished.
+              if (replayFinishedAt === 0) {
+                replayFinishedAt = clock.now;
+                hud.showReplayFinished();
+              }
+              // After the delay, go to start menu.
+              if (clock.now - replayFinishedAt >= REPLAY_FINISH_DELAY) {
+                replayLog          = null;
+                replayCursor       = null;
+                replayFfDone       = false;
+                replayFinishedAt   = 0;
+                replayCurrentFrame = null;
+                replayTickIdx      = 0;
+                hud.setReplayOverlay(false);
+                hud.showMenu('start');
+              }
+              break;
+            }
+            const nextFrame = replayCursor.nextFrame();
+            if (nextFrame === null) break;
+            replayCurrentFrame = nextFrame;
+            replayTickIdx      = 0;
+            // Apply yaw/pitch when the FIRST tick of this frame is consumed.
+            player.yaw   = replayCurrentFrame.yaw;
+            player.pitch = replayCurrentFrame.pitch;
+          }
+
+          const rTick = replayCurrentFrame.ticks[replayTickIdx]!;
+          const isFirstTickInFrame = (replayTickIdx === 0);
+          replayTickIdx++;
+
+          clock.now += FIXED_DT;
+          globalTick++;
+          _replaySimTick(rTick, !isFirstTickInFrame);
+        }
+      }
+
+      // Render the scene at whatever state we reached.
+      effects.update(frameDt);
+      game.updateVisuals(frameDt, clock.now);
+      hud.update(clock.now, frameDt);
+      audio.updateListener(camera);
+
+      // Camera follows recorded player first-person.
+      const eyeHeightR = player.crouching ? MOVEMENT.EYE_CROUCH : MOVEMENT.EYE_STAND;
+      eyeY = player.pos.y + eyeHeightR;
+      camera.position.set(player.pos.x, eyeY, player.pos.z);
+      camera.rotation.set(player.pitch, player.yaw, 0, 'YXZ');
+
+      renderer.render(scene, camera);
+      input.endFrame();
+      return; // Skip live-play logic below.
+    }
+
+    // --- LIVE PLAY below this point ---
 
     // Slot switching — outside fixed step for responsiveness.
     // Digit1/2/3 are suppressed while the buy menu is open (HUD consumes them).
@@ -872,7 +1217,13 @@ async function boot(): Promise<void> {
     // When unpausing: clamp the accumulator to avoid a giant catch-up burst.
     // (The accumulator was not advanced while paused, so no burst on resume.)
 
+    // Begin a new recorder frame for this render frame (live play only).
+    if (!paused && game.phase !== 'menu') {
+      recorder.beginFrame(player.yaw, player.pitch);
+    }
+
     // Fixed-step ticks.
+    let recorderFrameStarted = !paused && game.phase !== 'menu';
     while (accumulator >= FIXED_DT) {
       accumulator -= FIXED_DT;
 
@@ -882,6 +1233,7 @@ async function boot(): Promise<void> {
       }
 
       clock.now += FIXED_DT;
+      globalTick++;
 
       const isFreeze   = game.phase === 'freeze';
       const playerAlive = player.alive;
@@ -1049,6 +1401,29 @@ async function boot(): Promise<void> {
       } else {
         trigger = !edgesConsumed && mousePressed0;
       }
+
+      // Record this tick's effective inputs (before edgesConsumed is set, so we
+      // capture the correct per-tick flags for the first tick).
+      // Build the ReplayTickInput from the same values that will be fed to the sim.
+      {
+        const tickInp: ReplayTickInput = {
+          forward:             playerAlive && !isFreeze ? (input.isDown('KeyW') ? 1 : 0) - (input.isDown('KeyS') ? 1 : 0) : 0,
+          strafe:              playerAlive && !isFreeze ? (input.isDown('KeyD') ? 1 : 0) - (input.isDown('KeyA') ? 1 : 0) : 0,
+          jump:                input.isDown('Space'),
+          crouch:              input.isDown('ControlLeft'),
+          walk:                input.isDown('ShiftLeft'),
+          eHeld,
+          mouseDown:           input.mouseDown,
+          mousePressed:        !edgesConsumed && mousePressed0,
+          mouse2Pressed:       !edgesConsumed && mouse2Pressed0,
+          reloadEdge,
+          digit4Pressed:       !edgesConsumed && digit4Pressed0,
+          wheelDelta:          input.wheelDelta,
+          slotSwitchThisFrame,
+        };
+        recorder.recordTick(tickInp);
+      }
+
       edgesConsumed = true;
 
       // Block gun fire while grenade is equipped (LMB routed to grenade machine above).
@@ -1086,6 +1461,7 @@ async function boot(): Promise<void> {
       }
 
       // Game state machine.
+      // NOTE: mirror changes here in _replaySimTick (replay).
       game.update(FIXED_DT, clock.now);
 
       // Grenade physics + detonation (after player + bot sim updates).
@@ -1095,6 +1471,10 @@ async function boot(): Promise<void> {
       if (game.shouldBeep(clock.now)) {
         audio.bombBeep(game.bomb.pos);
       }
+    }
+    // Flush the recorder frame at the end of each render frame (live play).
+    if (recorderFrameStarted) {
+      recorder.flushFrame();
     }
 
     // --- Smooth eye height ---
