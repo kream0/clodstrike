@@ -55,6 +55,7 @@ Team-exclusive weapons are enforced at purchase time — a CT can never buy an A
 - **RPM gate, reload, recoil**: each weapon has an independent `nextFire` timer, a timed reload sequence, and a view-punch-and-recovery system (recovery in radians/second, suppressed while actively spraying so punch genuinely accumulates).
 - **Learnable spray patterns**: per-weapon recoil patterns (±15% jitter) — the AK-47 climbs hard for ~9 bullets then weaves right/left/right in the classic "7"; the M4A4 runs the same family at ~75% magnitude; pistols have short climbs; Deagle/AWP keep heavy single-shot punch. Pull down and counter-weave to control it, exactly like the real thing.
 - **Spread**: base accuracy + movement penalty + airborne penalty — all modelled as cone half-angles. Movement accuracy is thresholded CS2-style: accurate below ~34% of max speed (counter-strafing works), then a steep quadratic penalty — running rifle fire is unusable. Spray inaccuracy grows per consecutive shot. Crouching narrows the cone.
+- **Wallbang penetration**: shots punch through one thin surface (doors, crates, cars, single-cell walls — anything ≤ 1.25 m); damage scales with per-weapon penetration power (AWP 0.90 → shotguns ~0.2, knife none) and penetrated thickness, on top of normal range falloff. Two-cell walls block. Entry and exit bullet holes render on penetrating shots.
 - **Range falloff**: `damage × rangeModifier^(distance / 15 m)`. The AWP barely falls off at range; the Glock degrades fast.
 - **Hitgroups**: head (×4 damage, overridden to ×2.5 for AWP), body (×1), legs (×0.75, ignores armor). Armor absorbs to 0.775× for body shots (helmet required for head armor benefit). Armor durability tracked per combatant.
 - **AWP scope**: right-click zooms FOV from 73° to 30° with an overlay; sensitivity scales 0.4× scoped; hip-fire spread is severe (0.05 rad base).
@@ -145,7 +146,6 @@ Team-exclusive weapons are enforced at purchase time — a CT can never buy an A
 
 ### Medium term
 
-- **Wallbang penetration** — raycast continues through thin surfaces with reduced damage.
 - **A second map** reusing the same ASCII grid format and `MapData` contract — the navgrid, renderer, and collision system all accept any conforming `MapData`.
 - **Replay / demo** — serialize `clock.now`, player inputs, and bot FSM state per tick for round playback.
 
@@ -171,7 +171,7 @@ bun install
 |:---|:---|
 | `bun run dev` | Dev server at http://localhost:3000 — fresh bundle on every reload (works on Bun 1.1+) |
 | `bun run check` | TypeScript type-check only (`tsc --noEmit`) |
-| `bun test` | Run the test suite (973 tests) |
+| `bun test` | Run the test suite (1035 tests) |
 | `bun run build` | Bundle for production into `dist/` (~1.1 MB) |
 
 ## Controls
