@@ -21,6 +21,82 @@ A Counter-Strike 2–style single-player FPS — bots, bomb defusal, and a low-p
 - **BFS connectivity suite** in `dust2.test.ts` guarantees every canonical route (Long, Short, Mid, Upper/Lower Tunnels) is traversable in both directions at the map cell level — the safety net whenever the grid changes.
 - **Greedy row-merged renderer**: adjacent cells of the same material are merged into axis-aligned box meshes, producing fewer than 10 static draw calls for the entire map plus ~25 prop meshes. Lambert materials with per-box vertex-color tint; hemisphere + warm directional sun with 2048 PCF shadows; exponential fog; sand/stone palette.
 
+### Custom maps
+
+Click **Load Custom Map…** in the start menu and pick a MapData-shaped JSON file to play your own layout. The map is validated, registered for the current session, and immediately selectable in the map picker. Session maps are not persisted across page reloads.
+
+#### JSON shape
+
+```json
+{
+  "name": "my_map",
+  "cellSize": 1,
+  "origin": { "x": -16, "z": -16 },
+  "grid": [
+    "                                ",
+    " ##############################  ",
+    " #0000000000000000000000000000# ",
+    ...
+  ],
+  "legend": {
+    " ": { "floor": 0, "wall": true },
+    "#": { "floor": 0, "wall": true },
+    "0": { "floor": 0.0 }
+  },
+  "props": [],
+  "spawns": {
+    "ct": [{ "x": -8, "z": 0, "angle": 0 }],
+    "t":  [{ "x":  8, "z": 0, "angle": 3.14159 }]
+  },
+  "bombsites": [
+    { "name": "A", "min": { "x": -14, "z": -12 }, "max": { "x": -9, "z": -7 } },
+    { "name": "B", "min": { "x":   9, "z": -12 }, "max": { "x": 14, "z": -7 } }
+  ],
+  "areas": []
+}
+```
+
+#### Field reference
+
+| Field | Type | Notes |
+|:------|:-----|:------|
+| `name` | string | Map display name; non-empty |
+| `cellSize` | number | Meters per grid cell — must be exactly `1` |
+| `origin` | `{x, z}` | World position of grid[0][0] corner |
+| `grid` | `string[]` | Square array of rows; each char is a legend key |
+| `legend` | object | Keys = single chars used in grid; values are `CellLegend` entries (see below) |
+| `props` | array | Axis-aligned box props; up to 200 (see below) |
+| `spawns.ct` / `spawns.t` | array | 1–8 `{x, z, angle}` spawn points per team |
+| `bombsites` | array | Exactly 2 entries — one `"A"` and one `"B"` |
+| `areas` | array | Named `{name, min, max}` rects (used by bot routing); may be empty |
+
+**CellLegend** (one entry per legend key):
+- `floor` (required): floor height in meters — **must be a multiple of 0.375** (e.g. 0, 0.375, 0.75, 1.5, 4.5)
+- `ceil` (optional): absolute ceiling Y in meters — must be > floor (for tunnels/covered areas)
+- `wall` (optional boolean): if `true` the cell is solid and impassable
+- `mat` (optional string): material hint for rendering
+
+**Height convention**: every height is a multiple of `0.375 m` (one step = 1 HU in CS terms). Valid range: `−6.0` to `+15.0 m`. Ground = 0.0; standard door frame clearance = 2.25 (floor 0.0, ceil 2.25 or higher).
+
+**SpawnPoint**: `{x, z, angle}` — world coordinates; `angle` is yaw in radians (0 faces −Z / north, +π faces +Z / south).
+
+**MapProp**: `{kind, pos, size, mat?, collide?}` — `kind` is one of `crate|door|barrel|plank|block|sandbag|car`; `pos` = `[x,y,z]` world center (y = bottom); `size` = `[sx,sy,sz]` full extents in meters; must be axis-aligned (no rotation).
+
+**Bombsite**: `{name, min, max}` where `min`/`max` are `{x,z}` world corners. Minimum area: 20 m².
+
+#### Validation rules (all must pass to load)
+
+1. Required fields present with correct types.
+2. Grid is a square array of strings, 32–128 rows/cols, all rows equal length.
+3. Every grid character appears in `legend`.
+4. Every legend `floor` is a finite multiple of 0.375 in range −6..+15; `ceil` > `floor` when present.
+5. Both teams have 1–8 spawn points; all on walkable cells inside the grid.
+6. Exactly two bombsites named A and B; each ≥ 20 m²; centers inside the grid.
+7. Props have positive extents, finite coordinates, kind from the allowed list, count ≤ 200.
+8. **Reachability**: BFS from every spawn point reaches both bombsite centers (engine-compatible passability: climb ≤ 0.5 m; clearance ≥ 1.9 m — marginally stricter than the engine's 1.82 m).
+
+Validation errors are shown in the menu (first 3 + count of remainder). JSON parse errors are reported separately.
+
 ### Visuals & assets
 
 - **CC0-textured world**: 8 open-licensed tiling materials (ambientCG + Poly Haven — sand, sandstone brick, plaster, paving stone, concrete, wood, painted metal, fabric), color + normal maps, applied across the greedy-merged map geometry with **world-anchored planar UVs** so tiles continue seamlessly across merged boxes. Per-kind prop texturing (wood crates, metal car/doors/xbox, fabric sandbags). Colors-only fallback if textures fail to load.

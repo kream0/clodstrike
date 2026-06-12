@@ -417,6 +417,32 @@ const HUD_CSS = `
 }
 .hud-menu-overlay.visible { display: flex; }
 
+/* Custom map load feedback */
+.custom-map-feedback {
+  font-size: 10px; border-radius: 4px;
+  padding: 6px 10px; margin-top: 6px;
+  display: none;
+  letter-spacing: 0.04em; line-height: 1.4;
+  word-break: break-word;
+}
+.custom-map-feedback.visible { display: block; }
+.custom-map-feedback.ok  { color: #54c87a; background: rgba(84,200,122,0.10); border: 1px solid rgba(84,200,122,0.25); }
+.custom-map-feedback.err { color: #e05b4b; background: rgba(224,91,75,0.10);  border: 1px solid rgba(224,91,75,0.25); }
+
+/* Custom map file button */
+.menu-btn.custom-map-btn {
+  background: rgba(255,255,255,0.05);
+  color: rgba(232,230,225,0.65);
+  border-color: rgba(255,255,255,0.10);
+  font-size: 11px; margin-top: 2px; margin-bottom: 4px;
+  letter-spacing: 0.08em;
+}
+.menu-btn.custom-map-btn:hover {
+  background: rgba(255,255,255,0.10);
+  border-color: rgba(255,255,255,0.18);
+  color: rgba(232,230,225,0.90);
+}
+
 .hud-menu-box {
   background: rgba(10,12,18,0.95);
   border: 1px solid rgba(255,255,255,0.10);
@@ -812,10 +838,18 @@ export class HUD {
   private _buyCategory: number | null = null;
 
   // Callbacks.
-  onStart?:        (opts: MatchOptions) => void;
-  onResume?:       () => void;
-  onRestart?:      () => void;
-  onWatchReplay?:  (which: 'last' | 'final') => void;
+  onStart?:          (opts: MatchOptions) => void;
+  onResume?:         () => void;
+  onRestart?:        () => void;
+  onWatchReplay?:    (which: 'last' | 'final') => void;
+  /**
+   * Called when the player picks a local JSON file in the start menu.
+   * The caller (main.ts) is responsible for parsing, validating, registering,
+   * and refreshing the map buttons via refreshMapButtons().
+   * @param fileName  The original file's name (used to derive display name).
+   * @param jsonText  Raw file content string; the caller runs JSON.parse.
+   */
+  onLoadCustomMap?:  (fileName: string, jsonText: string) => void;
 
   // Replay state.
   private _replayAvailable = false;
@@ -1071,6 +1105,51 @@ export class HUD {
   rerenderRadarBg(map: MapData): void {
     this._radarMap = map;
     this._prerenderRadarBg();
+  }
+
+  /**
+   * Rebuild the map-picker buttons in the start menu to reflect the current
+   * contents of MAP_DISPLAY_NAMES (including any newly registered session maps)
+   * and select the given mapId.
+   * Call this after registerSessionMap() succeeds.
+   */
+  refreshMapButtons(selectedMapId: string): void {
+    const mapContainer = this._startMenu.querySelector<HTMLElement>('.map-btns');
+    if (!mapContainer) return;
+
+    // Rebuild button list imperatively — never set innerHTML with user-derived strings.
+    mapContainer.innerHTML = '';
+    for (const [id, label] of Object.entries(MAP_DISPLAY_NAMES)) {
+      const btn = document.createElement('div');
+      btn.className = id === selectedMapId ? 'diff-btn selected' : 'diff-btn';
+      btn.dataset['mapId'] = id;
+      btn.textContent = label;
+      btn.addEventListener('click', () => {
+        mapContainer.querySelectorAll('.diff-btn').forEach(b => b.classList.remove('selected'));
+        btn.classList.add('selected');
+        this._menuMapId = btn.dataset['mapId'] ?? DEFAULT_MAP_ID;
+      });
+      mapContainer.appendChild(btn);
+    }
+
+    this._menuMapId = selectedMapId;
+  }
+
+  /**
+   * Show a success or error message below the custom-map button in the start menu.
+   * Pass null to hide the feedback element.
+   */
+  showCustomMapFeedback(message: string | null, kind: 'ok' | 'err'): void {
+    const el = this._startMenu.querySelector<HTMLElement>('.custom-map-feedback');
+    if (!el) return;
+    if (message === null) {
+      el.classList.remove('visible', 'ok', 'err');
+      el.textContent = '';
+    } else {
+      el.textContent = message;
+      el.classList.remove('ok', 'err');
+      el.classList.add('visible', kind);
+    }
   }
 
   notifyHit(killed: boolean, _headshot: boolean): void {
@@ -1382,6 +1461,9 @@ export class HUD {
         <div class="diff-btns map-btns">
           ${mapPickerHtml}
         </div>
+        <button class="menu-btn custom-map-btn" id="hud-load-custom-map-btn">+ Load Custom Map… (this session)</button>
+        <input type="file" id="hud-custom-map-input" accept=".json,application/json" style="display:none">
+        <div class="custom-map-feedback"></div>
         <button class="menu-btn primary" id="hud-start-btn">Start Match</button>
       </div>
     `;
@@ -1461,6 +1543,37 @@ export class HUD {
         this._menuMapId = btn.dataset.mapId ?? DEFAULT_MAP_ID;
       });
     });
+
+    // Custom map load button → opens hidden file input.
+    menu.querySelector<HTMLButtonElement>('#hud-load-custom-map-btn')!
+      .addEventListener('click', () => {
+        const fileInput = menu.querySelector<HTMLInputElement>('#hud-custom-map-input')!;
+        // Reset value so selecting the same file again still fires 'change'.
+        fileInput.value = '';
+        fileInput.click();
+      });
+
+    // File input change: read text, fire callback.
+    menu.querySelector<HTMLInputElement>('#hud-custom-map-input')!
+      .addEventListener('change', (ev) => {
+        const input = ev.target as HTMLInputElement;
+        const file = input.files?.[0];
+        if (!file) return;
+        const fileName = file.name;
+        const reader = new FileReader();
+        reader.onload = () => {
+          const text = reader.result;
+          if (typeof text === 'string') {
+            this.onLoadCustomMap?.(fileName, text);
+          }
+          input.value = '';
+        };
+        reader.onerror = () => {
+          this.showCustomMapFeedback('File could not be read', 'err');
+          input.value = '';
+        };
+        reader.readAsText(file);
+      });
 
     // Start button.
     menu.querySelector('#hud-start-btn')!.addEventListener('click', () => {

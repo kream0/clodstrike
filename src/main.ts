@@ -3,7 +3,8 @@ import type { Combatant, Inventory, WeaponDef, WeaponState } from './types';
 import type { Team } from './types';
 import { WEAPONS, MOVEMENT, ECONOMY } from './constants';
 import { DUST2 } from './maps/dust2';
-import { MAPS, DEFAULT_MAP_ID, resolveMap } from './maps/index';
+import { MAPS, DEFAULT_MAP_ID, resolveMap, registerSessionMap } from './maps/index';
+import { validateMapData } from './maps/validate';
 import type { MapData } from './types';
 import { World } from './world';
 import { Input } from './input';
@@ -725,6 +726,36 @@ async function boot(): Promise<void> {
     const lastRoundIdx = recorder.lastCompletedRound - 1;
     if (lastRoundIdx < 0) return; // no completed round yet
     enterReplay(lastRoundIdx);
+  };
+
+  hud.onLoadCustomMap = (fileName: string, jsonText: string) => {
+    // Parse JSON.
+    let rawData: unknown;
+    try {
+      rawData = JSON.parse(jsonText) as unknown;
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      hud.showCustomMapFeedback(`JSON parse error: ${msg}`, 'err');
+      return;
+    }
+
+    // Validate.
+    const result = validateMapData(rawData);
+    if (!result.ok) {
+      const shown = result.errors.slice(0, 3);
+      const extra = result.errors.length - shown.length;
+      const lines = shown.join('\n') + (extra > 0 ? `\n(${extra} more error${extra > 1 ? 's' : ''})` : '');
+      hud.showCustomMapFeedback(lines, 'err');
+      return;
+    }
+
+    // Register — derive display name from filename (strip extension).
+    const displayName = fileName.replace(/\.[^.]+$/, '') || fileName;
+    const mapId = registerSessionMap(displayName, result.map, displayName);
+
+    // Refresh picker and select the new map.
+    hud.refreshMapButtons(mapId);
+    hud.showCustomMapFeedback(`Loaded: ${displayName} (id: ${mapId})`, 'ok');
   };
 
   hud.setSensitivityHook(
