@@ -26,7 +26,7 @@ A Counter-Strike 2–style single-player FPS — bots, bomb defusal, and a low-p
 - **CC0-textured world**: 8 open-licensed tiling materials (ambientCG + Poly Haven — sand, sandstone brick, plaster, paving stone, concrete, wood, painted metal, fabric), color + normal maps, applied across the greedy-merged map geometry with **world-anchored planar UVs** so tiles continue seamlessly across merged boxes. Per-kind prop texturing (wood crates, metal car/doors/xbox, fabric sandbags). Colors-only fallback if textures fail to load.
 - **CC0 GLB weapon viewmodels**: the six firearms use models from the "CC0 Flat Guns" packs (OpenGameArt, by Pichuliru), auto-normalized (longest-axis-to-barrel alignment + target-length scaling) under the same procedural animation anchor — bob/sway/kick/reload all still code-driven. Knife stays procedural; any model that fails to load falls back to the procedural box gun.
 - **Async boot with loading screen**: 22-asset progress bar (8 color maps, 8 normal maps, 6 weapon GLBs), parallel loading, per-asset graceful fallback — a 404 can never brick the boot.
-- **CC0 GLB character models**: Kenney "Blocky Characters" (CT blue / T tan skins, ~250 KB) with fully **code-driven animation** — idle breathing, speed-proportional walk/run cycles, crouch, death fall — on the models' separate limb nodes; no animation clips, allocation-free per frame. Visual-only: hitboxes and eye heights unchanged. Procedural box-bot fallback.
+- **Rigged characters with real animation clips**: Quaternius CC0 rigged characters (CT operator / T phoenix, shared 62-joint skeleton) driven by `THREE.AnimationMixer` — Idle_Gun, Walk, Run with directional Run_Left/Right/Back picked from velocity projected into model space, a real Death clip, 0.18 s crossfades, and playback speed synced to actual move speed (no foot-sliding). Crouch is a post-mixer hips-drop + abdomen tilt (the pack has no crouch clip). Characters hold real weapon models attached to the right wrist bone, mapped from all 30 roster ids and swapped live on weapon change. Visual-only: hitboxes and eye heights unchanged. Procedural box-bot fallback preserved.
 - **Modernized HUD & menus**: translucent glass plates, tabular numerals, sand-gold accent, team-colored scoreplate/scoreboard, killfeed chips, buy-menu cards with keycap badges, segmented difficulty picker, low-health states — all still DOM + injected CSS, no images or fonts.
 - **Full credits**: every asset's source + license in [`assets/LICENSES.md`](./assets/LICENSES.md).
 
@@ -170,7 +170,7 @@ bun install
 |:---|:---|
 | `bun run dev` | Dev server at http://localhost:3000 — fresh bundle on every reload (works on Bun 1.1+) |
 | `bun run check` | TypeScript type-check only (`tsc --noEmit`) |
-| `bun test` | Run the test suite (876 tests) |
+| `bun test` | Run the test suite (931 tests) |
 | `bun run build` | Bundle for production into `dist/` (~1.1 MB) |
 
 ## Controls
@@ -213,7 +213,7 @@ See [`CLAUDE.md`](./CLAUDE.md) for the full project guide. Short module summary:
 | `game.ts` | Game state machine: phases, economy, bomb, spawn, combatant list |
 | `bots/nav.ts` | A* over the map grid with binary heap and string-pull |
 | `bots/bot.ts` | Per-bot FSM using shared movement + weapon code |
-| `characters.ts` | GLB bot characters with code-driven animation (procedural fallback) |
+| `characters.ts` | Rigged GLTF characters, AnimationMixer locomotion FSM, wrist-bone weapons (procedural fallback) |
 | `hud.ts` | All UI: health, ammo, radar, buy menu, scoreboard, menus |
 | `builder.ts` | Scene construction: greedy-merged map geometry + props |
 | `main.ts` | Boot, 128 Hz fixed-step loop, camera, player wiring |
