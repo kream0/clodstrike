@@ -31,8 +31,9 @@ This section covers all 3-D model files in `assets/models/`.
 |---|---|---|---|
 | ct_operator.gltf | Swat.gltf (Ultimate Modular Men Pack) | CC0 1.0 | Quaternius |
 | t_phoenix.gltf | Punk.gltf (Ultimate Modular Men Pack) | CC0 1.0 | Quaternius |
+| fp_arms.glb | Rigged Fps Arms | CC BY 4.0 | J-Toastie |
 
-Full attribution in the **Rigged Characters (v2)** section below.
+Full attribution in the **Rigged Characters (v2)** and **First-Person Arms** sections below.
 
 ### Weapon Props — models/weapons_v2/
 
@@ -82,3 +83,15 @@ All weapon GLBs in `models/weapons_v2/` are by **Quaternius**, published under C
 | scifi_smg.glb | https://poly.pizza/m/NHYaHnTNIM | cc2ce213-28b2-4aed-a6f7-4b9cf8f80568 | CC0 1.0 | 2026-06-12 |
 | revolver.glb | https://poly.pizza/m/9C26wSpMS0 | 9e728565-67a3-44db-9567-982320abff09 | CC0 1.0 | 2026-06-12 |
 | knife.glb | https://poly.pizza/m/N9bfPFP1hr | db1c8b42-5e15-47c3-99dc-0d19b1ee5115 | CC0 1.0 | 2026-06-12 |
+
+## First-Person Arms — models/rigged/fp_arms.glb
+
+**"Rigged Fps Arms"** by **J-Toastie**, published under **Creative Commons Attribution 4.0 (CC BY 4.0)**.
+
+- Poly Pizza page: https://poly.pizza/m/XdHWM8uSAO
+- CDN resource: https://static.poly.pizza/39b81775-34e9-4894-ba1c-4870f71880c5.glb
+- License: CC BY 4.0 — https://creativecommons.org/licenses/by/4.0/
+- Author: J-Toastie (https://poly.pizza/u/J-Toastie)
+- Downloaded: 2026-06-12
+
+Description: A pair of rigged first-person arms. Low poly style, green military sleeve with dark tactical glove. 1 mesh, 1 skin, 24 joints (UpperArm/LowerArm/Hand/fingers bilateral), 3 flat materials, no textures, 263 KB. No animation clips — posed procedurally in viewmodel.ts.
