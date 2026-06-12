@@ -107,7 +107,8 @@ Team-exclusive weapons are enforced at purchase time — a CT can never buy an A
 - **Radar**: pre-rendered from the same ASCII grid as the world. Teammates always visible; enemies appear when within hearing range or near a recently heard shot. Bomb marker shown when dropped or planted. Player position + yaw arrow updates every frame.
 - **Tab scoreboard**: kills / deaths / money per player, team totals.
 - **Buy menu** (B key): CS2-style two-level navigation — a category rail (1 Pistols · 2 Mid-Tier · 3 Rifles · 4 Grenades · 5 Gear) opening data-driven item panels filtered to your team, sorted by price, with keycap digit shortcuts per item; 0/Backspace steps back to the rail. Items greyed out when unaffordable. All digit keys are consumed by the menu while open, so weapon switching is unaffected.
-- **Start menu**: pick CT or T side, choose difficulty. **Pause menu**: resume, restart, sensitivity slider. **Banners** for round win/loss.
+- **Start menu**: pick CT or T side, choose difficulty, **choose the map — Dust2 or Mirage** (Play Again keeps your pick; switching rebuilds the scene, collision world, navgrid and radar cleanly). **Pause menu**: resume, restart, sensitivity slider. **Banners** for round win/loss.
+- **Two maps**: the dust2 fidelity rebuild plus a faithful low-poly **de_mirage** — window room overlooking mid (with the jump-out), palace balcony drop onto A, apps → kitchen → B route, market/arches CT side, underpass, and the iconic prop cover (van, triple box, tetris, firebox) — built from community-derived dimensional data on the same 96×96 ASCII grid, with its own 44-test BFS connectivity suite.
 - **Match-end stats screen**: full-screen panel on match end with winner headline, final score, and per-team tables — kills, deaths, headshot %, damage dealt, MVP rounds (defuser > planter > top fragger), money spent — plus a Play Again button. Stats accumulate silently all match via the `gameEvents` bus.
 - **Death spectate**: short death cam, then first-person spectate of living teammates until the round ends — click cycles targets, auto-advances when the spectated bot dies, HUD shows who you're watching.
 - **Plant / defuse progress bar** overlaid on-screen while holding E.
@@ -146,7 +147,6 @@ Team-exclusive weapons are enforced at purchase time — a CT can never buy an A
 
 ### Medium term
 
-- **A second map** reusing the same ASCII grid format and `MapData` contract — the navgrid, renderer, and collision system all accept any conforming `MapData`.
 - **Replay / demo** — serialize `clock.now`, player inputs, and bot FSM state per tick for round playback.
 
 ### Long term
@@ -171,7 +171,7 @@ bun install
 |:---|:---|
 | `bun run dev` | Dev server at http://localhost:3000 — fresh bundle on every reload (works on Bun 1.1+) |
 | `bun run check` | TypeScript type-check only (`tsc --noEmit`) |
-| `bun test` | Run the test suite (1035 tests) |
+| `bun test` | Run the test suite (1090 tests) |
 | `bun run build` | Bundle for production into `dist/` (~1.1 MB) |
 
 ## Controls

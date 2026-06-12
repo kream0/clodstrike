@@ -34,7 +34,7 @@ Routine work (picking features, creating tasks, spawning agents, committing to m
 
 - **Stack**: Bun 1.3, TypeScript strict (`tsc --noEmit` = `bun run check`), three@0.184. NO Vite.
 - **Entry**: `index.html` → `src/main.ts` — fixed-step simulation at 128 Hz with accumulator loop; render at RAF. Exported `clock.now` (game-time seconds) is THE time source for all game logic.
-- **Validation gate**: `bun run check && bun test && bun run build` — all three must pass before any commit. Tests baseline is **1035 tests green**; never let the suite shrink. (Two known intermittents — re-run once before treating as a regression: "F2: guard facing", "Flash blindness re-acquire".)
+- **Validation gate**: `bun run check && bun test && bun run build` — all three must pass before any commit. Tests baseline is **1090 tests green**; never let the suite shrink. (Two known intermittents — re-run once before treating as a regression: "F2: guard facing", "Flash blindness re-acquire".)
 - **Dev server**: `bun run dev` → http://localhost:3000 (`scripts/dev.ts`, per-request Bun.build — works on Bun 1.1+)
 - **Repo**: https://github.com/kream0/clodstrike
 
@@ -70,8 +70,11 @@ src/
   game.ts           # Game state machine: phases, economy, bomb lifecycle, combatants
   main.ts           # Boot, fixed-step loop, RAF render, player + camera wiring
   maps/
+    index.ts        # Map registry: MAPS (dust2/mirage), DEFAULT_MAP_ID, resolveMap
     dust2.ts        # DUST2 MapData: 96×96 ASCII grid, legend, props, spawns, sites
     dust2.test.ts   # BFS connectivity suite (every route both directions)
+    mirage.ts       # MIRAGE MapData: window room, palace balcony, apps/market routes
+    mirage.test.ts  # Mirage BFS suite (routes, one-ways, chokes, sites)
   bots/
     nav.ts          # NavGrid — A* over the map grid (octile, binary heap, string-pull)
     nav.test.ts     # Nav unit tests
@@ -130,7 +133,7 @@ Every agent prompt must include:
 ### Validation gate (full)
 
 1. `bun run check` — zero TypeScript errors
-2. `bun test` — **1035 or more** tests green (never let the suite shrink)
+2. `bun test` — **1090 or more** tests green (never let the suite shrink)
 3. `bun run build` — completes; warn if bundle grows past 1.5 MB (baseline ~1.1 MB)
 4. Browser smoke where possible (pointer-lock caveat — see Known gotchas)
 
