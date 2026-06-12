@@ -1,4 +1,6 @@
 import * as THREE from 'three';
+import { clone as SkeletonUtilsClone } from 'three/examples/jsm/utils/SkeletonUtils.js';
+import type { GLTF } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import type { Combatant, Team } from './types';
 import { MOVEMENT } from './constants';
 
@@ -6,11 +8,10 @@ import { MOVEMENT } from './constants';
 // Constants
 // ---------------------------------------------------------------------------
 
-const SKIN_COLOR       = 0xc9a182;
-const HELMET_COLOR     = 0x3a3a3a;
-const GUN_COLOR        = 0x222222;
+const SKIN_COLOR   = 0xc9a182;
+const HELMET_COLOR = 0x3a3a3a;
+const GUN_COLOR    = 0x222222;
 
-// CT: slightly bluer than base; T: sandy-brown
 const TEAM_TORSO: Record<Team, number> = {
   CT: 0x5a7da8,
   T:  0xa8824f,
@@ -18,173 +19,245 @@ const TEAM_TORSO: Record<Team, number> = {
 
 const FALL_DURATION = 0.25;
 
+/**
+ * glTF Quaternius models face +Z; our yaw=0 faces −Z (per math.ts convention).
+ * Flip the model 180° around Y to align.  The human smoke-test may want to
+ * toggle this if the characters turn out backwards.
+ */
+export const MODEL_YAW_OFFSET: number = Math.PI;
+
+/** Reference walk speed for AnimationMixer timeScale (m/s). */
+const REF_WALK_SPEED = 2.6;
+/** Reference run speed for AnimationMixer timeScale (m/s). */
+const REF_RUN_SPEED  = 4.7;
+
+/** Duration of locomotion crossfade (seconds). */
+const CROSSFADE_DURATION = 0.18;
+
 // ---------------------------------------------------------------------------
 // Model path registry
 // ---------------------------------------------------------------------------
 
 /**
- * Relative paths (from assets/) for the two team character GLBs.
- * Integration calls loadGLB(CHARACTER_MODEL_PATHS.ct) etc. and passes the
- * resulting scenes to setCharacterModels().
+ * Relative paths (from assets/) for the two rigged team character GlTFs.
+ * main.ts passes full GLTF objects to setCharacterAssets().
  */
 export const CHARACTER_MODEL_PATHS: { ct: string; t: string } = {
-  ct: 'models/characters/character-ct.glb',
-  t:  'models/characters/character-t.glb',
+  ct: 'models/rigged/ct_operator.gltf',
+  t:  'models/rigged/t_phoenix.gltf',
+};
+
+/**
+ * Relative paths (from assets/) for the 9 weapons_v2 static GLB files.
+ * Keyed by file stem.
+ */
+export const THIRD_PERSON_WEAPON_PATHS: Readonly<Record<string, string>> = {
+  pistol:         'models/weapons_v2/pistol.glb',
+  revolver:       'models/weapons_v2/revolver.glb',
+  smg:            'models/weapons_v2/smg.glb',
+  scifi_smg:      'models/weapons_v2/scifi_smg.glb',
+  shotgun:        'models/weapons_v2/shotgun.glb',
+  assault_rifle:  'models/weapons_v2/assault_rifle.glb',
+  assault_rifle_2:'models/weapons_v2/assault_rifle_2.glb',
+  sniper_rifle:   'models/weapons_v2/sniper_rifle.glb',
+  knife:          'models/weapons_v2/knife.glb',
+} as const;
+
+/**
+ * Maps every WEAPONS id → file stem for third-person weapon attachment.
+ * Grenades or unknown ids → no attachment.
+ */
+export const THIRD_PERSON_WEAPON_FILES: Record<string, string> = {
+  // Knife
+  knife: 'knife',
+
+  // Pistols → pistol
+  glock:     'pistol',
+  usp:       'pistol',
+  p250:      'pistol',
+  dualies:   'pistol',
+  fiveseven: 'pistol',
+
+  // Revolver-style → revolver
+  tec9:   'revolver',
+  deagle: 'revolver',
+
+  // SMGs → smg
+  mac10: 'smg',
+  mp9:   'smg',
+  mp7:   'smg',
+  ump45: 'smg',
+
+  // Sci-fi SMG (P90/Bizon) → scifi_smg
+  p90:   'scifi_smg',
+  bizon: 'scifi_smg',
+
+  // Shotguns → shotgun
+  nova:     'shotgun',
+  xm1014:   'shotgun',
+  sawedoff: 'shotgun',
+  mag7:     'shotgun',
+
+  // Assault rifles → assault_rifle
+  m249:  'assault_rifle',
+  negev: 'assault_rifle',
+  famas: 'assault_rifle',
+  galil: 'assault_rifle',
+  m4a4:  'assault_rifle',
+  ak47:  'assault_rifle',
+
+  // Scoped assault rifles → assault_rifle_2
+  aug:   'assault_rifle_2',
+  sg553: 'assault_rifle_2',
+
+  // Sniper rifles → sniper_rifle
+  ssg08:  'sniper_rifle',
+  awp:    'sniper_rifle',
+  g3sg1:  'sniper_rifle',
+  scar20: 'sniper_rifle',
 };
 
 // ---------------------------------------------------------------------------
-// GLB normalization constants
+// Weapon attachment tuning — local transform relative to Wrist.R
+// (all values in MODEL-LOCAL units, i.e. pre-character-scale)
 // ---------------------------------------------------------------------------
 
-/**
- * Kenney Blocky Characters 2.0 — CASE 2: no skins, named limb nodes.
- *
- * Model world height measured headlessly:
- *   feet at y=0.0, head top at y≈2.7 (head node at 1.9 + 0.8 from scaled head mesh).
- * Target height = MOVEMENT.PLAYER_HEIGHT = 1.83 m.
- * Scale = 1.83 / 2.7 ≈ 0.6778.
- *
- * Yaw convention: model faces -Z at default orientation, matching the
- * existing procedural mesh and the game's yaw=0→face -Z convention.
- * No extra rotation needed.
- */
-const MODEL_SOURCE_HEIGHT = 2.7;
-const MODEL_SCALE = MOVEMENT.PLAYER_HEIGHT / MODEL_SOURCE_HEIGHT; // ≈ 0.6778
+interface WeaponAttachTuning {
+  pos: readonly [number, number, number];
+  rot: readonly [number, number, number]; // Euler XYZ in radians
+  scale: number;
+}
+
+const DEFAULT_WEAPON_ATTACH: WeaponAttachTuning = {
+  pos:   [0, 0, 0.1],
+  rot:   [0, Math.PI / 2, 0],
+  scale: 0.5,
+};
+
+/** Per-family overrides (keyed by file stem). */
+const WEAPON_ATTACH_OVERRIDES: Partial<Record<string, WeaponAttachTuning>> = {
+  knife: {
+    pos:   [0, 0, 0.08],
+    rot:   [0, Math.PI / 2, -Math.PI / 4],
+    scale: 0.45,
+  },
+  pistol: {
+    pos:   [0, 0, 0.1],
+    rot:   [0, Math.PI / 2, 0],
+    scale: 0.45,
+  },
+  smg: {
+    pos:   [0, 0.02, 0.12],
+    rot:   [0, Math.PI / 2, 0],
+    scale: 0.55,
+  },
+  scifi_smg: {
+    pos:   [0, 0.02, 0.12],
+    rot:   [0, Math.PI / 2, 0],
+    scale: 0.55,
+  },
+  assault_rifle: {
+    pos:   [0, 0.02, 0.15],
+    rot:   [0, Math.PI / 2, 0],
+    scale: 0.65,
+  },
+  assault_rifle_2: {
+    pos:   [0, 0.02, 0.15],
+    rot:   [0, Math.PI / 2, 0],
+    scale: 0.65,
+  },
+  sniper_rifle: {
+    pos:   [0, 0.02, 0.2],
+    rot:   [0, Math.PI / 2, 0],
+    scale: 0.75,
+  },
+  shotgun: {
+    pos:   [0, 0.02, 0.15],
+    rot:   [0, Math.PI / 2, 0],
+    scale: 0.65,
+  },
+  revolver: {
+    pos:   [0, 0, 0.1],
+    rot:   [0, Math.PI / 2, 0],
+    scale: 0.48,
+  },
+};
 
 // ---------------------------------------------------------------------------
-// Preloaded source models (set once by integration)
+// Preloaded source assets (set once by integration)
 // ---------------------------------------------------------------------------
 
-const _sourceModels: { ct: THREE.Object3D | null; t: THREE.Object3D | null } = {
+interface CharacterAssets {
+  gltf:           GLTF;
+  clips:          THREE.AnimationClip[];
+  /** Uniform scale to normalise model to PLAYER_HEIGHT. */
+  normalScale:    number;
+}
+
+const _sourceAssets: { ct: CharacterAssets | null; t: CharacterAssets | null } = {
   ct: null,
   t:  null,
 };
 
+/** Registry of third-person weapon models keyed by file stem. */
+const _weaponModels: Map<string, THREE.Object3D> = new Map();
+
+// ---------------------------------------------------------------------------
+// setCharacterAssets — replaces old setCharacterModels
+// ---------------------------------------------------------------------------
+
 /**
- * Register preloaded GLB scenes for each team.
- * Call this once after loading; all subsequent createCharacterMesh calls will
- * use GLB clones. Characters created before this call remain procedural.
+ * Register preloaded rigged character GlTFs for each team.
+ * Call once after loading; all subsequent createCharacterMesh calls use these.
  * Idempotent — safe to call multiple times.
  */
-export function setCharacterModels(models: { ct?: THREE.Object3D; t?: THREE.Object3D }): void {
-  if (models.ct !== undefined) _sourceModels.ct = models.ct;
-  if (models.t  !== undefined) _sourceModels.t  = models.t;
+export function setCharacterAssets(assets: { ct?: GLTF; t?: GLTF }): void {
+  if (assets.ct !== undefined) {
+    _sourceAssets.ct = _buildCharacterAssets(assets.ct);
+  }
+  if (assets.t !== undefined) {
+    _sourceAssets.t = _buildCharacterAssets(assets.t);
+  }
 }
 
-// ---------------------------------------------------------------------------
-// Per-limb node references, cached at clone time
-// ---------------------------------------------------------------------------
-
-interface LimbRefs {
-  root:     THREE.Object3D | null;
-  torso:    THREE.Object3D | null;
-  legLeft:  THREE.Object3D | null;
-  legRight: THREE.Object3D | null;
-  armLeft:  THREE.Object3D | null;
-  armRight: THREE.Object3D | null;
-  head:     THREE.Object3D | null;
+/**
+ * Legacy compatibility shim: accepts Object3D scenes (used by old code paths).
+ * @deprecated Use setCharacterAssets instead.
+ */
+export function setCharacterModels(_models: { ct?: THREE.Object3D; t?: THREE.Object3D }): void {
+  // No-op: the rigged pipeline requires full GLTF with animation clips.
+  // This shim prevents crashes from old call sites; real setup goes via setCharacterAssets.
 }
 
-function findNode(root: THREE.Object3D, name: string): THREE.Object3D | null {
-  let found: THREE.Object3D | null = null;
-  root.traverse((obj) => {
-    if (found === null && obj.name === name) found = obj;
-  });
-  return found;
-}
-
-function extractLimbs(cloned: THREE.Object3D): LimbRefs {
+function _buildCharacterAssets(gltf: GLTF): CharacterAssets {
+  const box    = new THREE.Box3().setFromObject(gltf.scene);
+  const height = box.max.y - box.min.y;
+  const normalScale = normalizeHeight(height > 0 ? height : 1.8, MOVEMENT.PLAYER_HEIGHT);
   return {
-    root:     findNode(cloned, 'root'),
-    torso:    findNode(cloned, 'torso'),
-    legLeft:  findNode(cloned, 'leg-left'),
-    legRight: findNode(cloned, 'leg-right'),
-    armLeft:  findNode(cloned, 'arm-left'),
-    armRight: findNode(cloned, 'arm-right'),
-    head:     findNode(cloned, 'head'),
+    gltf,
+    clips:       gltf.animations,
+    normalScale,
   };
 }
 
 // ---------------------------------------------------------------------------
-// Per-character animation state (stored on the group)
-// ---------------------------------------------------------------------------
-
-interface AnimState {
-  /** Walk cycle phase accumulator (radians), advanced per frame. */
-  walkPhase: number;
-  /** Breathing phase accumulator (radians), advanced per frame. */
-  breathPhase: number;
-}
-
-// ---------------------------------------------------------------------------
-// State stored on the group for updateCharacterMesh / updateVisual
-// ---------------------------------------------------------------------------
-
-interface MeshState {
-  prevAlive:  boolean;
-  deadTimer:  number;   // seconds since death, -1 if still alive
-  team:       Team;
-  isGLB:      boolean;
-  limbs:      LimbRefs | null;
-  anim:       AnimState;
-  /** Head node's resting local Y, captured once at clone time (GLB path only). */
-  headRestY:  number;
-}
-
-// Augmented group type to carry state without index signature.
-type CharGroup = THREE.Group & { _cs2State: MeshState };
-
-// ---------------------------------------------------------------------------
-// Pure animation math helpers (exported for tests)
+// setThirdPersonWeaponModels
 // ---------------------------------------------------------------------------
 
 /**
- * Compute leg-swing rotation (radians) for a given phase and leg side.
- * Returns the X-axis rotation for the specified leg.
- *
- * @param phase    - walk cycle phase in radians (advances with dt * freq)
- * @param isLeft   - true for left leg, false for right (opposite phase)
- * @param amplitude - max rotation in radians
+ * Register preloaded static weapon models keyed by file stem
+ * (e.g. 'pistol', 'assault_rifle', 'knife').
+ * Call once after loading. Idempotent.
  */
-export function legSwingAngle(phase: number, isLeft: boolean, amplitude: number): number {
-  return Math.sin(isLeft ? phase : phase + Math.PI) * amplitude;
+export function setThirdPersonWeaponModels(models: Record<string, THREE.Object3D>): void {
+  for (const [stem, obj] of Object.entries(models)) {
+    _weaponModels.set(stem, obj);
+  }
 }
 
-/**
- * Arm counter-swing angle (opposite to the leg on the same side).
- * Arms swing opposite to legs (left arm forward when right leg forward).
- */
-export function armSwingAngle(phase: number, isLeft: boolean, amplitude: number): number {
-  return Math.sin(isLeft ? phase + Math.PI : phase) * amplitude;
-}
-
-/**
- * Breathing bob Y offset in LOCAL model units.
- * Amplitude and frequency produce a subtle inhale/exhale.
- */
-export function breathingBobY(breathPhase: number): number {
-  return Math.sin(breathPhase) * 0.012; // ~1.2 cm model-space at scale 0.68 ≈ 0.8 cm world
-}
-
-/**
- * Crouch Y-offset for the root node in model units, to keep feet planted.
- * When crouching, we translate the root down so visual height ≈ crouch ratio.
- */
-export function crouchRootOffsetY(crouching: boolean): number {
-  if (!crouching) return 0;
-  const ratio = MOVEMENT.PLAYER_HEIGHT_CROUCH / MOVEMENT.PLAYER_HEIGHT; // ≈ 0.738
-  // Lower root by (1 - ratio) * MODEL_SOURCE_HEIGHT in model space
-  return -(1 - ratio) * MODEL_SOURCE_HEIGHT * 0.35;
-}
-
-/**
- * Death rotation around Z axis — falls sideways.
- * @param t - normalized progress [0,1]
- */
-export function deathRotationZ(t: number): number {
-  const clamped = Math.max(0, Math.min(1, t));
-  return (Math.PI / 2) * clamped;
-}
+// ---------------------------------------------------------------------------
+// Pure animation helpers (exported for tests)
+// ---------------------------------------------------------------------------
 
 /**
  * Normalise a source height H to a target height T.
@@ -195,23 +268,192 @@ export function normalizeHeight(sourceHeight: number, targetHeight: number): num
   return targetHeight / sourceHeight;
 }
 
+/**
+ * Death rotation around Z axis — falls sideways.
+ * @param t - normalised progress [0,1]
+ */
+export function deathRotationZ(t: number): number {
+  const clamped = Math.max(0, Math.min(1, t));
+  return (Math.PI / 2) * clamped;
+}
+
+/**
+ * Pick the locomotion clip name based on velocity-derived quantities.
+ *
+ * @param fwd   - velocity component in model-forward direction (+ve = forward)
+ * @param right - velocity component in model-right direction (+ve = right)
+ * @param speed - horizontal speed (m/s)
+ * @param onGround  - whether the combatant is on the ground
+ * @param alive     - whether the combatant is alive
+ *
+ * Yaw convention: yaw=0 faces −Z in world space (math.ts).
+ * Model-forward = −Z world = (0,0,−1) at yaw=0.
+ * Model-right   = +X world = (1,0,0)  at yaw=0.
+ */
+export function pickLocomotionClip(
+  fwd:   number,
+  right: number,
+  speed: number,
+  onGround: boolean,
+  alive: boolean,
+): string {
+  if (!alive)     return 'Death';
+  if (!onGround)  return 'Idle_Gun';
+  if (speed <= 0.3) return 'Idle_Gun';
+  if (speed < 3.0)  return 'Walk';
+
+  // Running — dominant axis decides strafe vs forward/back
+  if (Math.abs(fwd) >= Math.abs(right)) {
+    return fwd > 0 ? 'Run' : 'Run_Back';
+  }
+  return right > 0 ? 'Run_Right' : 'Run_Left';
+}
+
+/**
+ * Project world-space XZ velocity onto model-local forward and right axes.
+ *
+ * Yaw convention (math.ts): yaw=0 faces −Z in world space.
+ *   model-forward = (−sin(yaw), 0, −cos(yaw))  (the direction the character faces)
+ *   model-right   = (−sin(yaw−π/2), 0, −cos(yaw−π/2))
+ *                 = (cos(yaw), 0, −sin(yaw))
+ *
+ * Returns { fwd, right } in m/s.
+ */
+export function projectVelocityToLocal(
+  vx: number,
+  vz: number,
+  yaw: number,
+): { fwd: number; right: number } {
+  // model-forward unit vector
+  const fx = -Math.sin(yaw);
+  const fz = -Math.cos(yaw);
+  // model-right unit vector
+  const rx =  Math.cos(yaw);
+  const rz = -Math.sin(yaw);
+
+  const fwd   = vx * fx + vz * fz;
+  const right = vx * rx + vz * rz;
+  return { fwd, right };
+}
+
+/**
+ * Clamp AnimationMixer timeScale for foot-slide control.
+ */
+export function locomotionTimeScale(speed: number, refSpeed: number): number {
+  if (refSpeed <= 0) return 1;
+  const raw = speed / refSpeed;
+  return Math.max(0.6, Math.min(1.6, raw));
+}
+
+/**
+ * Compute crouch Y offset for the Hips bone in model units.
+ * factor in [0,1]; 0=standing, 1=fully crouched.
+ * normalScale maps between world metres and model units (model * normalScale = world).
+ */
+export function crouchHipsOffsetY(factor: number, normalScale: number): number {
+  if (factor <= 0) return 0;
+  const worldDelta = (1 - MOVEMENT.PLAYER_HEIGHT_CROUCH / MOVEMENT.PLAYER_HEIGHT) * MOVEMENT.PLAYER_HEIGHT;
+  // Convert world offset to model-local units (divide by normalScale)
+  return -(worldDelta * factor) / normalScale;
+}
+
+/**
+ * Abdomen forward tilt (rad) for crouching hunch.
+ */
+export function crouchAbdomenTilt(factor: number): number {
+  return 0.25 * factor;
+}
+
+/**
+ * Resolve a clip name defensively: tries the name, falls back to 'Idle',
+ * then returns null if even 'Idle' is missing.
+ */
+export function resolveClipName(
+  name: string,
+  clips: THREE.AnimationClip[],
+): THREE.AnimationClip | null {
+  const direct = THREE.AnimationClip.findByName(clips, name);
+  if (direct) return direct;
+  const idle = THREE.AnimationClip.findByName(clips, 'Idle');
+  return idle ?? null;
+}
+
 // ---------------------------------------------------------------------------
-// Procedural character mesh builder (fallback when no GLB loaded)
+// Legacy helpers kept for backward-compat in tests that haven't been deleted
+// ---------------------------------------------------------------------------
+
+/** @deprecated Use pickLocomotionClip + AnimationMixer instead. */
+export function legSwingAngle(phase: number, isLeft: boolean, amplitude: number): number {
+  return Math.sin(isLeft ? phase : phase + Math.PI) * amplitude;
+}
+
+/** @deprecated */
+export function armSwingAngle(phase: number, isLeft: boolean, amplitude: number): number {
+  return Math.sin(isLeft ? phase + Math.PI : phase) * amplitude;
+}
+
+/** @deprecated */
+export function breathingBobY(breathPhase: number): number {
+  return Math.sin(breathPhase) * 0.012;
+}
+
+/** @deprecated */
+export function crouchRootOffsetY(crouching: boolean): number {
+  if (!crouching) return 0;
+  const ratio = MOVEMENT.PLAYER_HEIGHT_CROUCH / MOVEMENT.PLAYER_HEIGHT;
+  return -(1 - ratio) * 2.7 * 0.35;
+}
+
+// ---------------------------------------------------------------------------
+// Per-character animation state stored on the group
+// ---------------------------------------------------------------------------
+
+interface AnimMixerState {
+  mixer:       THREE.AnimationMixer;
+  actions:     Map<string, THREE.AnimationAction>;
+  /** The name of the REQUESTED clip (set before fallback resolution). */
+  currentClip: string;
+  /** The action that _crossfadeTo most recently handed control to (null before first crossfade). */
+  activeAction: THREE.AnimationAction | null;
+  /** Smoothed crouch factor [0,1]. */
+  crouchFactor: number;
+  /** Cached normalScale for this instance (used to compensate weapon attach scale). */
+  normalScale: number;
+  /** Cached ref to the Hips bone (may be null if absent). */
+  hipsBone: THREE.Bone | null;
+  /** Cached ref to the Abdomen bone (may be null if absent). */
+  abdomenBone: THREE.Bone | null;
+  /** Cached ref to the Wrist.R bone for weapon attachment. */
+  wristRBone: THREE.Object3D | null;
+  /** Currently attached weapon stem ('' = none). */
+  attachedStem: string;
+  /** Cloned weapon meshes cached per stem (avoid re-cloning on every switch). */
+  weaponCache: Map<string, THREE.Object3D>;
+  /** The currently visible weapon attachment child (or null). */
+  currentWeaponAttach: THREE.Object3D | null;
+}
+
+interface MeshState {
+  prevAlive:  boolean;
+  deadTimer:  number;
+  team:       Team;
+  isRigged:   boolean;
+  mixerState: AnimMixerState | null;
+}
+
+type CharGroup = THREE.Group & { _cs2State: MeshState };
+
+// ---------------------------------------------------------------------------
+// Procedural fallback builder (unchanged from original)
 // ---------------------------------------------------------------------------
 
 function buildProceduralMesh(team: Team): THREE.Group {
   const group = new THREE.Group();
-
   const torsoColor = TEAM_TORSO[team];
 
   function box(
-    sx: number,
-    sy: number,
-    sz: number,
-    color: number,
-    cx = 0,
-    cy = 0,
-    cz = 0,
+    sx: number, sy: number, sz: number, color: number,
+    cx = 0, cy = 0, cz = 0,
   ): THREE.Mesh {
     const geo  = new THREE.BoxGeometry(sx, sy, sz);
     const mat  = new THREE.MeshLambertMaterial({ color });
@@ -222,38 +464,23 @@ function buildProceduralMesh(team: Team): THREE.Group {
     return mesh;
   }
 
-  // --- Legs (two boxes, side by side) ---
-  // y 0–0.85
-  const legH = 0.85;
-  const legW = 0.18;
-  const legD = 0.20;
+  const legH = 0.85; const legW = 0.18; const legD = 0.20;
   const leftLeg  = box(legW, legH, legD, torsoColor, -0.11, legH / 2, 0);
   const rightLeg = box(legW, legH, legD, torsoColor,  0.11, legH / 2, 0);
 
-  // --- Torso --- y 0.85–1.50
-  const torsoH = 0.65;
-  const torsoY = 0.85 + torsoH / 2;
+  const torsoH = 0.65; const torsoY = 0.85 + torsoH / 2;
   const torso  = box(0.44, torsoH, 0.26, torsoColor, 0, torsoY, 0);
 
-  // --- Arms (two thin boxes) ---
-  const armH = 0.55;
-  const armW = 0.14;
-  const armD = 0.14;
-  const armY = 0.85 + 0.45;
+  const armH = 0.55; const armW = 0.14; const armD = 0.14; const armY = 0.85 + 0.45;
   const leftArm  = box(armW, armH, armD, torsoColor, -0.29, armY - armH / 2 + 0.1, 0.02);
   const rightArm = box(armW, armH, armD, torsoColor,  0.29, armY - armH / 2 + 0.1, 0.02);
 
-  // --- Head (skin) --- y 1.50–1.72
-  const headH = 0.22;
-  const headY = 1.50 + headH / 2;
+  const headH = 0.22; const headY = 1.50 + headH / 2;
   const head  = box(0.24, headH, 0.26, SKIN_COLOR, 0, headY, 0);
 
-  // --- Helmet (darker box over head) --- y 1.72–1.83
-  const helmetH = 0.11;
-  const helmetY = 1.50 + headH + helmetH / 2;
+  const helmetH = 0.11; const helmetY = 1.50 + headH + helmetH / 2;
   const helmet  = box(0.27, helmetH, 0.28, HELMET_COLOR, 0, helmetY, 0.0);
 
-  // --- Gun (dark box held in front-right) ---
   const gun = box(0.06, 0.12, 0.38, GUN_COLOR, 0.20, 1.05, -0.22);
 
   group.add(leftLeg, rightLeg, torso, leftArm, rightArm, head, helmet, gun);
@@ -261,26 +488,87 @@ function buildProceduralMesh(team: Team): THREE.Group {
 }
 
 // ---------------------------------------------------------------------------
-// GLB character clone builder
+// Rigged GLB clone builder
 // ---------------------------------------------------------------------------
 
-function buildGLBMesh(source: THREE.Object3D): { group: THREE.Group; limbs: LimbRefs } {
-  // No SkinnedMesh in these models — plain .clone(true) is correct.
-  const cloned = source.clone(true) as THREE.Group;
+function _findBone(root: THREE.Object3D, name: string): THREE.Object3D | null {
+  let found: THREE.Object3D | null = null;
+  root.traverse((obj) => {
+    if (found === null && obj.name === name) found = obj;
+  });
+  return found;
+}
 
-  // Scale to match PLAYER_HEIGHT.
-  cloned.scale.setScalar(MODEL_SCALE);
+function buildRiggedMesh(assets: CharacterAssets): {
+  outerGroup: THREE.Group;
+  mixerState: AnimMixerState;
+} {
+  // SkeletonUtils.clone creates an independent rig per instance
+  const clonedRoot = SkeletonUtilsClone(assets.gltf.scene) as THREE.Object3D;
 
-  // Apply castShadow to all meshes (matches procedural behavior).
-  cloned.traverse((child) => {
-    if (child instanceof THREE.Mesh) {
+  // Apply castShadow + frustumCulled=false on every SkinnedMesh
+  clonedRoot.traverse((child) => {
+    if (child instanceof THREE.SkinnedMesh) {
+      child.castShadow      = true;
+      child.receiveShadow   = false;
+      child.frustumCulled   = false;
+    } else if (child instanceof THREE.Mesh) {
       child.castShadow    = true;
       child.receiveShadow = false;
     }
   });
 
-  const limbs = extractLimbs(cloned);
-  return { group: cloned, limbs };
+  // Inner group: carries normalisation scale + yaw offset
+  const innerGroup = new THREE.Group();
+  innerGroup.scale.setScalar(assets.normalScale);
+  innerGroup.rotation.y = MODEL_YAW_OFFSET;
+  innerGroup.add(clonedRoot);
+
+  // Outer group: game positions it, sets rotation.y = c.yaw
+  const outerGroup = new THREE.Group();
+  outerGroup.add(innerGroup);
+
+  // Build AnimationMixer over the cloned scene root
+  const mixer   = new THREE.AnimationMixer(clonedRoot);
+  const actions = new Map<string, THREE.AnimationAction>();
+  for (const clip of assets.clips) {
+    const action = mixer.clipAction(clip);
+    actions.set(clip.name, action);
+  }
+
+  // Start with Idle_Gun (or Idle fallback)
+  const startClip = assets.clips.find(c => c.name === 'Idle_Gun') ??
+                    assets.clips.find(c => c.name === 'Idle')      ??
+                    assets.clips[0];
+  let currentClip = 'Idle_Gun';
+  if (startClip) {
+    const startAction = actions.get(startClip.name);
+    if (startAction) {
+      startAction.reset().play();
+      currentClip = startClip.name;
+    }
+  }
+
+  const hipsBone     = _findBone(clonedRoot, 'Hips')     as THREE.Bone | null;
+  const abdomenBone  = _findBone(clonedRoot, 'Abdomen')  as THREE.Bone | null;
+  const wristRBone   = _findBone(clonedRoot, 'Wrist.R');
+
+  const mixerState: AnimMixerState = {
+    mixer,
+    actions,
+    currentClip,
+    activeAction: startClip ? (actions.get(startClip.name) ?? null) : null,
+    crouchFactor: 0,
+    normalScale:  assets.normalScale,
+    hipsBone,
+    abdomenBone,
+    wristRBone,
+    attachedStem:        '',
+    weaponCache:         new Map(),
+    currentWeaponAttach: null,
+  };
+
+  return { outerGroup, mixerState };
 }
 
 // ---------------------------------------------------------------------------
@@ -288,37 +576,27 @@ function buildGLBMesh(source: THREE.Object3D): { group: THREE.Group; limbs: Limb
 // ---------------------------------------------------------------------------
 
 export function createCharacterMesh(team: Team): THREE.Group {
-  const source = team === 'CT' ? _sourceModels.ct : _sourceModels.t;
+  const assets = team === 'CT' ? _sourceAssets.ct : _sourceAssets.t;
 
   let group: THREE.Group;
-  let limbs: LimbRefs | null = null;
-  let isGLB = false;
+  let isRigged = false;
+  let mixerState: AnimMixerState | null = null;
 
-  if (source !== null) {
-    const built = buildGLBMesh(source);
-    group  = built.group;
-    limbs  = built.limbs;
-    isGLB  = true;
+  if (assets !== null) {
+    const built = buildRiggedMesh(assets);
+    group       = built.outerGroup;
+    mixerState  = built.mixerState;
+    isRigged    = true;
   } else {
     group = buildProceduralMesh(team);
   }
-
-  // Capture head resting Y once at clone time (no per-frame allocation).
-  const headRestY = (isGLB && limbs !== null && limbs.head !== null)
-    ? limbs.head.position.y
-    : 1.2;
 
   const state: MeshState = {
     prevAlive:  true,
     deadTimer:  -1,
     team,
-    isGLB,
-    limbs,
-    anim: {
-      walkPhase:   0,
-      breathPhase: 0,
-    },
-    headRestY,
+    isRigged,
+    mixerState,
   };
   (group as CharGroup)._cs2State = state;
 
@@ -326,33 +604,32 @@ export function createCharacterMesh(team: Team): THREE.Group {
 }
 
 // ---------------------------------------------------------------------------
-// updateCharacterMesh — called every render frame by game.ts updateVisuals
+// updateCharacterMesh — called every render frame
 // ---------------------------------------------------------------------------
 
 export function updateCharacterMesh(
   group: THREE.Group,
   c: Combatant,
   dt: number,
-  now: number,
+  _now: number,
 ): void {
   const state = (group as Partial<CharGroup>)._cs2State;
   if (!state) return;
 
   // Position (feet-anchored).
   group.position.set(c.pos.x, c.pos.y, c.pos.z);
-  // Mesh faces −Z at yaw 0, matching the convention in math.ts.
+  // Outer group rotation = c.yaw; model yaw offset is baked into innerGroup.rotation.y
   group.rotation.y = c.yaw;
 
-  if (state.isGLB) {
-    _updateGLBMesh(group, state, c, dt, now);
+  if (state.isRigged && state.mixerState !== null) {
+    _updateRiggedMesh(group, state, c, dt);
   } else {
-    _updateProceduralMesh(group, state, c, dt, now);
+    _updateProceduralMesh(group, state, c, dt, _now);
   }
 }
 
 // ---------------------------------------------------------------------------
-// updateVisual — additive alias for external callers (integration compatible)
-// Delegates to updateCharacterMesh.
+// updateVisual — alias for external callers (game.ts compatible)
 // ---------------------------------------------------------------------------
 
 export function updateVisual(
@@ -365,95 +642,194 @@ export function updateVisual(
 }
 
 // ---------------------------------------------------------------------------
-// Internal: GLB-path update
+// Internal: rigged-path update
 // ---------------------------------------------------------------------------
 
-function _updateGLBMesh(
+function _updateRiggedMesh(
   group: THREE.Group,
   state: MeshState,
   c: Combatant,
   dt: number,
-  _now: number,
 ): void {
-  const limbs = state.limbs;
-  if (!limbs) return;
+  const ms = state.mixerState!;
 
-  // --- Death ---
-  if (state.prevAlive && !c.alive) {
+  // --- Death transition ---
+  const justDied    = state.prevAlive && !c.alive;
+  const justRevived = !state.prevAlive && c.alive;
+  state.prevAlive   = c.alive;
+
+  if (justDied) {
     state.deadTimer = 0;
+    _crossfadeTo(ms, 'Death', 0.1, false);
   }
-  state.prevAlive = c.alive;
+  if (justRevived) {
+    state.deadTimer = -1;
+    group.rotation.z = 0;
+    group.position.y = c.pos.y;
+    ms.activeAction = null;
+    ms.mixer.stopAllAction();
+    _crossfadeTo(ms, 'Idle_Gun', 0, true);
+  }
 
   if (!c.alive) {
     if (state.deadTimer >= 0) {
       state.deadTimer += dt;
     }
-    const t = state.deadTimer < 0
-      ? 1
-      : Math.min(1, state.deadTimer / FALL_DURATION);
-    group.rotation.z  = deathRotationZ(t);
-    group.position.y  = c.pos.y - 0.1 * t;
+    const t = state.deadTimer < 0 ? 1 : Math.min(1, state.deadTimer / FALL_DURATION);
+    group.rotation.z = deathRotationZ(t);
+    group.position.y = c.pos.y - 0.1 * t;
+    ms.mixer.update(dt);
     return;
   }
 
-  // Reset on respawn.
-  if (state.deadTimer >= 0) {
-    state.deadTimer   = -1;
-  }
+  // Reset death visual
   group.rotation.z = 0;
 
-  const horizSpeed = Math.sqrt(c.vel.x * c.vel.x + c.vel.z * c.vel.z);
-  const isMoving   = c.onGround && horizSpeed > 0.3;
+  const vx = c.vel.x;
+  const vz = c.vel.z;
+  const speed = Math.sqrt(vx * vx + vz * vz);
 
-  // --- Advance animation phases ---
-  // Walk frequency: cycles proportional to speed (2.5 cycles/m ≈ per second at 4 m/s)
-  if (isMoving) {
-    state.anim.walkPhase += horizSpeed * 2.5 * dt;
-  }
-  // Breathing: ~0.5 Hz
-  state.anim.breathPhase += Math.PI * 2 * 0.5 * dt; // 0.5 Hz
+  const { fwd, right } = projectVelocityToLocal(vx, vz, c.yaw);
+  const targetClip = pickLocomotionClip(fwd, right, speed, c.onGround, true);
 
-  // --- Crouch: lower root node Y ---
-  if (limbs.root !== null) {
-    const rootTargetY = crouchRootOffsetY(c.crouching);
-    const currentY    = limbs.root.position.y;
-    limbs.root.position.y = currentY + (rootTargetY - currentY) * Math.min(1, 14 * dt);
+  // --- Locomotion crossfade ---
+  if (targetClip !== ms.currentClip) {
+    _crossfadeTo(ms, targetClip, CROSSFADE_DURATION, true);
   }
 
-  // --- Breathing (idle head bob) ---
-  // Use the resting Y captured at clone time (stored in state.headRestY).
-  // No per-frame allocation.
-  if (limbs.head !== null) {
-    const bob = breathingBobY(state.anim.breathPhase);
-    limbs.head.position.y = state.headRestY + bob;
-  }
-
-  // --- Walk animation ---
-  if (isMoving) {
-    const walkAmp = Math.min(horizSpeed / 5, 1) * 0.45; // max ≈0.45 rad
-
-    // Legs: opposite phase sinusoids
-    if (limbs.legLeft  !== null) limbs.legLeft.rotation.x  = legSwingAngle(state.anim.walkPhase, true,  walkAmp);
-    if (limbs.legRight !== null) limbs.legRight.rotation.x = legSwingAngle(state.anim.walkPhase, false, walkAmp);
-
-    // Arms: counter-swing (reduced amplitude)
-    const armAmp = walkAmp * 0.5;
-    if (limbs.armLeft  !== null) limbs.armLeft.rotation.x  = armSwingAngle(state.anim.walkPhase, true,  armAmp);
-    if (limbs.armRight !== null) limbs.armRight.rotation.x = armSwingAngle(state.anim.walkPhase, false, armAmp);
-
-    // Slight torso lean forward at run speed
-    if (limbs.torso !== null) {
-      const leanTarget = Math.min(horizSpeed / 6, 1) * (-0.12); // slight forward lean
-      limbs.torso.rotation.x += (leanTarget - limbs.torso.rotation.x) * Math.min(1, 8 * dt);
+  // --- timeScale for foot-slide control ---
+  // Use ms.activeAction (the action currently playing) rather than a name lookup, so
+  // timeScale always drives the action actually in control even mid-crossfade.
+  if (ms.activeAction !== null) {
+    const activeClipName = ms.activeAction.getClip().name;
+    if (activeClipName === 'Walk') {
+      ms.activeAction.timeScale = locomotionTimeScale(speed, REF_WALK_SPEED);
+    } else if (
+      activeClipName === 'Run' || activeClipName === 'Run_Back' ||
+      activeClipName === 'Run_Left' || activeClipName === 'Run_Right'
+    ) {
+      ms.activeAction.timeScale = locomotionTimeScale(speed, REF_RUN_SPEED);
+    } else {
+      ms.activeAction.timeScale = 1;
     }
-  } else {
-    // Return limbs to neutral
-    if (limbs.legLeft  !== null) limbs.legLeft.rotation.x  *= (1 - Math.min(1, 12 * dt));
-    if (limbs.legRight !== null) limbs.legRight.rotation.x *= (1 - Math.min(1, 12 * dt));
-    if (limbs.armLeft  !== null) limbs.armLeft.rotation.x  *= (1 - Math.min(1, 12 * dt));
-    if (limbs.armRight !== null) limbs.armRight.rotation.x *= (1 - Math.min(1, 12 * dt));
-    if (limbs.torso    !== null) limbs.torso.rotation.x    *= (1 - Math.min(1, 8  * dt));
   }
+
+  // --- Advance mixer ---
+  ms.mixer.update(dt);
+
+  // --- Post-mixer: crouch bone adjustment ---
+  const targetCrouch = c.crouching ? 1 : 0;
+  ms.crouchFactor += (targetCrouch - ms.crouchFactor) * Math.min(1, 14 * dt);
+
+  const assets = (c.team === 'CT') ? _sourceAssets.ct : _sourceAssets.t;
+  const ns = assets?.normalScale ?? 1;
+
+  if (ms.hipsBone !== null && ms.crouchFactor > 0.001) {
+    const offset = crouchHipsOffsetY(ms.crouchFactor, ns);
+    ms.hipsBone.position.y += offset;
+  }
+  if (ms.abdomenBone !== null && ms.crouchFactor > 0.001) {
+    const tilt = crouchAbdomenTilt(ms.crouchFactor);
+    ms.abdomenBone.rotation.x = tilt;
+  } else if (ms.abdomenBone !== null) {
+    ms.abdomenBone.rotation.x = 0;
+  }
+
+  // --- Third-person weapon attachment ---
+  _updateWeaponAttachment(ms, c);
+}
+
+// ---------------------------------------------------------------------------
+// Crossfade helper
+// ---------------------------------------------------------------------------
+
+function _crossfadeTo(
+  ms: AnimMixerState,
+  clipName: string,
+  duration: number,
+  loop: boolean,
+): void {
+  // Record the REQUESTED name immediately so the per-frame guard (targetClip !== ms.currentClip)
+  // suppresses re-requests even when the clip is missing and falls back to a shared fallback.
+  ms.currentClip = clipName;
+
+  const target = ms.actions.get(clipName) ??
+                 ms.actions.get('Idle')    ??
+                 null;
+  if (target === null) return;
+
+  // Bail out early if the resolved target is already the active action.
+  // This prevents self-crossfade when two distinct missing clips both resolve to the same
+  // fallback (e.g. 'Idle').  Unlike isRunning(), this does NOT bail on a mid-fade-out
+  // action — a legitimate Walk→Run→Walk within a fade window will correctly re-enter Walk.
+  if (target === ms.activeAction) return;
+
+  const prevAction = ms.activeAction;
+
+  target.reset();
+  target.setLoop(loop ? THREE.LoopRepeat : THREE.LoopOnce, Infinity);
+  if (!loop) {
+    target.clampWhenFinished = true;
+  }
+
+  if (prevAction !== null && duration > 0) {
+    target.fadeIn(duration);
+    prevAction.fadeOut(duration);
+  } else if (prevAction !== null) {
+    prevAction.stop();
+  }
+  target.play();
+
+  ms.activeAction = target;
+}
+
+// ---------------------------------------------------------------------------
+// Weapon attachment update
+// ---------------------------------------------------------------------------
+
+function _updateWeaponAttachment(ms: AnimMixerState, c: Combatant): void {
+  // Resolve current weapon id
+  const slot = c.inventory.activeSlot;
+  const weaponState = c.inventory[slot];
+  const weaponId = weaponState?.def?.id ?? '';
+
+  // Map to file stem
+  const stem = THIRD_PERSON_WEAPON_FILES[weaponId] ?? '';
+
+  if (stem === ms.attachedStem) return; // no change
+
+  // Remove old attachment
+  if (ms.currentWeaponAttach !== null && ms.wristRBone !== null) {
+    ms.wristRBone.remove(ms.currentWeaponAttach);
+    ms.currentWeaponAttach = null;
+  }
+  ms.attachedStem = stem;
+
+  if (stem === '' || ms.wristRBone === null) return;
+
+  // Check if source model is available
+  const sourceModel = _weaponModels.get(stem);
+  if (sourceModel === undefined) return;
+
+  // Use cached clone or create a new one
+  let weaponClone = ms.weaponCache.get(stem);
+  if (weaponClone === undefined) {
+    weaponClone = sourceModel.clone(true);
+    ms.weaponCache.set(stem, weaponClone);
+  }
+
+  // Apply tuning
+  const tuning = WEAPON_ATTACH_OVERRIDES[stem] ?? DEFAULT_WEAPON_ATTACH;
+  const [px, py, pz] = tuning.pos;
+  const [rx, ry, rz] = tuning.rot;
+  weaponClone.position.set(px, py, pz);
+  weaponClone.rotation.set(rx, ry, rz);
+  // Compensate for the inner-group's normalScale so the weapon renders at tuning.scale
+  // in world units (the wrist bone lives inside the inner group scaled to normalScale).
+  weaponClone.scale.setScalar(tuning.scale / ms.normalScale);
+
+  ms.wristRBone.add(weaponClone);
+  ms.currentWeaponAttach = weaponClone;
 }
 
 // ---------------------------------------------------------------------------
@@ -467,13 +843,11 @@ function _updateProceduralMesh(
   dt: number,
   _now: number,
 ): void {
-  // Crouch: scale Y, keeping feet grounded.
   const targetScaleY = c.crouching
     ? MOVEMENT.PLAYER_HEIGHT_CROUCH / MOVEMENT.PLAYER_HEIGHT
     : 1.0;
   group.scale.y += (targetScaleY - group.scale.y) * Math.min(1, 14 * dt);
 
-  // Death.
   if (state.prevAlive && !c.alive) {
     state.deadTimer = 0;
   }
@@ -488,7 +862,7 @@ function _updateProceduralMesh(
     group.position.y = c.pos.y - 0.1 * t;
   } else {
     if (state.deadTimer >= 0) {
-      state.deadTimer  = -1;
+      state.deadTimer = -1;
     }
     group.rotation.z = 0;
 
