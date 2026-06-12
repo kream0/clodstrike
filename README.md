@@ -111,6 +111,7 @@ Team-exclusive weapons are enforced at purchase time — a CT can never buy an A
 - **Two maps**: the dust2 fidelity rebuild plus a faithful low-poly **de_mirage** — window room overlooking mid (with the jump-out), palace balcony drop onto A, apps → kitchen → B route, market/arches CT side, underpass, and the iconic prop cover (van, triple box, tetris, firebox) — built from community-derived dimensional data on the same 96×96 ASCII grid, with its own 44-test BFS connectivity suite.
 - **Match-end stats screen**: full-screen panel on match end with winner headline, final score, and per-team tables — kills, deaths, headshot %, damage dealt, MVP rounds (defuser > planter > top fragger), money spent — plus a Play Again button. Stats accumulate silently all match via the `gameEvents` bus.
 - **Death spectate**: short death cam, then first-person spectate of living teammates until the round ends — click cycles targets, auto-advances when the spectated bot dies, HUD shows who you're watching.
+- **Round replay**: the sim is fully deterministic (per-system seeded RNG streams), so every round is re-watchable — an always-on recorder logs your per-tick inputs + the match seed, and "Watch Last Round" (pause menu) / "Watch Final Round" (match-end screen) re-simulate it through the identical engine code path, fast-forwarding to the round and playing back at exact recorded speed. Esc exits.
 - **Plant / defuse progress bar** overlaid on-screen while holding E.
 - All HUD is DOM with CSS injected from `hud.ts` at construction — no external `.css` files.
 
@@ -147,7 +148,6 @@ Team-exclusive weapons are enforced at purchase time — a CT can never buy an A
 
 ### Medium term
 
-- **Replay / demo** — serialize `clock.now`, player inputs, and bot FSM state per tick for round playback.
 
 ### Long term
 
@@ -171,7 +171,7 @@ bun install
 |:---|:---|
 | `bun run dev` | Dev server at http://localhost:3000 — fresh bundle on every reload (works on Bun 1.1+) |
 | `bun run check` | TypeScript type-check only (`tsc --noEmit`) |
-| `bun test` | Run the test suite (1114 tests) |
+| `bun test` | Run the test suite (1143 tests) |
 | `bun run build` | Bundle for production into `dist/` (~1.1 MB) |
 
 ## Controls

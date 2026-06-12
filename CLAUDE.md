@@ -34,7 +34,7 @@ Routine work (picking features, creating tasks, spawning agents, committing to m
 
 - **Stack**: Bun 1.3, TypeScript strict (`tsc --noEmit` = `bun run check`), three@0.184. NO Vite.
 - **Entry**: `index.html` → `src/main.ts` — fixed-step simulation at 128 Hz with accumulator loop; render at RAF. Exported `clock.now` (game-time seconds) is THE time source for all game logic.
-- **Validation gate**: `bun run check && bun test && bun run build` — all three must pass before any commit. Tests baseline is **1114 tests green**; never let the suite shrink. (Two known intermittents — re-run once before treating as a regression: "F2: guard facing", "Flash blindness re-acquire".)
+- **Validation gate**: `bun run check && bun test && bun run build` — all three must pass before any commit. Tests baseline is **1143 tests green**; never let the suite shrink. (Two known intermittents — re-run once before treating as a regression: "F2: guard facing", "Flash blindness re-acquire".)
 - **Sim randomness is SEEDED** (`src/rng.ts`): all sim-state randomness flows through `game.rng`'s five per-system streams (combat/botAim/botDecision/botNav/round) so same-seed runs replay identically (`determinism.test.ts` enforces this). NEVER add `Math.random()` to a sim path — use the right stream; cosmetic paths (effects/audio/builder tint) may keep `Math.random()`.
 - **Dev server**: `bun run dev` → http://localhost:3000 (`scripts/dev.ts`, per-request Bun.build — works on Bun 1.1+)
 - **Repo**: https://github.com/kream0/clodstrike
@@ -53,6 +53,8 @@ src/
   types.ts          # FROZEN contract — all interfaces, constants, event types
   constants.ts      # WEAPONS, MOVEMENT, ECONOMY, RULES, BOT_DIFFICULTY values
   events.ts         # Tiny strongly-typed Emitter<E> (no deps)
+  rng.ts            # Seeded PRNG streams (GameRng) — ALL sim randomness flows through these
+  replay.ts         # Replay recorder + log format + playback cursor (pure library)
   math.ts           # clamp, normalize, yawPitchToDir, angleDiff, randSpread, DDA
   input.ts          # Pointer-lock, WASD, mouse delta, wheel, wasPressed edges
   world.ts          # Walkable world: floorAt, moveAABB (swept axis-sep.), raycast DDA
@@ -134,7 +136,7 @@ Every agent prompt must include:
 ### Validation gate (full)
 
 1. `bun run check` — zero TypeScript errors
-2. `bun test` — **1114 or more** tests green (never let the suite shrink)
+2. `bun test` — **1143 or more** tests green (never let the suite shrink)
 3. `bun run build` — completes; warn if bundle grows past 1.5 MB (baseline ~1.1 MB)
 4. Browser smoke where possible (pointer-lock caveat — see Known gotchas)
 
