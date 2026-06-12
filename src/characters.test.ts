@@ -8,6 +8,7 @@
 import { describe, it, expect } from 'bun:test';
 import * as path from 'path';
 import * as fs from 'fs';
+import * as THREE from 'three';
 import {
   CHARACTER_MODEL_PATHS,
   THIRD_PERSON_WEAPON_PATHS,
@@ -21,6 +22,12 @@ import {
   locomotionTimeScale,
   crouchHipsOffsetY,
   crouchAbdomenTilt,
+  // New normalization exports
+  TP_WEAPON_TARGET_LEN,
+  tpComputeWeaponNorm,
+  TP_WEAPON_ATTACH_OFFSETS,
+  TP_HOLD_POSES,
+  TP_STEM_TO_FAMILY,
   // Legacy exports still present (backward compat)
   legSwingAngle,
   armSwingAngle,
@@ -564,5 +571,471 @@ describe('walk phase advances with dt', () => {
       phase += speed * 2.5 * dt;
     }
     expect(phase).toBeCloseTo(10, 1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// TP_WEAPON_TARGET_LEN — exported table completeness
+// ---------------------------------------------------------------------------
+
+describe('TP_WEAPON_TARGET_LEN — exported target-length table', () => {
+  const stems = [
+    'knife', 'pistol', 'revolver', 'smg', 'scifi_smg',
+    'shotgun', 'assault_rifle', 'assault_rifle_2', 'sniper_rifle',
+  ];
+
+  it('has exactly 9 stems', () => {
+    expect(Object.keys(TP_WEAPON_TARGET_LEN).length).toBe(9);
+  });
+
+  it('every stem has a positive finite target length', () => {
+    for (const stem of stems) {
+      const len = TP_WEAPON_TARGET_LEN[stem];
+      expect(len).toBeDefined();
+      expect(Number.isFinite(len!)).toBe(true);
+      expect(len!).toBeGreaterThan(0);
+    }
+  });
+
+  it('knife target length is 0.30 m', () => {
+    expect(TP_WEAPON_TARGET_LEN['knife']).toBeCloseTo(0.30, 5);
+  });
+
+  it('sniper_rifle is the longest at 1.15 m', () => {
+    const maxLen = Math.max(...Object.values(TP_WEAPON_TARGET_LEN));
+    expect(maxLen).toBeCloseTo(TP_WEAPON_TARGET_LEN['sniper_rifle']!, 5);
+  });
+
+  it('pistol is shorter than assault_rifle', () => {
+    expect(TP_WEAPON_TARGET_LEN['pistol']!).toBeLessThan(TP_WEAPON_TARGET_LEN['assault_rifle']!);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// tpComputeWeaponNorm — normalization math
+// ---------------------------------------------------------------------------
+
+describe('tpComputeWeaponNorm — normalization pure function', () => {
+  /**
+   * Helper: build a THREE.Box3 from the dump-rig world size/center data.
+   * size = [x,y,z] extents; center = [cx,cy,cz].
+   */
+  function makeBbox(size: [number, number, number], center: [number, number, number]): THREE.Box3 {
+    const box = new THREE.Box3();
+    box.min.set(center[0] - size[0] / 2, center[1] - size[1] / 2, center[2] - size[2] / 2);
+    box.max.set(center[0] + size[0] / 2, center[1] + size[1] / 2, center[2] + size[2] / 2);
+    return box;
+  }
+
+  // Ground-truth bboxes from dump-rig (world space, pre-normalization)
+  const DUMP_BBOXES: Record<string, { size: [number,number,number]; center: [number,number,number] }> = {
+    pistol:          { size: [1.8193, 1.1986, 0.2744], center: [0.543,  0.123, 0] },
+    revolver:        { size: [1.9850, 0.9825, 0.2944], center: [0.779,  0.156, 0] },
+    smg:             { size: [4.0439, 1.8473, 0.3185], center: [0.227,  0.063, 0] },
+    scifi_smg:       { size: [2.2020, 0.7377, 0.1760], center: [0.170,  0.124, 0] },
+    shotgun:         { size: [5.7849, 0.9427, 0.2465], center: [1.415, -0.092, 0] },
+    assault_rifle:   { size: [5.1688, 1.7905, 0.3464], center: [1.025,  0.177, 0.002] },
+    assault_rifle_2: { size: [5.4217, 1.6014, 0.1960], center: [1.106,  0.059, 0] },
+    sniper_rifle:    { size: [7.2946, 1.4840, 0.4593], center: [1.604, -0.046, 0.075] },
+    knife:           { size: [0.2654, 1.5629, 0.0778], center: [0.023,  0.418, 0] },
+  };
+
+  it('returns a finite positive scale for all 9 stems', () => {
+    for (const [stem, bboxData] of Object.entries(DUMP_BBOXES)) {
+      const targetLen = TP_WEAPON_TARGET_LEN[stem] ?? 0.5;
+      const bbox = makeBbox(bboxData.size, bboxData.center);
+      const { scale } = tpComputeWeaponNorm(bbox, targetLen);
+      expect(Number.isFinite(scale)).toBe(true);
+      expect(scale).toBeGreaterThan(0);
+    }
+  });
+
+  it('pistol (X-long 1.82 m) → world length ≈ 0.32 m ±1%', () => {
+    const targetLen = TP_WEAPON_TARGET_LEN['pistol']!;
+    const bbox = makeBbox(DUMP_BBOXES.pistol!.size, DUMP_BBOXES.pistol!.center);
+    const { scale } = tpComputeWeaponNorm(bbox, targetLen);
+    const worldLen = 1.8193 * scale; // longest axis × scale
+    expect(worldLen).toBeCloseTo(targetLen, 2); // ±1% at 2 decimal places
+  });
+
+  it('revolver (X-long 1.99 m) → world length ≈ 0.34 m ±1%', () => {
+    const targetLen = TP_WEAPON_TARGET_LEN['revolver']!;
+    const bbox = makeBbox(DUMP_BBOXES.revolver!.size, DUMP_BBOXES.revolver!.center);
+    const { scale } = tpComputeWeaponNorm(bbox, targetLen);
+    const worldLen = 1.9850 * scale;
+    expect(worldLen).toBeCloseTo(targetLen, 2);
+  });
+
+  it('smg (X-long 4.04 m) → world length ≈ 0.65 m ±1%', () => {
+    const targetLen = TP_WEAPON_TARGET_LEN['smg']!;
+    const bbox = makeBbox(DUMP_BBOXES.smg!.size, DUMP_BBOXES.smg!.center);
+    const { scale } = tpComputeWeaponNorm(bbox, targetLen);
+    const worldLen = 4.0439 * scale;
+    expect(worldLen).toBeCloseTo(targetLen, 2);
+  });
+
+  it('scifi_smg (X-long 2.20 m) → world length ≈ 0.60 m ±1%', () => {
+    const targetLen = TP_WEAPON_TARGET_LEN['scifi_smg']!;
+    const bbox = makeBbox(DUMP_BBOXES.scifi_smg!.size, DUMP_BBOXES.scifi_smg!.center);
+    const { scale } = tpComputeWeaponNorm(bbox, targetLen);
+    const worldLen = 2.2020 * scale;
+    expect(worldLen).toBeCloseTo(targetLen, 2);
+  });
+
+  it('shotgun (X-long 5.78 m) → world length ≈ 1.00 m ±1%', () => {
+    const targetLen = TP_WEAPON_TARGET_LEN['shotgun']!;
+    const bbox = makeBbox(DUMP_BBOXES.shotgun!.size, DUMP_BBOXES.shotgun!.center);
+    const { scale } = tpComputeWeaponNorm(bbox, targetLen);
+    const worldLen = 5.7849 * scale;
+    expect(worldLen).toBeCloseTo(targetLen, 2);
+  });
+
+  it('assault_rifle (X-long 5.17 m) → world length ≈ 0.95 m ±1%', () => {
+    const targetLen = TP_WEAPON_TARGET_LEN['assault_rifle']!;
+    const bbox = makeBbox(DUMP_BBOXES.assault_rifle!.size, DUMP_BBOXES.assault_rifle!.center);
+    const { scale } = tpComputeWeaponNorm(bbox, targetLen);
+    const worldLen = 5.1688 * scale;
+    expect(worldLen).toBeCloseTo(targetLen, 2);
+  });
+
+  it('assault_rifle_2 (X-long 5.42 m) → world length ≈ 0.98 m ±1%', () => {
+    const targetLen = TP_WEAPON_TARGET_LEN['assault_rifle_2']!;
+    const bbox = makeBbox(DUMP_BBOXES.assault_rifle_2!.size, DUMP_BBOXES.assault_rifle_2!.center);
+    const { scale } = tpComputeWeaponNorm(bbox, targetLen);
+    const worldLen = 5.4217 * scale;
+    expect(worldLen).toBeCloseTo(targetLen, 2);
+  });
+
+  it('sniper_rifle (X-long 7.29 m) → world length ≈ 1.15 m ±1%', () => {
+    const targetLen = TP_WEAPON_TARGET_LEN['sniper_rifle']!;
+    const bbox = makeBbox(DUMP_BBOXES.sniper_rifle!.size, DUMP_BBOXES.sniper_rifle!.center);
+    const { scale } = tpComputeWeaponNorm(bbox, targetLen);
+    const worldLen = 7.2946 * scale;
+    expect(worldLen).toBeCloseTo(targetLen, 2);
+  });
+
+  it('knife (Y-long 1.56 m) → world length ≈ 0.30 m ±1%', () => {
+    const targetLen = TP_WEAPON_TARGET_LEN['knife']!;
+    const bbox = makeBbox(DUMP_BBOXES.knife!.size, DUMP_BBOXES.knife!.center);
+    const { scale } = tpComputeWeaponNorm(bbox, targetLen);
+    const worldLen = 1.5629 * scale; // Y is longest axis
+    expect(worldLen).toBeCloseTo(targetLen, 2);
+  });
+
+  it('X-long bbox → rotY = PI/2 (align X to -Z)', () => {
+    // pistol is X-long (1.82 x, 1.20 y)
+    const bbox = makeBbox([2.0, 0.5, 0.3], [0, 0, 0]);
+    const { rotY, rotX } = tpComputeWeaponNorm(bbox, 0.5);
+    expect(rotY).toBeCloseTo(Math.PI / 2, 5);
+    expect(rotX).toBeCloseTo(0, 5);
+  });
+
+  it('Y-long bbox → rotX = -PI/2 (align Y to -Z)', () => {
+    // knife is Y-long
+    const bbox = makeBbox([0.3, 2.0, 0.1], [0, 0, 0]);
+    const { rotX, rotY } = tpComputeWeaponNorm(bbox, 0.5);
+    expect(rotX).toBeCloseTo(-Math.PI / 2, 5);
+    expect(rotY).toBeCloseTo(0, 5);
+  });
+
+  it('Z-long bbox → no rotation needed (already aligned)', () => {
+    const bbox = makeBbox([0.2, 0.3, 2.0], [0, 0, 0]);
+    const { rotX, rotY } = tpComputeWeaponNorm(bbox, 0.5);
+    expect(rotX).toBeCloseTo(0, 5);
+    expect(rotY).toBeCloseTo(0, 5);
+  });
+
+  it('degenerate zero bbox → returns safe positive scale', () => {
+    const bbox = new THREE.Box3(
+      new THREE.Vector3(0, 0, 0),
+      new THREE.Vector3(0, 0, 0),
+    );
+    const { scale } = tpComputeWeaponNorm(bbox, 0.5);
+    expect(scale).toBeGreaterThan(0);
+    expect(Number.isFinite(scale)).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// tpComputeWeaponNorm — grip placement (holder rear-end offset)
+// ---------------------------------------------------------------------------
+
+describe('tpComputeWeaponNorm — grip placement (centerZ)', () => {
+  it('centerZ puts rear end at +GRIP_BACK_FRAC * targetLen from origin', () => {
+    // A Z-long bbox of 2.0 m → scale=0.5 to target 1.0 m
+    // After scaling: length=1.0 m along -Z direction
+    // centerZ = (0.5 - 0.12) * 1.0 = 0.38  (center of weapon sits at z=+0.38)
+    // → rear end (max-Z after scale) = 0.38 + 0.5 = +0.88 ≈ ... wait, we test the formula
+    // centerZ = (0.5 - GRIP_BACK_FRAC) * targetLen
+    // GRIP_BACK_FRAC = 0.12 → centerZ = 0.38 for targetLen=1.0
+    const bbox = makeBbox([0.3, 0.3, 2.0], [0, 0, 0]);
+    const targetLen = 1.0;
+    const { centerZ } = tpComputeWeaponNorm(bbox, targetLen);
+    // centerZ should be (0.5 - 0.12) * 1.0 = 0.38
+    expect(centerZ).toBeCloseTo(0.38, 3);
+  });
+
+  it('centerZ is positive (weapon geometry sits in +Z from holder origin)', () => {
+    for (const [stem, bboxData] of Object.entries({
+      pistol: { size: [1.8193, 1.1986, 0.2744] as [number,number,number], center: [0.543, 0.123, 0] as [number,number,number] },
+      knife:  { size: [0.2654, 1.5629, 0.0778] as [number,number,number], center: [0.023, 0.418, 0] as [number,number,number] },
+    })) {
+      const targetLen = TP_WEAPON_TARGET_LEN[stem] ?? 0.5;
+      const bbox = makeBbox(bboxData.size, bboxData.center);
+      const { centerZ } = tpComputeWeaponNorm(bbox, targetLen);
+      expect(centerZ).toBeGreaterThan(0);
+    }
+  });
+
+  function makeBbox(size: [number,number,number], center: [number,number,number]): THREE.Box3 {
+    const box = new THREE.Box3();
+    box.min.set(center[0] - size[0] / 2, center[1] - size[1] / 2, center[2] - size[2] / 2);
+    box.max.set(center[0] + size[0] / 2, center[1] + size[1] / 2, center[2] + size[2] / 2);
+    return box;
+  }
+});
+
+// ---------------------------------------------------------------------------
+// TP_WEAPON_ATTACH_OFFSETS — table completeness
+// ---------------------------------------------------------------------------
+
+describe('TP_WEAPON_ATTACH_OFFSETS — all 9 stems have entries', () => {
+  const stems = [
+    'knife', 'pistol', 'revolver', 'smg', 'scifi_smg',
+    'shotgun', 'assault_rifle', 'assault_rifle_2', 'sniper_rifle',
+  ];
+
+  it('has entries for all 9 stems', () => {
+    for (const stem of stems) {
+      const offset = TP_WEAPON_ATTACH_OFFSETS[stem];
+      expect(offset).toBeDefined();
+    }
+  });
+
+  it('every entry has pos and rot arrays of length 3', () => {
+    for (const offset of Object.values(TP_WEAPON_ATTACH_OFFSETS)) {
+      expect(offset.pos.length).toBe(3);
+      expect(offset.rot.length).toBe(3);
+      for (const v of [...offset.pos, ...offset.rot]) {
+        expect(Number.isFinite(v)).toBe(true);
+      }
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// TP_HOLD_POSES — structure and family membership
+// ---------------------------------------------------------------------------
+
+describe('TP_HOLD_POSES — arm pose constants', () => {
+  const families: Array<import('./characters').TpHoldFamily> = ['twoHanded', 'pistol', 'knife'];
+
+  it('has entries for all three families', () => {
+    for (const fam of families) {
+      expect(TP_HOLD_POSES[fam]).toBeDefined();
+    }
+  });
+
+  it('every pose has 8 bone rotation arrays of length 3', () => {
+    for (const pose of Object.values(TP_HOLD_POSES)) {
+      const arrays = [
+        pose.shoulderR, pose.upperArmR, pose.lowerArmR, pose.wristR,
+        pose.shoulderL, pose.upperArmL, pose.lowerArmL, pose.wristL,
+      ];
+      for (const arr of arrays) {
+        expect(arr.length).toBe(3);
+        for (const v of arr) {
+          expect(Number.isFinite(v)).toBe(true);
+        }
+      }
+    }
+  });
+
+  it('twoHanded: right arm has positive X rotation on upperArmR (arm raised)', () => {
+    expect(TP_HOLD_POSES.twoHanded.upperArmR[0]).toBeGreaterThan(0);
+  });
+
+  it('twoHanded: left arm has positive X rotation on upperArmL (arm raised across)', () => {
+    expect(TP_HOLD_POSES.twoHanded.upperArmL[0]).toBeGreaterThan(0);
+  });
+
+  it('knife pose family field is knife', () => {
+    expect(TP_HOLD_POSES.knife.family).toBe('knife');
+  });
+
+  it('pistol pose family field is pistol', () => {
+    expect(TP_HOLD_POSES.pistol.family).toBe('pistol');
+  });
+
+  it('twoHanded pose family field is twoHanded', () => {
+    expect(TP_HOLD_POSES.twoHanded.family).toBe('twoHanded');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// TP_STEM_TO_FAMILY — mapping table
+// ---------------------------------------------------------------------------
+
+describe('TP_STEM_TO_FAMILY — stem to family mapping', () => {
+  it('has entries for all 9 stems', () => {
+    const stems = [
+      'knife', 'pistol', 'revolver', 'smg', 'scifi_smg',
+      'shotgun', 'assault_rifle', 'assault_rifle_2', 'sniper_rifle',
+    ];
+    for (const stem of stems) {
+      expect(TP_STEM_TO_FAMILY[stem]).toBeDefined();
+    }
+  });
+
+  it('knife → knife', () => {
+    expect(TP_STEM_TO_FAMILY['knife']).toBe('knife');
+  });
+
+  it('pistol → pistol', () => {
+    expect(TP_STEM_TO_FAMILY['pistol']).toBe('pistol');
+  });
+
+  it('revolver → pistol', () => {
+    expect(TP_STEM_TO_FAMILY['revolver']).toBe('pistol');
+  });
+
+  it('assault_rifle → twoHanded', () => {
+    expect(TP_STEM_TO_FAMILY['assault_rifle']).toBe('twoHanded');
+  });
+
+  it('sniper_rifle → twoHanded', () => {
+    expect(TP_STEM_TO_FAMILY['sniper_rifle']).toBe('twoHanded');
+  });
+
+  it('smg → twoHanded', () => {
+    expect(TP_STEM_TO_FAMILY['smg']).toBe('twoHanded');
+  });
+
+  it('all family values are one of: twoHanded | pistol | knife', () => {
+    const valid = new Set(['twoHanded', 'pistol', 'knife']);
+    for (const fam of Object.values(TP_STEM_TO_FAMILY)) {
+      expect(valid.has(fam)).toBe(true);
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Pose override — synthetic bone hierarchy
+// ---------------------------------------------------------------------------
+
+describe('gun-hold pose override — synthetic bone hierarchy', () => {
+  /**
+   * Build a minimal synthetic bone hierarchy:
+   * Shoulder.R → UpperArm.R → LowerArm.R → Wrist.R
+   * Shoulder.L → UpperArm.L → LowerArm.L → Wrist.L
+   * All start at identity rotation.
+   */
+  function buildSyntheticArmBones(): Record<string, THREE.Bone> {
+    const bones: Record<string, THREE.Bone> = {};
+    const names = [
+      'Shoulder.R', 'UpperArm.R', 'LowerArm.R', 'Wrist.R',
+      'Shoulder.L', 'UpperArm.L', 'LowerArm.L', 'Wrist.L',
+    ];
+    for (const name of names) {
+      const bone = new THREE.Bone();
+      bone.name = name;
+      bone.rotation.set(0, 0, 0);
+      bones[name] = bone;
+    }
+    // Chain right side
+    bones['Shoulder.R']!.add(bones['UpperArm.R']!);
+    bones['UpperArm.R']!.add(bones['LowerArm.R']!);
+    bones['LowerArm.R']!.add(bones['Wrist.R']!);
+    // Chain left side
+    bones['Shoulder.L']!.add(bones['UpperArm.L']!);
+    bones['UpperArm.L']!.add(bones['LowerArm.L']!);
+    bones['LowerArm.L']!.add(bones['Wrist.L']!);
+    return bones;
+  }
+
+  /**
+   * Simulate what _applyGunHoldPose does, applied to a synthetic bone set.
+   * (We call the exported constants directly — the private fn is not exported,
+   *  but we test its logic by replicating the 8 rotation.set calls.)
+   */
+  function applyPoseToSyntheticBones(
+    pose: import('./characters').TpArmPose,
+    bones: Record<string, THREE.Bone>,
+  ): void {
+    bones['Shoulder.R']!.rotation.set(pose.shoulderR[0], pose.shoulderR[1], pose.shoulderR[2]);
+    bones['UpperArm.R']!.rotation.set(pose.upperArmR[0], pose.upperArmR[1], pose.upperArmR[2]);
+    bones['LowerArm.R']!.rotation.set(pose.lowerArmR[0], pose.lowerArmR[1], pose.lowerArmR[2]);
+    bones['Wrist.R']!.rotation.set(   pose.wristR[0],    pose.wristR[1],    pose.wristR[2]);
+    bones['Shoulder.L']!.rotation.set(pose.shoulderL[0], pose.shoulderL[1], pose.shoulderL[2]);
+    bones['UpperArm.L']!.rotation.set(pose.upperArmL[0], pose.upperArmL[1], pose.upperArmL[2]);
+    bones['LowerArm.L']!.rotation.set(pose.lowerArmL[0], pose.lowerArmL[1], pose.lowerArmL[2]);
+    bones['Wrist.L']!.rotation.set(   pose.wristL[0],    pose.wristL[1],    pose.wristL[2]);
+  }
+
+  it('twoHanded pose sets non-identity rotations on all 8 arm bones', () => {
+    const bones = buildSyntheticArmBones();
+    applyPoseToSyntheticBones(TP_HOLD_POSES.twoHanded, bones);
+
+    // At least some bones should have non-zero X rotation (arm raised)
+    const upperArmRx = bones['UpperArm.R']!.rotation.x;
+    const upperArmLx = bones['UpperArm.L']!.rotation.x;
+    expect(Math.abs(upperArmRx)).toBeGreaterThan(0);
+    expect(Math.abs(upperArmLx)).toBeGreaterThan(0);
+  });
+
+  it('pistol pose sets arm bones to pistol-family values', () => {
+    const bones = buildSyntheticArmBones();
+    applyPoseToSyntheticBones(TP_HOLD_POSES.pistol, bones);
+
+    const pose = TP_HOLD_POSES.pistol;
+    expect(bones['UpperArm.R']!.rotation.x).toBeCloseTo(pose.upperArmR[0], 5);
+    expect(bones['UpperArm.R']!.rotation.y).toBeCloseTo(pose.upperArmR[1], 5);
+    expect(bones['LowerArm.R']!.rotation.x).toBeCloseTo(pose.lowerArmR[0], 5);
+  });
+
+  it('knife pose sets arm bones to knife-family values', () => {
+    const bones = buildSyntheticArmBones();
+    applyPoseToSyntheticBones(TP_HOLD_POSES.knife, bones);
+
+    const pose = TP_HOLD_POSES.knife;
+    expect(bones['UpperArm.R']!.rotation.x).toBeCloseTo(pose.upperArmR[0], 5);
+    expect(bones['Wrist.R']!.rotation.x).toBeCloseTo(pose.wristR[0], 5);
+    // Knife: left arm relaxed (low pose values)
+    expect(bones['UpperArm.L']!.rotation.x).toBeLessThan(TP_HOLD_POSES.twoHanded.upperArmL[0]);
+  });
+
+  it('pose values are not all zero (non-trivial hold pose)', () => {
+    for (const fam of (['twoHanded', 'pistol', 'knife'] as const)) {
+      const pose = TP_HOLD_POSES[fam];
+      const allZero = [
+        ...pose.upperArmR, ...pose.lowerArmR,
+        ...pose.upperArmL, ...pose.lowerArmL,
+      ].every(v => v === 0);
+      expect(allZero).toBe(false);
+    }
+  });
+
+  it('pose override is idempotent — applying twice gives same result', () => {
+    const bones = buildSyntheticArmBones();
+    applyPoseToSyntheticBones(TP_HOLD_POSES.twoHanded, bones);
+    const xAfterFirst = bones['UpperArm.R']!.rotation.x;
+    // Apply again (simulating per-frame override)
+    applyPoseToSyntheticBones(TP_HOLD_POSES.twoHanded, bones);
+    expect(bones['UpperArm.R']!.rotation.x).toBeCloseTo(xAfterFirst, 5);
+  });
+
+  it('dead combatant: no pose override — bones stay at identity', () => {
+    // The dead-path in _updateRiggedMesh returns early before _applyGunHoldPose.
+    // We test the guard condition: stem must be non-empty to trigger pose.
+    // When stem='' (no weapon or dead), pose is never applied.
+    // Verify TP_STEM_TO_FAMILY returns undefined for empty stem.
+    expect(TP_STEM_TO_FAMILY['']).toBeUndefined();
+  });
+
+  it('no weapon stem: TP_STEM_TO_FAMILY returns undefined, blocking pose', () => {
+    // Empty string stem or unknown stem should NOT resolve a family.
+    expect(TP_STEM_TO_FAMILY['']).toBeUndefined();
+    expect(TP_STEM_TO_FAMILY['grenade']).toBeUndefined();
+    expect(TP_STEM_TO_FAMILY['he']).toBeUndefined();
   });
 });

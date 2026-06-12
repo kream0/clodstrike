@@ -193,6 +193,15 @@ function createLoadingOverlay(): {
   return { overlay, setProgress, remove };
 }
 
+// ---------------------------------------------------------------------------
+// URL-param debug modes (parsed once at module load; never affects sim logic)
+// ---------------------------------------------------------------------------
+const _urlParams = new URLSearchParams(location.search);
+/** Mode A — viewmodel inspector. Bypass match/menu/pointer-lock. */
+const DEBUG_INSPECT_VM   = _urlParams.get('inspect') === 'vm';
+/** Mode B — bot-match spectator. Auto-start match; orbit/follow camera. */
+const DEBUG_SPECTATE     = _urlParams.get('spectate') === '1';
+
 async function boot(): Promise<void> {
   const { setProgress, remove: removeOverlay } = createLoadingOverlay();
 
@@ -328,6 +337,132 @@ async function boot(): Promise<void> {
   } finally {
     // Overlay is always removed — even on catastrophic failure
     removeOverlay();
+  }
+
+  // ---------------------------------------------------------------------------
+  // MODE A — ?inspect=vm : viewmodel inspector (early-return, no match flow)
+  // ---------------------------------------------------------------------------
+  if (DEBUG_INSPECT_VM) {
+    // Simple scene: dark background, hemisphere + directional lights.
+    const vmScene = new THREE.Scene();
+    vmScene.background = new THREE.Color(0x111111);
+    vmScene.add(new THREE.HemisphereLight(0xffffff, 0x444444, 0.8));
+    const vmDirLight = new THREE.DirectionalLight(0xffffff, 1.2);
+    vmDirLight.position.set(5, 10, 5);
+    vmScene.add(vmDirLight);
+
+    const vmCamera = new THREE.PerspectiveCamera(74, window.innerWidth / window.innerHeight, 0.05, 300);
+    vmCamera.rotation.order = 'YXZ';
+    vmScene.add(vmCamera);
+
+    // Parse optional params.
+    const vmTeamParam = _urlParams.get('team');
+    const vmTeam: 'CT' | 'T' = vmTeamParam === 'T' ? 'T' : 'CT';
+    const vmWalkParam = _urlParams.get('walk');
+    const vmWalk = vmWalkParam === '1';
+
+    // Create and configure viewmodel.
+    const vmInspector = new ViewModel(vmCamera);
+    vmInspector.setWeaponModelsV2(sharedWeaponModels);
+    vmInspector.setArmsTeam(vmTeam);
+    if (fpArmsGltfResult !== undefined) {
+      vmInspector.setArmsAssets(fpArmsGltfResult);
+    }
+
+    // Weapon list for cycling (subset covering all grip families).
+    const VM_WEAPON_CYCLE: ReadonlyArray<string> = [
+      'knife', 'usp', 'glock', 'deagle',
+      'ak47', 'm4a4', 'awp', 'ssg08',
+      'mp9', 'p90', 'ump45', 'nova', 'm249',
+    ];
+    let vmWeaponIdx = 0;
+    vmInspector.setWeapon(VM_WEAPON_CYCLE[0] ?? 'usp');
+    vmInspector.setVisible(true);
+
+    // Status label — monospace fixed div, no innerHTML used.
+    const vmLabel = document.createElement('div');
+    Object.assign(vmLabel.style, {
+      position:    'fixed',
+      top:         '8px',
+      left:        '8px',
+      color:       '#e8e8e8',
+      fontSize:    '13px',
+      fontFamily:  'monospace',
+      background:  'rgba(0,0,0,0.55)',
+      padding:     '8px 12px',
+      borderRadius:'4px',
+      pointerEvents:'none',
+      zIndex:      '20',
+      lineHeight:  '1.6',
+      whiteSpace:  'pre',
+    });
+    document.body.appendChild(vmLabel);
+
+    function vmUpdateLabel(): void {
+      const id = VM_WEAPON_CYCLE[vmWeaponIdx] ?? '?';
+      vmLabel.textContent =
+        `[INSPECT VM]  weapon: ${id}  team: ${vmTeam}  walk: ${vmWalk}\n` +
+        `N = next  P = prev  F = fire  (${vmWeaponIdx + 1}/${VM_WEAPON_CYCLE.length})`;
+    }
+    vmUpdateLabel();
+
+    // Auto-advance every 2.5 s using wall-clock setInterval (render-only mode).
+    let vmAutoTimer = 0;
+    const VM_AUTO_INTERVAL = 2.5; // seconds
+
+    // Plain keydown listeners (no pointer-lock needed).
+    window.addEventListener('keydown', (e) => {
+      if (e.key === 'n' || e.key === 'N') {
+        vmWeaponIdx = (vmWeaponIdx + 1) % VM_WEAPON_CYCLE.length;
+        vmInspector.setWeapon(VM_WEAPON_CYCLE[vmWeaponIdx] ?? 'usp');
+        vmUpdateLabel();
+        vmAutoTimer = 0; // reset auto-advance on manual step
+      } else if (e.key === 'p' || e.key === 'P') {
+        vmWeaponIdx = (vmWeaponIdx - 1 + VM_WEAPON_CYCLE.length) % VM_WEAPON_CYCLE.length;
+        vmInspector.setWeapon(VM_WEAPON_CYCLE[vmWeaponIdx] ?? 'usp');
+        vmUpdateLabel();
+        vmAutoTimer = 0;
+      } else if (e.key === 'f' || e.key === 'F') {
+        vmInspector.onFire();
+      }
+    });
+
+    // Resize.
+    window.addEventListener('resize', () => {
+      vmCamera.aspect = window.innerWidth / window.innerHeight;
+      vmCamera.updateProjectionMatrix();
+      renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1.5));
+      renderer.setSize(window.innerWidth, window.innerHeight);
+    });
+
+    // RAF loop for inspect mode — no sim ticks.
+    let vmLastTime = performance.now() / 1000;
+    function vmFrame(): void {
+      requestAnimationFrame(vmFrame);
+      const wallNow = performance.now() / 1000;
+      const vmDt = Math.min(wallNow - vmLastTime, 0.1);
+      vmLastTime = wallNow;
+
+      // Auto-advance weapon.
+      vmAutoTimer += vmDt;
+      if (vmAutoTimer >= VM_AUTO_INTERVAL) {
+        vmAutoTimer = 0;
+        vmWeaponIdx = (vmWeaponIdx + 1) % VM_WEAPON_CYCLE.length;
+        vmInspector.setWeapon(VM_WEAPON_CYCLE[vmWeaponIdx] ?? 'usp');
+        vmUpdateLabel();
+      }
+
+      vmInspector.update(vmDt, {
+        speed:    vmWalk ? 4.0 : 0,
+        onGround: true,
+        mouseDx:  0,
+        mouseDy:  0,
+        scoped:   false,
+      });
+      renderer.render(vmScene, vmCamera);
+    }
+    requestAnimationFrame(vmFrame);
+    return; // do not continue normal boot
   }
 
   // --- Scene + environment ---
@@ -579,6 +714,9 @@ async function boot(): Promise<void> {
   input.onLockChange = (locked) => {
     const hint = document.getElementById('lock-hint');
     if (hint) hint.style.display = locked ? 'none' : 'flex';
+
+    // Spectate mode: pointer-lock is never acquired; never pause on lock loss.
+    if (DEBUG_SPECTATE) return;
 
     if (!locked && game.phase !== 'menu' && game.phase !== 'matchEnd') {
       // Pointer lost while in-game → pause.
@@ -1013,8 +1151,121 @@ async function boot(): Promise<void> {
     renderer.setSize(window.innerWidth, window.innerHeight);
   });
 
-  // --- Start with menu ---
-  hud.showMenu('start');
+  // ---------------------------------------------------------------------------
+  // Spectate-mode camera state (only meaningful when DEBUG_SPECTATE is true;
+  // declared here so the frame() closure can close over them).
+  // ---------------------------------------------------------------------------
+  let specOrbit           = true;  // true = orbit, false = follow combatant
+  let specOrbitAngle      = 0;     // radians, advanced each frame
+  let specFollowIdx       = 0;     // index into game.combatants
+  const SPEC_ORBIT_RADIUS = 45;
+  const SPEC_ORBIT_HEIGHT = 40;
+  const SPEC_ORBIT_SPEED  = 0.05;  // rad/s
+  const SPEC_FOLLOW_BACK  = 4;     // m behind target
+  const SPEC_FOLLOW_UP    = 2.5;   // m above target foot
+  const SPEC_FOLLOW_HEAD  = 1.5;   // m above foot for look-at target
+
+  // --- Start with menu (or auto-start in spectate mode) ---
+  if (DEBUG_SPECTATE) {
+    // Hide the lock-hint; no pointer-lock or audio unlock ever attempted.
+    lockHint.style.display = 'none';
+
+    // Resolve map and seed from URL params.
+    const specMapParam = _urlParams.get('map');
+    const specMapId    = (specMapParam !== null && specMapParam.length > 0) ? specMapParam : DEFAULT_MAP_ID;
+    const specSeedStr  = _urlParams.get('seed');
+    const specSeed     = (specSeedStr !== null && specSeedStr.length > 0)
+      ? (parseInt(specSeedStr, 10) || undefined)
+      : undefined;
+
+    // Swap map if requested.
+    swapMap(specMapId);
+
+    const specOpts: MatchOptions = {
+      playerTeam:  'CT',
+      difficulty:  'normal',
+      botsPerTeam: 4,
+      mapId:       specMapId,
+      seed:        specSeed,
+    };
+    game.startMatch(specOpts, clock.now);
+    lastMatchOpts = specOpts;
+    botManager = new BotManager(game, world, navGrid, onBotShot, currentMap);
+    botManager.attach();
+    botManager.setSmokeQuery((a, b) => grenadeManager.isSegmentSmoked(a, b));
+    grenadeManager.reset();
+    prevEquippedGrenade = null;
+    spectateTargetId    = null;
+    deathCamPos         = null;
+    deathCamTilt        = 0;
+    deathCamEnterAt     = 0;
+    globalTick          = 0;
+    // Hide viewmodel — no first-person view in spectate mode.
+    viewmodel.setVisible(false);
+    hud.setSpectateInfo(null);
+    hud.hideMenus();
+
+    // Status label for spectate mode.
+    const specStatusDiv = document.createElement('div');
+    Object.assign(specStatusDiv.style, {
+      position:     'fixed',
+      top:          '8px',
+      left:         '8px',
+      color:        '#e8e8e8',
+      fontSize:     '13px',
+      fontFamily:   'monospace',
+      background:   'rgba(0,0,0,0.55)',
+      padding:      '8px 12px',
+      borderRadius: '4px',
+      pointerEvents:'none',
+      zIndex:       '20',
+      lineHeight:   '1.6',
+      whiteSpace:   'pre',
+    });
+    document.body.appendChild(specStatusDiv);
+
+    function specUpdateStatus(): void {
+      if (specOrbit) {
+        specStatusDiv.textContent = '[SPECTATE]  mode: orbit\n] = follow-next  [ = follow-prev  O = orbit';
+      } else {
+        const tgt = game.combatants[specFollowIdx];
+        const name  = tgt !== undefined ? tgt.name  : '?';
+        const alive = tgt !== undefined ? (tgt.alive ? 'alive' : 'dead') : '?';
+        specStatusDiv.textContent =
+          `[SPECTATE]  following: ${name} (${alive})\n[ = prev  ] = next  O = orbit`;
+      }
+    }
+    specUpdateStatus();
+
+    // Plain keydown bindings — no pointer-lock needed.
+    window.addEventListener('keydown', (e) => {
+      if (e.key === ']') {
+        specOrbit = false;
+        const all = game.combatants;
+        if (all.length > 0) {
+          specFollowIdx = (specFollowIdx + 1) % all.length;
+        }
+        specUpdateStatus();
+      } else if (e.key === '[') {
+        specOrbit = false;
+        const all = game.combatants;
+        if (all.length > 0) {
+          specFollowIdx = (specFollowIdx - 1 + all.length) % all.length;
+        }
+        specUpdateStatus();
+      } else if (e.key === 'o' || e.key === 'O') {
+        specOrbit = true;
+        specUpdateStatus();
+      }
+    });
+
+    // Refresh status each round (combatant list may change).
+    gameEvents.on('roundStart', () => {
+      specUpdateStatus();
+    });
+  } else {
+    hud.showMenu('start');
+  }
 
   // ---------------------------------------------------------------------------
   // Replay sim tick helper — mirrors the live-play tick body but takes
@@ -1586,22 +1837,48 @@ async function boot(): Promise<void> {
     }
 
     // --- Camera placement ---
-    const punch = getViewPunch(player);
-    if (!player.alive && spectateTargetId !== null) {
-      // First-person spectate: view from inside the target's head.
-      const target = game.combatants.find(c => c.id === spectateTargetId);
-      if (target !== undefined) {
-        const eyeOff = target.crouching ? MOVEMENT.EYE_CROUCH : MOVEMENT.EYE_STAND;
-        _specCamPos.set(target.pos.x, target.pos.y + eyeOff, target.pos.z);
-        camera.position.copy(_specCamPos);
-        camera.rotation.set(target.pitch, target.yaw, 0, 'YXZ');
+    if (DEBUG_SPECTATE) {
+      // Spectate-mode camera: orbit or follow a combatant.
+      if (specOrbit) {
+        specOrbitAngle += SPEC_ORBIT_SPEED * frameDt;
+        camera.position.set(
+          Math.sin(specOrbitAngle) * SPEC_ORBIT_RADIUS,
+          SPEC_ORBIT_HEIGHT,
+          Math.cos(specOrbitAngle) * SPEC_ORBIT_RADIUS,
+        );
+        camera.lookAt(0, 2, 0);
+      } else {
+        const tgt = game.combatants[specFollowIdx];
+        if (tgt !== undefined) {
+          // Position 4 m behind and 2.5 m above the target's foot, along its yaw.
+          const sinY = Math.sin(tgt.yaw);
+          const cosY = Math.cos(tgt.yaw);
+          camera.position.set(
+            tgt.pos.x + sinY * SPEC_FOLLOW_BACK,
+            tgt.pos.y + SPEC_FOLLOW_UP,
+            tgt.pos.z + cosY * SPEC_FOLLOW_BACK,
+          );
+          camera.lookAt(tgt.pos.x, tgt.pos.y + SPEC_FOLLOW_HEAD, tgt.pos.z);
+        }
       }
-    } else if (!player.alive && deathCamPos) {
-      camera.position.copy(deathCamPos);
-      camera.rotation.set(-deathCamTilt + punch.pitch, player.yaw + punch.yaw, 0, 'YXZ');
     } else {
-      camera.position.set(player.pos.x, eyeY, player.pos.z);
-      camera.rotation.set(player.pitch + punch.pitch, player.yaw + punch.yaw, 0, 'YXZ');
+      const punch = getViewPunch(player);
+      if (!player.alive && spectateTargetId !== null) {
+        // First-person spectate: view from inside the target's head.
+        const target = game.combatants.find(c => c.id === spectateTargetId);
+        if (target !== undefined) {
+          const eyeOff = target.crouching ? MOVEMENT.EYE_CROUCH : MOVEMENT.EYE_STAND;
+          _specCamPos.set(target.pos.x, target.pos.y + eyeOff, target.pos.z);
+          camera.position.copy(_specCamPos);
+          camera.rotation.set(target.pitch, target.yaw, 0, 'YXZ');
+        }
+      } else if (!player.alive && deathCamPos) {
+        camera.position.copy(deathCamPos);
+        camera.rotation.set(-deathCamTilt + punch.pitch, player.yaw + punch.yaw, 0, 'YXZ');
+      } else {
+        camera.position.set(player.pos.x, eyeY, player.pos.z);
+        camera.rotation.set(player.pitch + punch.pitch, player.yaw + punch.yaw, 0, 'YXZ');
+      }
     }
 
     // --- Update systems ---

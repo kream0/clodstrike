@@ -1,8 +1,8 @@
 /**
  * viewmodel.test.ts — headless bun test
  *
- * Tests pure math (normalizeWeaponModel), stem-mapping, grip presets, and
- * disk/license checks.
+ * Tests pure math (normalizeWeaponModel), stem-mapping, grip presets, IK solver,
+ * and disk/license checks.
  * Does NOT instantiate ViewModel (no WebGL/renderer required).
  * Does NOT load GLBs at runtime.
  *
@@ -20,14 +20,21 @@ import {
   VIEWMODEL_SCALE,
   resolveWeaponTuning,
   GRIP_PRESETS,
+  GRIP_TARGETS,
   FP_ARMS_BONE_NAMES,
   ARMS_SCALE,
   ARMS_OFFSET,
+  ARMS_ROOT_SCALE,
+  ARMS_ROOT_POS,
+  ARMS_ROOT_ROT_Y,
   ARMS_TINT_CT,
   ARMS_TINT_T,
   teamSleeveColor,
+  solveTwoBoneIK,
+  weaponHalfLen,
   type WeaponTuning,
   type GripFamily,
+  type TwoBoneChain,
 } from './viewmodel';
 import { WEAPONS } from './constants';
 import { THIRD_PERSON_WEAPON_FILES, THIRD_PERSON_WEAPON_PATHS } from './characters';
@@ -336,7 +343,7 @@ describe('resolveWeaponTuning — all WEAPONS ids return finite tuning', () => {
 });
 
 // ---------------------------------------------------------------------------
-// GRIP_PRESETS table — exported pure data
+// GRIP_PRESETS table — backward-compat shim derived from GRIP_TARGETS
 // ---------------------------------------------------------------------------
 
 describe('GRIP_PRESETS', () => {
@@ -344,8 +351,6 @@ describe('GRIP_PRESETS', () => {
   const ALL_STEMS = Object.keys(THIRD_PERSON_WEAPON_PATHS);
 
   // Authoritative set of the 24 real bone names in fp_arms.glb (J-Toastie rig).
-  // If a bone name in a GRIP_PRESETS entry doesn't match this set the pose is a no-op
-  // (the map lookup silently returns undefined).  Hardcoded here so typos are caught at test time.
   const AUTHORITATIVE_BONE_NAMES = new Set<string>([
     // Left side (no suffix)
     'UpperArm.L', 'LowerArm.L', 'Hand.L',
@@ -429,8 +434,6 @@ describe('GRIP_PRESETS', () => {
   });
 
   // Verify that the bones referenced by the presets are real bones from the rig.
-  // This catches the previous bug where bone names were written for the Quaternius
-  // 62-joint rig (e.g. 'Shoulder.R', 'Wrist.R') rather than the J-Toastie 24-joint rig.
   test('FP_ARMS_BONE_NAMES exported list has exactly 24 entries', () => {
     expect(FP_ARMS_BONE_NAMES).toHaveLength(24);
   });
@@ -497,7 +500,7 @@ describe('teamSleeveColor', () => {
 // ARMS tuning constants
 // ---------------------------------------------------------------------------
 
-describe('ARMS_SCALE and ARMS_OFFSET', () => {
+describe('ARMS_SCALE and ARMS_OFFSET (legacy aliases)', () => {
   test('ARMS_SCALE is a finite positive number', () => {
     expect(typeof ARMS_SCALE).toBe('number');
     expect(isFinite(ARMS_SCALE)).toBe(true);
@@ -509,6 +512,544 @@ describe('ARMS_SCALE and ARMS_OFFSET', () => {
     expect(isFinite(ARMS_OFFSET.x)).toBe(true);
     expect(isFinite(ARMS_OFFSET.y)).toBe(true);
     expect(isFinite(ARMS_OFFSET.z)).toBe(true);
+  });
+});
+
+describe('ARMS_ROOT_SCALE, ARMS_ROOT_POS, ARMS_ROOT_ROT_Y', () => {
+  test('ARMS_ROOT_SCALE is a finite positive number much smaller than 1', () => {
+    expect(typeof ARMS_ROOT_SCALE).toBe('number');
+    expect(isFinite(ARMS_ROOT_SCALE)).toBe(true);
+    expect(ARMS_ROOT_SCALE).toBeGreaterThan(0);
+    // Must be much smaller than old ARMS_SCALE = 0.9 which caused giant arms
+    expect(ARMS_ROOT_SCALE).toBeLessThan(0.5);
+  });
+
+  test('ARMS_ROOT_SCALE × total arm reach (5.17 units) ≈ 0.3–0.5 m (human plausible)', () => {
+    const totalReachUnits = 5.17;
+    const reach = ARMS_ROOT_SCALE * totalReachUnits;
+    expect(reach).toBeGreaterThan(0.25);
+    expect(reach).toBeLessThan(0.55);
+  });
+
+  test('ARMS_ROOT_POS is a THREE.Vector3 with finite components', () => {
+    expect(ARMS_ROOT_POS).toBeInstanceOf(THREE.Vector3);
+    expect(isFinite(ARMS_ROOT_POS.x)).toBe(true);
+    expect(isFinite(ARMS_ROOT_POS.y)).toBe(true);
+    expect(isFinite(ARMS_ROOT_POS.z)).toBe(true);
+  });
+
+  test('ARMS_ROOT_POS.z > 0 (shoulders toward camera bottom, not forward)', () => {
+    // In _group space, +Z is toward the camera. Shoulders must be behind weapons.
+    expect(ARMS_ROOT_POS.z).toBeGreaterThan(0);
+  });
+
+  test('ARMS_ROOT_ROT_Y is PI/2 (maps +X arm rest direction to -Z scene direction)', () => {
+    expect(ARMS_ROOT_ROT_Y).toBeCloseTo(Math.PI / 2, 5);
+  });
+
+  test('legacy ARMS_SCALE alias equals ARMS_ROOT_SCALE', () => {
+    expect(ARMS_SCALE).toBe(ARMS_ROOT_SCALE);
+  });
+
+  test('legacy ARMS_OFFSET alias is the same object as ARMS_ROOT_POS', () => {
+    expect(ARMS_OFFSET).toBe(ARMS_ROOT_POS);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// GRIP_TARGETS table — IK target coordinates
+// ---------------------------------------------------------------------------
+
+describe('GRIP_TARGETS', () => {
+  const VALID_FAMILIES: GripFamily[] = ['two_handed_long', 'pistol', 'knife'];
+  const ALL_STEMS = Object.keys(THIRD_PERSON_WEAPON_PATHS);
+
+  test('every weapons_v2 stem has a GRIP_TARGETS entry', () => {
+    const missing: string[] = [];
+    for (const stem of ALL_STEMS) {
+      if (GRIP_TARGETS[stem] === undefined) missing.push(stem);
+    }
+    if (missing.length > 0) {
+      throw new Error(`Stems missing from GRIP_TARGETS: ${missing.join(', ')}`);
+    }
+  });
+
+  test('every GRIP_TARGET has a valid family', () => {
+    for (const [stem, gt] of Object.entries(GRIP_TARGETS)) {
+      expect(
+        VALID_FAMILIES.includes(gt.family),
+        `${stem}: invalid family '${gt.family}'`,
+      ).toBe(true);
+    }
+  });
+
+  test('every GRIP_TARGET has finite rightHand and leftHand coordinates', () => {
+    const failures: string[] = [];
+    for (const [stem, gt] of Object.entries(GRIP_TARGETS)) {
+      for (const v of [...gt.rightHand, ...gt.leftHand]) {
+        if (!isFinite(v)) failures.push(stem);
+      }
+    }
+    if (failures.length > 0) {
+      throw new Error(`Non-finite grip targets: ${failures.join(', ')}`);
+    }
+  });
+
+  test('every GRIP_TARGET has finite fingerCurl', () => {
+    for (const [stem, gt] of Object.entries(GRIP_TARGETS)) {
+      for (const v of gt.fingerCurl) {
+        expect(isFinite(v), `${stem} fingerCurl has non-finite value`).toBe(true);
+      }
+    }
+  });
+
+  test('two_handed_long rightHand z > 0 (at stock side) and leftHand z < 0 (toward muzzle)', () => {
+    // Structural sanity: right at grip, left forward under barrel.
+    const longStems = Object.entries(GRIP_TARGETS).filter(([, gt]) => gt.family === 'two_handed_long');
+    for (const [stem, gt] of longStems) {
+      expect(gt.rightHand[2], `${stem} rightHand.z should be > 0`).toBeGreaterThan(0);
+      expect(gt.leftHand[2], `${stem} leftHand.z should be < 0`).toBeLessThan(0);
+    }
+  });
+
+  test('knife leftHand is the tucked fixed position (z > 0, not on weapon)', () => {
+    const knife = GRIP_TARGETS['knife'];
+    expect(knife).toBeDefined();
+    if (knife !== undefined) {
+      // Tucked: left hand at z > 0 (toward camera, not forward along barrel)
+      expect(knife.leftHand[2]).toBeGreaterThan(0);
+    }
+  });
+
+  test('GRIP_TARGETS and GRIP_PRESETS have matching stem sets', () => {
+    const targetStems = new Set(Object.keys(GRIP_TARGETS));
+    const presetStems = new Set(Object.keys(GRIP_PRESETS));
+    for (const s of targetStems) {
+      expect(presetStems.has(s), `GRIP_PRESETS missing ${s}`).toBe(true);
+    }
+    for (const s of presetStems) {
+      expect(targetStems.has(s), `GRIP_TARGETS missing ${s}`).toBe(true);
+    }
+  });
+
+  test('GRIP_TARGETS families match GRIP_PRESETS families (shim consistency)', () => {
+    for (const [stem, gt] of Object.entries(GRIP_TARGETS)) {
+      const preset = GRIP_PRESETS[stem];
+      if (preset !== undefined) {
+        expect(preset.family).toBe(gt.family);
+      }
+    }
+  });
+
+  test('GRIP_PRESETS fingerCurl matches GRIP_TARGETS fingerCurl (shim passes through)', () => {
+    for (const [stem, gt] of Object.entries(GRIP_TARGETS)) {
+      const preset = GRIP_PRESETS[stem];
+      if (preset !== undefined) {
+        expect(preset.fingerCurl[0]).toBeCloseTo(gt.fingerCurl[0], 10);
+        expect(preset.fingerCurl[1]).toBeCloseTo(gt.fingerCurl[1], 10);
+        expect(preset.fingerCurl[2]).toBeCloseTo(gt.fingerCurl[2], 10);
+      }
+    }
+  });
+
+  // ── Regression: grip z targets must not float outside the weapon model ──
+  //
+  // For every weapon id in THIRD_PERSON_WEAPON_FILES, the actual z distance of
+  // both grip points (after applying zFrac × halfLen) must not exceed halfLen + 1 cm.
+  // This makes the "hand floats behind the buttstock" bug class impossible to
+  // reintroduce silently.
+  //
+  // Knife left-hand is exempt: it uses a fixed absolute tuck position intentionally
+  // placed away from the weapon model.
+  test('regression: every weapon id rightHand |z| ≤ halfLen + 1 cm (no float-behind-stock)', () => {
+    const failures: string[] = [];
+    for (const id of Object.keys(THIRD_PERSON_WEAPON_FILES)) {
+      const stem = THIRD_PERSON_WEAPON_FILES[id];
+      if (stem === undefined) continue;
+      const gt = GRIP_TARGETS[stem];
+      if (gt === undefined) continue;
+      const hl = weaponHalfLen(id);
+      const rzAbs = Math.abs(gt.rightHand[2] * hl);
+      if (rzAbs > hl + 0.01) {
+        failures.push(
+          `${id} (${stem}): rightHand |z|=${rzAbs.toFixed(4)} m > halfLen=${hl.toFixed(4)} m + 1 cm`,
+        );
+      }
+    }
+    if (failures.length > 0) {
+      throw new Error(`Grip z out-of-bounds:\n  ${failures.join('\n  ')}`);
+    }
+  });
+
+  test('regression: every weapon id leftHand |z| ≤ halfLen + 1 cm (knife left-hand exempt)', () => {
+    const failures: string[] = [];
+    for (const id of Object.keys(THIRD_PERSON_WEAPON_FILES)) {
+      const stem = THIRD_PERSON_WEAPON_FILES[id];
+      if (stem === undefined) continue;
+      const gt = GRIP_TARGETS[stem];
+      if (gt === undefined) continue;
+      // Knife left-hand uses a fixed absolute tuck target — exempt from this check.
+      if (gt.leftHandZAbsolute === true) continue;
+      const hl = weaponHalfLen(id);
+      const lzAbs = Math.abs(gt.leftHand[2] * hl);
+      if (lzAbs > hl + 0.01) {
+        failures.push(
+          `${id} (${stem}): leftHand |z|=${lzAbs.toFixed(4)} m > halfLen=${hl.toFixed(4)} m + 1 cm`,
+        );
+      }
+    }
+    if (failures.length > 0) {
+      throw new Error(`Grip z out-of-bounds:\n  ${failures.join('\n  ')}`);
+    }
+  });
+
+  test('weaponHalfLen: returns finite positive value for every weapon id', () => {
+    for (const id of Object.keys(THIRD_PERSON_WEAPON_FILES)) {
+      const hl = weaponHalfLen(id);
+      expect(isFinite(hl), `${id}: non-finite halfLen`).toBe(true);
+      expect(hl, `${id}: halfLen not positive`).toBeGreaterThan(0);
+    }
+  });
+
+  test('weaponHalfLen: sniper AWP halfLen > pistol halfLen (longer weapon)', () => {
+    expect(weaponHalfLen('awp')).toBeGreaterThan(weaponHalfLen('usp'));
+  });
+});
+
+// ---------------------------------------------------------------------------
+// solveTwoBoneIK — pure solver tests using a synthetic bone chain
+//
+// Replicates the fp_arms.glb rest geometry from the rig dump:
+//   UpperArm.L [-1.9846, 0, -2.2343]
+//   LowerArm.L [0.0991, -0.0038, -2.4734]
+//   Hand.L     [3.1473, -0.0038, -2.2377]
+//   Segment lengths: L1=2.110, L2=3.058, total reach ~5.17
+// Scaled by ARMS_ROOT_SCALE=0.075 for viewmodel units:
+//   L1 ≈ 0.158 m, L2 ≈ 0.229 m, reach ≈ 0.388 m
+// ---------------------------------------------------------------------------
+
+/**
+ * Build a synthetic two-bone chain matching fp_arms.glb left-arm rest geometry
+ * scaled by ARMS_ROOT_SCALE.
+ *
+ * Hierarchy: parent(Group) → upperArm(Bone) → lowerArm(Bone) → hand(Bone)
+ *
+ * Rest positions in scene units (from rig dump), scaled by 0.075:
+ *   upperArm: (-0.1488, 0, -0.1676)
+ *   lowerArm: ( 0.0074, -0.000285, -0.1855)
+ *   hand:     ( 0.2360, -0.000285, -0.1678)
+ */
+function buildSyntheticChain(scale = ARMS_ROOT_SCALE): {
+  parent: THREE.Group;
+  chain: TwoBoneChain;
+  L1: number;
+  L2: number;
+} {
+  // Rest world positions from rig dump (scene units)
+  const upperArmRestWorld = new THREE.Vector3(-1.9846, 0, -2.2343);
+  const lowerArmRestWorld = new THREE.Vector3( 0.0991, -0.0038, -2.4734);
+  const handRestWorld     = new THREE.Vector3( 3.1473, -0.0038, -2.2377);
+
+  // Scale to viewmodel units
+  const s = scale;
+  const uaPos = upperArmRestWorld.clone().multiplyScalar(s);
+  const laPos = lowerArmRestWorld.clone().multiplyScalar(s);
+  const hPos  = handRestWorld.clone().multiplyScalar(s);
+
+  // Build bone chain with world positions encoded as local positions
+  // (parent is at origin, so world = local for direct children).
+  const parent = new THREE.Group();
+  parent.position.set(0, 0, 0);
+
+  const upperArm = new THREE.Bone();
+  upperArm.name = 'UpperArm.L';
+  upperArm.position.copy(uaPos); // world = local (parent at origin)
+
+  const lowerArm = new THREE.Bone();
+  lowerArm.name = 'LowerArm.L';
+  // Local position relative to upperArm = world diff
+  lowerArm.position.copy(laPos.clone().sub(uaPos));
+
+  const hand = new THREE.Bone();
+  hand.name = 'Hand.L';
+  hand.position.copy(hPos.clone().sub(laPos));
+
+  upperArm.add(lowerArm);
+  lowerArm.add(hand);
+  parent.add(upperArm);
+
+  // Update world matrices
+  parent.updateWorldMatrix(true, true);
+
+  const L1 = uaPos.distanceTo(laPos);
+  const L2 = laPos.distanceTo(hPos);
+
+  return {
+    parent,
+    chain: { root: upperArm as unknown as THREE.Bone, mid: lowerArm as unknown as THREE.Bone, tip: hand as unknown as THREE.Bone },
+    L1,
+    L2,
+  };
+}
+
+describe('solveTwoBoneIK — two-bone analytic IK solver', () => {
+
+  test('returns true for a valid chain', () => {
+    const { chain } = buildSyntheticChain();
+    const target = new THREE.Vector3(0.10, -0.05, -0.20);
+    const pole   = new THREE.Vector3(0, -0.30, 0);
+    const result = solveTwoBoneIK(chain, target, pole);
+    expect(result).toBe(true);
+  });
+
+  test('returns false for a degenerate zero-length chain', () => {
+    const parent = new THREE.Group();
+    const b0 = new THREE.Bone();
+    const b1 = new THREE.Bone();
+    const b2 = new THREE.Bone();
+    // All at origin — zero-length segments
+    parent.add(b0);
+    b0.add(b1);
+    b1.add(b2);
+    parent.updateWorldMatrix(true, true);
+
+    const result = solveTwoBoneIK(
+      { root: b0, mid: b1, tip: b2 },
+      new THREE.Vector3(0.1, 0, 0),
+      new THREE.Vector3(0, -0.1, 0),
+    );
+    expect(result).toBe(false);
+  });
+
+  test('hand lands within 2 cm of target for reachable target', () => {
+    const { chain, L1, L2 } = buildSyntheticChain();
+
+    // Choose a target well within reach (60% of max reach)
+    const maxReach = L1 + L2;
+    const targetDist = maxReach * 0.6;
+
+    // Target in front of the upper arm world position
+    chain.root.updateWorldMatrix(true, false);
+    const uaWorld = new THREE.Vector3();
+    uaWorld.setFromMatrixPosition(chain.root.matrixWorld);
+
+    const target = new THREE.Vector3(
+      uaWorld.x + targetDist * 0.6,
+      uaWorld.y - targetDist * 0.3,
+      uaWorld.z + targetDist * 0.7,
+    ).normalize().multiplyScalar(targetDist).add(uaWorld);
+
+    const pole = uaWorld.clone().add(new THREE.Vector3(0, -0.2, 0));
+
+    const solved = solveTwoBoneIK(chain, target, pole);
+    expect(solved).toBe(true);
+
+    // After solving, hand world position should be near target
+    chain.root.updateWorldMatrix(true, true);
+    const handWorld = new THREE.Vector3();
+    handWorld.setFromMatrixPosition(chain.tip.matrixWorld);
+
+    const error = handWorld.distanceTo(target);
+    // Allow 2 cm tolerance (0.02 m)
+    expect(error).toBeLessThan(0.02);
+  });
+
+  test('no NaN in bone quaternions after solving', () => {
+    const { chain } = buildSyntheticChain();
+    const target = new THREE.Vector3(0.15, -0.05, -0.10);
+    const pole   = new THREE.Vector3(0, -0.20, 0);
+    solveTwoBoneIK(chain, target, pole);
+
+    const checkQ = (b: THREE.Bone, name: string): void => {
+      expect(isNaN(b.quaternion.x), `${name}.x NaN`).toBe(false);
+      expect(isNaN(b.quaternion.y), `${name}.y NaN`).toBe(false);
+      expect(isNaN(b.quaternion.z), `${name}.z NaN`).toBe(false);
+      expect(isNaN(b.quaternion.w), `${name}.w NaN`).toBe(false);
+    };
+    checkQ(chain.root, 'root');
+    checkQ(chain.mid, 'mid');
+  });
+
+  test('elbow (mid bone) world Y is below shoulder→hand midpoint Y (pole points down)', () => {
+    const { chain } = buildSyntheticChain();
+
+    chain.root.updateWorldMatrix(true, true);
+    const shoulderWorld = new THREE.Vector3().setFromMatrixPosition(chain.root.matrixWorld);
+    const handRestWorld  = new THREE.Vector3().setFromMatrixPosition(chain.tip.matrixWorld);
+
+    // Choose target halfway between rest and max reach
+    const target = handRestWorld.clone().lerp(shoulderWorld, 0.2);
+    // Pole strongly downward
+    const pole = shoulderWorld.clone().add(new THREE.Vector3(0, -0.5, 0));
+
+    solveTwoBoneIK(chain, target, pole);
+
+    chain.root.updateWorldMatrix(true, true);
+    const elbowWorld = new THREE.Vector3().setFromMatrixPosition(chain.mid.matrixWorld);
+    const newShoulderWorld = new THREE.Vector3().setFromMatrixPosition(chain.root.matrixWorld);
+    const newHandWorld = new THREE.Vector3().setFromMatrixPosition(chain.tip.matrixWorld);
+    const midY = (newShoulderWorld.y + newHandWorld.y) / 2;
+
+    // Elbow should be below the midpoint (pole is down)
+    expect(elbowWorld.y).toBeLessThan(midY + 0.001);
+  });
+
+  test('reach clamp: target beyond max reach does not produce NaN and lands hand at max reach direction', () => {
+    const { chain, L1, L2 } = buildSyntheticChain();
+
+    chain.root.updateWorldMatrix(true, true);
+    const shoulderWorld = new THREE.Vector3().setFromMatrixPosition(chain.root.matrixWorld);
+
+    // Target 3× max reach — way beyond arm length
+    const farTarget = shoulderWorld.clone().add(new THREE.Vector3(0, 0, -(L1 + L2) * 3));
+    const pole = shoulderWorld.clone().add(new THREE.Vector3(0, -0.2, 0));
+
+    const solved = solveTwoBoneIK(chain, farTarget, pole);
+    expect(solved).toBe(true);
+
+    chain.root.updateWorldMatrix(true, true);
+    const handWorld = new THREE.Vector3().setFromMatrixPosition(chain.tip.matrixWorld);
+
+    // No NaN
+    expect(isNaN(handWorld.x)).toBe(false);
+    expect(isNaN(handWorld.y)).toBe(false);
+    expect(isNaN(handWorld.z)).toBe(false);
+
+    // Hand distance from shoulder should be clamped to near max reach
+    const dist = handWorld.distanceTo(shoulderWorld);
+    const maxReach = L1 + L2;
+    expect(dist).toBeLessThanOrEqual(maxReach + 0.001);
+  });
+
+  test('reach clamp: target at zero distance does not produce NaN', () => {
+    const { chain } = buildSyntheticChain();
+
+    chain.root.updateWorldMatrix(true, true);
+    const shoulderWorld = new THREE.Vector3().setFromMatrixPosition(chain.root.matrixWorld);
+
+    // Target exactly at shoulder — minimum distance clamped
+    const pole = shoulderWorld.clone().add(new THREE.Vector3(0, -0.2, 0));
+
+    const solved = solveTwoBoneIK(chain, shoulderWorld.clone(), pole);
+    expect(solved).toBe(true);
+
+    chain.root.updateWorldMatrix(true, true);
+    const handWorld = new THREE.Vector3().setFromMatrixPosition(chain.tip.matrixWorld);
+    expect(isNaN(handWorld.x)).toBe(false);
+    expect(isNaN(handWorld.y)).toBe(false);
+    expect(isNaN(handWorld.z)).toBe(false);
+  });
+
+  test('FK verification: right hand within 2 cm of grip target for all weapon ids', () => {
+    // Tests all weapon ids (not just stems) so every id's halfLen is exercised.
+    // rightHand z target = zFrac * halfLen(id).
+    const failures: string[] = [];
+
+    for (const [id, stem] of Object.entries(THIRD_PERSON_WEAPON_FILES)) {
+      const gt = GRIP_TARGETS[stem];
+      if (gt === undefined) continue;
+
+      const hl = weaponHalfLen(id);
+      const { chain, L1, L2 } = buildSyntheticChain();
+
+      chain.root.updateWorldMatrix(true, true);
+      const shoulderWorld = new THREE.Vector3().setFromMatrixPosition(chain.root.matrixWorld);
+
+      // Resolve actual _group-space target (x/y absolute, z = zFrac * halfLen)
+      const [tx, ty, tzFrac] = gt.rightHand;
+      const target = new THREE.Vector3(tx, ty, tzFrac * hl);
+      const maxReach = L1 + L2;
+      const minReach = Math.abs(L1 - L2);
+
+      // Pre-clamp to reachable range (same logic as solver) to get expected hand pos
+      const rawDist = target.distanceTo(shoulderWorld);
+      const effectiveDist = Math.max(minReach + 1e-4, Math.min(maxReach - 1e-4, rawDist));
+      let clampedTarget: THREE.Vector3;
+      const diff = target.clone().sub(shoulderWorld);
+      if (diff.lengthSq() < 1e-12) {
+        clampedTarget = shoulderWorld.clone().add(new THREE.Vector3(effectiveDist, 0, 0));
+      } else {
+        clampedTarget = diff.normalize().multiplyScalar(effectiveDist).add(shoulderWorld);
+      }
+
+      const pole = shoulderWorld.clone().add(new THREE.Vector3(0, -0.2, 0));
+      const solved = solveTwoBoneIK(chain, target, pole);
+      if (!solved) {
+        failures.push(`${id}: IK returned false`);
+        continue;
+      }
+
+      chain.root.updateWorldMatrix(true, true);
+      const handWorld = new THREE.Vector3().setFromMatrixPosition(chain.tip.matrixWorld);
+      if (isNaN(handWorld.x) || isNaN(handWorld.y) || isNaN(handWorld.z)) {
+        failures.push(`${id}: NaN in hand world position`);
+        continue;
+      }
+
+      const error = handWorld.distanceTo(clampedTarget);
+      if (error > 0.02) {
+        failures.push(`${id} (${stem}): hand error ${(error * 100).toFixed(2)} cm > 2 cm`);
+      }
+    }
+
+    if (failures.length > 0) {
+      throw new Error(`IK FK right-hand verification failures:\n  ${failures.join('\n  ')}`);
+    }
+  });
+
+  test('FK verification: left hand within 2 cm of left grip target for all weapon ids (knife exempt)', () => {
+    const failures: string[] = [];
+
+    for (const [id, stem] of Object.entries(THIRD_PERSON_WEAPON_FILES)) {
+      const gt = GRIP_TARGETS[stem];
+      if (gt === undefined) continue;
+
+      const hl = weaponHalfLen(id);
+      const { chain, L1, L2 } = buildSyntheticChain();
+
+      chain.root.updateWorldMatrix(true, true);
+      const shoulderWorld = new THREE.Vector3().setFromMatrixPosition(chain.root.matrixWorld);
+
+      // Resolve actual z: for knife leftHand is absolute; for all others, zFrac * halfLen
+      const [lx, ly, lzFracOrAbs] = gt.leftHand;
+      const lzWorld = gt.leftHandZAbsolute === true ? lzFracOrAbs : lzFracOrAbs * hl;
+      const target = new THREE.Vector3(lx, ly, lzWorld);
+      const maxReach = L1 + L2;
+      const minReach = Math.abs(L1 - L2);
+
+      const rawDist = target.distanceTo(shoulderWorld);
+      const effectiveDist = Math.max(minReach + 1e-4, Math.min(maxReach - 1e-4, rawDist));
+      let clampedTarget: THREE.Vector3;
+      const diff = target.clone().sub(shoulderWorld);
+      if (diff.lengthSq() < 1e-12) {
+        clampedTarget = shoulderWorld.clone().add(new THREE.Vector3(effectiveDist, 0, 0));
+      } else {
+        clampedTarget = diff.normalize().multiplyScalar(effectiveDist).add(shoulderWorld);
+      }
+
+      const pole = shoulderWorld.clone().add(new THREE.Vector3(0, -0.2, 0));
+      const solved = solveTwoBoneIK(chain, target, pole);
+      if (!solved) {
+        failures.push(`${id} left: IK returned false`);
+        continue;
+      }
+
+      chain.root.updateWorldMatrix(true, true);
+      const handWorld = new THREE.Vector3().setFromMatrixPosition(chain.tip.matrixWorld);
+      if (isNaN(handWorld.x) || isNaN(handWorld.y) || isNaN(handWorld.z)) {
+        failures.push(`${id} left: NaN in hand position`);
+        continue;
+      }
+
+      const error = handWorld.distanceTo(clampedTarget);
+      if (error > 0.02) {
+        failures.push(`${id} (${stem}) left: hand error ${(error * 100).toFixed(2)} cm > 2 cm`);
+      }
+    }
+
+    if (failures.length > 0) {
+      throw new Error(`IK FK left-hand verification failures:\n  ${failures.join('\n  ')}`);
+    }
   });
 });
 

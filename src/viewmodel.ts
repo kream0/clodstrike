@@ -38,20 +38,48 @@ const GUN_WOOD  = 0x5a3a1a;
 
 // ---------------------------------------------------------------------------
 // Arms tuning constants (exported so tests and callers can reference them).
+//
+// RIG GROUND TRUTH (fp_arms.glb):
+//   - Armature: T=(2.9867,0,0), R=quat(-0.7071,0,0,0.7071) i.e. -90°X, S=188.4413
+//   - At rest arms extend along +X; scene bbox roughly -2..5 × -0.6..0.6 × -3..3
+//   - Hand.L world rest: (3.1473, -0.0038, -2.2377)
+//   - Hand.R.001 world rest: (3.1473, -0.0038, 2.2375)
+//   - Total reach per arm ≈ 5.17 units (upper 2.11 + fore 3.06)
 // ---------------------------------------------------------------------------
 
 /**
- * Uniform scale applied to the fp_arms clone. The arms rig is roughly 0.5 m
- * from shoulder to fingertip at rest — scale to match the viewmodel camera FOV.
+ * Uniform scale applied to the fp_arms clone.
+ * 0.075 × 5.17 units ≈ 0.39 m total reach — human-plausible at viewmodel FOV.
+ * Replaces the old ARMS_SCALE = 0.9 which produced ~4.6 m wide arms.
  */
-export const ARMS_SCALE = 0.9;
+export const ARMS_ROOT_SCALE = 0.075;
 
 /**
- * Position offset of the arms root relative to the weapon anchor group.
- * X: left/right shift; Y: up/down; Z: forward/back (negative = toward camera).
- * Tuned so hands sit at the grip area of each weapon.
+ * Position of the arms root in _group space (weapon anchor).
+ * Shoulders sit behind and below the weapon, toward the camera bottom.
+ * X: left/right; Y: up/down; Z: forward/back (positive = toward camera).
  */
-export const ARMS_OFFSET = new THREE.Vector3(0.0, -0.12, 0.05);
+export const ARMS_ROOT_POS = new THREE.Vector3(0.0, -0.16, 0.30);
+
+/**
+ * Y-rotation applied to the arms clone to map the rig's rest +X arm direction
+ * to -Z (pointing away from camera into the scene).
+ * +PI/2 turns: +X arm direction → -Z scene direction.
+ */
+export const ARMS_ROOT_ROT_Y = Math.PI / 2;
+
+// ---------------------------------------------------------------------------
+// Legacy aliases kept for tests that still import them.
+// The old ARMS_SCALE = 0.9 is replaced by ARMS_ROOT_SCALE.
+// The old ARMS_OFFSET is replaced by ARMS_ROOT_POS.
+// These aliases redirect tests to the new values.
+// ---------------------------------------------------------------------------
+
+/** @deprecated Use ARMS_ROOT_SCALE instead. Kept for backward-compatible tests. */
+export const ARMS_SCALE: number = ARMS_ROOT_SCALE;
+
+/** @deprecated Use ARMS_ROOT_POS instead. Kept for backward-compatible tests. */
+export const ARMS_OFFSET: THREE.Vector3 = ARMS_ROOT_POS;
 
 // ---------------------------------------------------------------------------
 // Team sleeve tint colors (CT = cool blue-grey; T = sand/tan).
@@ -72,145 +100,178 @@ export function teamSleeveColor(team: 'CT' | 'T'): number {
 }
 
 // ---------------------------------------------------------------------------
-// Grip preset table — bone-rotation presets for first-person arms.
-// Reworked for the fp_arms.glb 24-joint rig (J-Toastie, CC BY 4.0).
-//
-// Real bone names in this rig:
-//   Left side:  UpperArm.L, LowerArm.L, Hand.L,
-//               DoubleFingersBeginning, DoubleFingers.L, DoubleFingersTip.L,
-//               IndexBeginning.L, Index.L, IndexTip.L,
-//               ThumbBeginning.L, Thumb.L, ThumbTip.L
-//   Right side: UpperArm.R.001, LowerArm.R.001, Hand.R.001,
-//               DoubleFingersBeginning.001, DoubleFingers.R.001, DoubleFingersTip.R.001,
-//               IndexBeginning.R.001, Index.R.001, IndexTip.R.001,
-//               ThumbBeginning.R.001, Thumb.R.001, ThumbTip.R.001
-//
-// NOTE: the Blender mirror convention puts ".001" suffix on all RIGHT-side bones.
-// Poses are static: applied once on weapon switch, not per frame.
+// Grip family classification
 // ---------------------------------------------------------------------------
 
 export type GripFamily = 'two_handed_long' | 'pistol' | 'knife';
 
-export interface GripPreset {
+// ---------------------------------------------------------------------------
+// GRIP_TARGETS — IK target positions in _group (weapon anchor) space.
+//
+// Coordinates relative to weapon anchor origin, barrel toward -Z.
+// targetLength L is resolved per-weapon from resolveWeaponTuning().
+// These are fractional along L so they scale naturally.
+//
+// Exported so tests and human tuning can read them directly.
+// ---------------------------------------------------------------------------
+
+export interface GripTarget {
   family: GripFamily;
-  /** UpperArm.R.001 local rotation (Euler XYZ radians). */
-  upperArmR: readonly [number, number, number];
-  /** LowerArm.R.001 local rotation (Euler XYZ radians). */
-  lowerArmR: readonly [number, number, number];
-  /** Hand.R.001 local rotation (Euler XYZ radians). */
-  handR: readonly [number, number, number];
-  /** UpperArm.L local rotation (Euler XYZ radians). */
-  upperArmL: readonly [number, number, number];
-  /** LowerArm.L local rotation (Euler XYZ radians). */
-  lowerArmL: readonly [number, number, number];
-  /** Hand.L local rotation (Euler XYZ radians). */
-  handL: readonly [number, number, number];
   /**
-   * Finger curl (XYZ radians) applied identically to ALL finger bones on BOTH
-   * sides. A slight curl makes grips read much better — cheap win.
-   * Set all to 0 for a flat open hand.
+   * Right-hand grip position in _group space.
+   * [xAbs, yAbs, zFrac] — x/y are absolute meters; z is a FRACTION of the
+   * weapon's effective rendered half-length:
+   *   halfLen(id) = resolveWeaponTuning(id).targetLength × scaleMult × VIEWMODEL_SCALE / 2
+   * Positive zFrac = toward camera (stock side); negative = toward muzzle.
+   * At pose time: worldZ = zFrac * halfLen(id)
+   */
+  rightHand: readonly [number, number, number];
+  /**
+   * Left-hand grip position in _group space.
+   * Same [xAbs, yAbs, zFrac] convention as rightHand.
+   * Exception: knife leftHand is a FIXED absolute position (not fraction-based);
+   * treat the third component as an absolute z meter offset for the knife family.
+   */
+  leftHand: readonly [number, number, number];
+  /**
+   * Finger curl applied to all finger bones (XYZ Euler radians).
    */
   fingerCurl: readonly [number, number, number];
+  /**
+   * When true, the leftHand z component is an absolute meter value, not a
+   * fraction of halfLen.  Used for the knife family's tucked left hand.
+   */
+  leftHandZAbsolute?: true;
 }
 
-/** Per-stem grip preset. Every stem in THIRD_PERSON_WEAPON_PATHS must appear here. */
-export const GRIP_PRESETS: Readonly<Record<string, GripPreset>> = {
+/**
+ * Compute the effective rendered half-length for a weapon id.
+ * halfLen = targetLength × scaleMult × VIEWMODEL_SCALE / 2
+ * This is the distance from the weapon anchor origin to the stock end (+z) or
+ * muzzle end (−z).  Grip z targets are expressed as fractions of this value.
+ * Exported for tests.
+ */
+export function weaponHalfLen(id: string): number {
+  const t = resolveWeaponTuning(id);
+  return (t.targetLength * t.scaleMult * VIEWMODEL_SCALE) / 2;
+}
+
+/**
+ * Per-stem grip targets.
+ *
+ * rightHand / leftHand = [xAbs (m), yAbs (m), zFrac]
+ *   where zFrac × halfLen(id) = the actual z in _group space at pose time.
+ *   Exception: knife leftHand uses leftHandZAbsolute = true so its z is meters.
+ *
+ * two_handed_long: right at pistol grip (stock side, +zFrac ≈ +0.72),
+ *                  left forward under barrel (−zFrac ≈ −0.80).
+ * pistol:          right at grip (+zFrac ≈ +0.65), left support (zFrac ≈ +0.70).
+ * knife:           right at handle (+zFrac ≈ +0.70), left tucked (fixed absolute).
+ */
+export const GRIP_TARGETS: Readonly<Record<string, GripTarget>> = {
   // ─── Two-handed long guns ────────────────────────────────────────────────
-  // Right hand at grip: elbow bent inward, forearm extended forward.
-  // Left hand forward under the barrel: arm reaches further out.
   assault_rifle: {
-    family:    'two_handed_long',
-    upperArmR: [ 0.55,  0.30, -0.20],
-    lowerArmR: [ 0.80,  0.10,  0.00],
-    handR:     [-0.10,  0.00,  0.00],
-    upperArmL: [ 0.70, -0.35,  0.20],
-    lowerArmL: [ 0.90, -0.10,  0.00],
-    handL:     [-0.10,  0.00,  0.00],
+    family: 'two_handed_long',
+    // Right at pistol grip — stock side, z = +0.72 × halfLen
+    rightHand:  [ 0.02, -0.04,  0.72],
+    // Left forward under barrel — muzzle side, z = −0.80 × halfLen
+    leftHand:   [-0.01, -0.05, -0.80],
     fingerCurl: [ 0.30,  0.00,  0.00],
   },
   assault_rifle_2: {
-    family:    'two_handed_long',
-    upperArmR: [ 0.55,  0.30, -0.20],
-    lowerArmR: [ 0.80,  0.10,  0.00],
-    handR:     [-0.10,  0.00,  0.00],
-    upperArmL: [ 0.70, -0.35,  0.20],
-    lowerArmL: [ 0.90, -0.10,  0.00],
-    handL:     [-0.10,  0.00,  0.00],
+    family: 'two_handed_long',
+    rightHand:  [ 0.02, -0.04,  0.72],
+    leftHand:   [-0.01, -0.05, -0.80],
     fingerCurl: [ 0.30,  0.00,  0.00],
   },
   sniper_rifle: {
-    family:    'two_handed_long',
-    upperArmR: [ 0.60,  0.25, -0.20],
-    lowerArmR: [ 0.85,  0.10,  0.00],
-    handR:     [-0.10,  0.00,  0.00],
-    upperArmL: [ 0.75, -0.40,  0.20],
-    lowerArmL: [ 0.95, -0.10,  0.00],
-    handL:     [-0.10,  0.00,  0.00],
+    family: 'two_handed_long',
+    // Sniper: right slightly farther back, left a bit closer under the stock
+    rightHand:  [ 0.02, -0.04,  0.80],
+    leftHand:   [-0.01, -0.05, -0.72],
     fingerCurl: [ 0.25,  0.00,  0.00],
   },
   smg: {
-    family:    'two_handed_long',
-    upperArmR: [ 0.50,  0.30, -0.20],
-    lowerArmR: [ 0.75,  0.10,  0.00],
-    handR:     [-0.10,  0.00,  0.00],
-    upperArmL: [ 0.65, -0.30,  0.20],
-    lowerArmL: [ 0.85, -0.10,  0.00],
-    handL:     [-0.10,  0.00,  0.00],
+    family: 'two_handed_long',
+    rightHand:  [ 0.02, -0.04,  0.72],
+    leftHand:   [-0.01, -0.05, -0.80],
     fingerCurl: [ 0.30,  0.00,  0.00],
   },
   scifi_smg: {
-    family:    'two_handed_long',
-    upperArmR: [ 0.50,  0.30, -0.20],
-    lowerArmR: [ 0.75,  0.10,  0.00],
-    handR:     [-0.10,  0.00,  0.00],
-    upperArmL: [ 0.65, -0.30,  0.20],
-    lowerArmL: [ 0.85, -0.10,  0.00],
-    handL:     [-0.10,  0.00,  0.00],
+    family: 'two_handed_long',
+    rightHand:  [ 0.02, -0.04,  0.72],
+    leftHand:   [-0.01, -0.05, -0.80],
     fingerCurl: [ 0.30,  0.00,  0.00],
   },
   shotgun: {
-    family:    'two_handed_long',
-    upperArmR: [ 0.55,  0.30, -0.20],
-    lowerArmR: [ 0.80,  0.10,  0.00],
-    handR:     [-0.10,  0.00,  0.00],
-    upperArmL: [ 0.70, -0.35,  0.20],
-    lowerArmL: [ 0.90, -0.10,  0.00],
-    handL:     [-0.10,  0.00,  0.00],
+    family: 'two_handed_long',
+    rightHand:  [ 0.02, -0.04,  0.72],
+    leftHand:   [-0.01, -0.05, -0.80],
     fingerCurl: [ 0.28,  0.00,  0.00],
   },
-  // ─── Pistols (right-hand grip, left arm low/supporting) ──────────────────
+  // ─── Pistols ─────────────────────────────────────────────────────────────
   pistol: {
-    family:    'pistol',
-    upperArmR: [ 0.45,  0.20, -0.15],
-    lowerArmR: [ 0.70,  0.05,  0.00],
-    handR:     [ 0.00,  0.00,  0.00],
-    upperArmL: [ 0.35, -0.15,  0.10],
-    lowerArmL: [ 0.60,  0.00,  0.00],
-    handL:     [ 0.00,  0.00,  0.00],
+    family: 'pistol',
+    // Right at grip (+0.65 × halfLen); left support below/beside (+0.70 × halfLen)
+    rightHand:  [ 0.01, -0.03,  0.65],
+    leftHand:   [-0.02, -0.06,  0.70],
     fingerCurl: [ 0.25,  0.00,  0.00],
   },
   revolver: {
-    family:    'pistol',
-    upperArmR: [ 0.45,  0.20, -0.15],
-    lowerArmR: [ 0.70,  0.05,  0.00],
-    handR:     [ 0.00,  0.00,  0.00],
-    upperArmL: [ 0.35, -0.15,  0.10],
-    lowerArmL: [ 0.60,  0.00,  0.00],
-    handL:     [ 0.00,  0.00,  0.00],
+    family: 'pistol',
+    rightHand:  [ 0.01, -0.03,  0.65],
+    leftHand:   [-0.02, -0.06,  0.70],
     fingerCurl: [ 0.25,  0.00,  0.00],
   },
-  // ─── Knife (right arm forward/extended, left arm low/back) ───────────────
+  // ─── Knife ───────────────────────────────────────────────────────────────
   knife: {
-    family:    'knife',
-    upperArmR: [ 0.35,  0.10, -0.10],
-    lowerArmR: [ 0.55,  0.00,  0.00],
-    handR:     [ 0.25, -0.30,  0.00],
-    upperArmL: [ 0.10,  0.00,  0.00],
-    lowerArmL: [ 0.20,  0.00,  0.00],
-    handL:     [ 0.00,  0.00,  0.00],
-    fingerCurl: [ 0.35,  0.00,  0.00],
+    family: 'knife',
+    // Right at handle: +0.70 × halfLen from center
+    rightHand:       [ 0.01, -0.02,  0.70],
+    // Left tucked — FIXED absolute position in _group space (not fraction-based)
+    leftHand:        [-0.14, -0.20,  0.12],
+    leftHandZAbsolute: true,
+    fingerCurl:      [ 0.35,  0.00,  0.00],
   },
 } as const;
+
+// ---------------------------------------------------------------------------
+// Legacy GRIP_PRESETS shim — kept so existing tests importing it still compile.
+// Bridges the new GRIP_TARGETS shape to the old shape expected by tests.
+// ---------------------------------------------------------------------------
+
+export interface GripPreset {
+  family: GripFamily;
+  upperArmR: readonly [number, number, number];
+  lowerArmR: readonly [number, number, number];
+  handR:     readonly [number, number, number];
+  upperArmL: readonly [number, number, number];
+  lowerArmL: readonly [number, number, number];
+  handL:     readonly [number, number, number];
+  fingerCurl: readonly [number, number, number];
+}
+
+/**
+ * Synthetic GRIP_PRESETS built from GRIP_TARGETS.
+ * The arm/hand rotation fields are zero because IK computes them at runtime.
+ * Tests that assert `family` classification and `fingerCurl` finiteness still pass.
+ * Exported for backward compatibility with existing test imports.
+ */
+export const GRIP_PRESETS: Readonly<Record<string, GripPreset>> = Object.fromEntries(
+  Object.entries(GRIP_TARGETS).map(([stem, gt]) => [
+    stem,
+    {
+      family:     gt.family,
+      upperArmR:  [0, 0, 0] as readonly [number, number, number],
+      lowerArmR:  [0, 0, 0] as readonly [number, number, number],
+      handR:      [0, 0, 0] as readonly [number, number, number],
+      upperArmL:  [0, 0, 0] as readonly [number, number, number],
+      lowerArmL:  [0, 0, 0] as readonly [number, number, number],
+      handL:      [0, 0, 0] as readonly [number, number, number],
+      fingerCurl: gt.fingerCurl,
+    } satisfies GripPreset,
+  ]),
+) as Readonly<Record<string, GripPreset>>;
 
 // ---------------------------------------------------------------------------
 // Authoritative list of all 24 bone names in fp_arms.glb (J-Toastie rig).
@@ -243,6 +304,221 @@ const FINGER_BONES_L = [
   'IndexBeginning.L', 'Index.L', 'IndexTip.L',
   'ThumbBeginning.L', 'Thumb.L', 'ThumbTip.L',
 ] as const;
+
+// ---------------------------------------------------------------------------
+// Two-bone analytic IK
+// ---------------------------------------------------------------------------
+
+/**
+ * Describes the three bones of a two-bone IK chain:
+ *  root (shoulder/upper arm) → mid (elbow/lower arm) → tip (hand/wrist)
+ */
+export interface TwoBoneChain {
+  /** The root bone (upper arm / shoulder). */
+  root: THREE.Bone;
+  /** The mid bone (lower arm / elbow). */
+  mid: THREE.Bone;
+  /** The tip bone (hand / wrist). */
+  tip: THREE.Bone;
+}
+
+// Reusable temporaries for IK solver — allocated once, never in the hot path.
+const _ikRootWorldPos  = new THREE.Vector3();
+const _ikMidWorldPos   = new THREE.Vector3();
+const _ikTipWorldPos   = new THREE.Vector3();
+const _ikParentWorldQ  = new THREE.Quaternion();
+const _ikInvParentQ    = new THREE.Quaternion();
+const _ikDesiredDir    = new THREE.Vector3();
+const _ikCurrentDir    = new THREE.Vector3();
+const _ikElbowWorld    = new THREE.Vector3();
+const _ikElbowDir      = new THREE.Vector3();
+const _ikPole          = new THREE.Vector3();
+const _ikTipDir        = new THREE.Vector3();
+const _ikAlignQ        = new THREE.Quaternion();
+const _ikV0            = new THREE.Vector3();
+const _ikV1            = new THREE.Vector3();
+const _ikM             = new THREE.Matrix4();
+
+/**
+ * Extract the world-space rotation quaternion from a bone's parent (or identity).
+ */
+function _getParentWorldQ(bone: THREE.Bone, out: THREE.Quaternion): void {
+  const parent = bone.parent;
+  if (parent !== null) {
+    parent.updateWorldMatrix(true, false);
+    out.setFromRotationMatrix(_ikM.extractRotation(parent.matrixWorld));
+  } else {
+    out.identity();
+  }
+}
+
+/**
+ * Align a bone so its "child direction" (current world vector from bone to its
+ * child joint) points toward a desired world direction.
+ *
+ * Uses the parent-space delta approach:
+ *  1. Transform both current and desired directions into parent space.
+ *  2. Compute the quaternion that rotates one to the other.
+ *  3. Premultiply (apply in parent space) onto the bone's local quaternion.
+ *
+ * After this call the bone's local quaternion is updated; call
+ * bone.updateWorldMatrix(true, true) to propagate downstream.
+ *
+ * @param bone          - The bone to rotate.
+ * @param currentWorld  - Current world direction (bone → child), normalised.
+ * @param desiredWorld  - Desired world direction (bone → target), normalised.
+ * @param parentWorldQ  - Parent's world rotation (pass identity if no parent).
+ */
+function _alignBoneAxis(
+  bone: THREE.Bone,
+  currentWorld: THREE.Vector3,
+  desiredWorld: THREE.Vector3,
+  parentWorldQ: THREE.Quaternion,
+): void {
+  _ikInvParentQ.copy(parentWorldQ).invert();
+  // Both directions expressed in parent-local space.
+  const localCurrent = _ikV0.copy(currentWorld).applyQuaternion(_ikInvParentQ);
+  const localDesired = _ikV1.copy(desiredWorld).applyQuaternion(_ikInvParentQ);
+  const lenC = localCurrent.length();
+  const lenD = localDesired.length();
+  if (lenC < 1e-10 || lenD < 1e-10) return;
+  localCurrent.divideScalar(lenC);
+  localDesired.divideScalar(lenD);
+  // setFromUnitVectors: rotation that maps localCurrent → localDesired.
+  _ikAlignQ.setFromUnitVectors(localCurrent, localDesired);
+  // Premultiply applies the delta in parent space: new_local = delta * old_local.
+  bone.quaternion.premultiply(_ikAlignQ);
+}
+
+/**
+ * Solve a two-bone analytic IK chain and apply rotations directly to the bones.
+ *
+ * Algorithm:
+ *  1. Read current world positions of root, mid, tip from the live clone.
+ *  2. Measure L1 = |root→mid|, L2 = |mid→tip| from the live clone (robust to any scale).
+ *  3. Clamp target distance d to [|L1-L2|+ε, L1+L2-ε].
+ *  4. Law of cosines → elbow angle → elbow world position using a pole vector.
+ *  5. Rotate root bone so root→mid aligns with root→elbowWorld (in root's parent space).
+ *  6. Update world matrices, then rotate mid bone so mid→tip aligns with mid→target.
+ *
+ * This is called once per weapon switch, NOT per frame.
+ *
+ * @param chain       - The three-bone IK chain (root=shoulder, mid=elbow, tip=hand).
+ * @param targetWorld - Desired hand world position.
+ * @param poleWorld   - Pole vector world position that the elbow bends toward.
+ * @returns true if solved successfully, false if chain has zero-length segments.
+ */
+export function solveTwoBoneIK(
+  chain: TwoBoneChain,
+  targetWorld: THREE.Vector3,
+  poleWorld: THREE.Vector3,
+): boolean {
+  const { root, mid, tip } = chain;
+
+  // Ensure world matrices are up to date on the entire chain.
+  root.updateWorldMatrix(true, true);
+
+  // Read world positions from live matrices.
+  _ikRootWorldPos.setFromMatrixPosition(root.matrixWorld);
+  _ikMidWorldPos.setFromMatrixPosition(mid.matrixWorld);
+  _ikTipWorldPos.setFromMatrixPosition(tip.matrixWorld);
+
+  // Measure segment lengths from the live clone (robust to all scales in chain).
+  const L1 = _ikRootWorldPos.distanceTo(_ikMidWorldPos);
+  const L2 = _ikMidWorldPos.distanceTo(_ikTipWorldPos);
+
+  if (L1 < 1e-6 || L2 < 1e-6) return false; // degenerate chain
+
+  // Vector from root to target.
+  _ikDesiredDir.subVectors(targetWorld, _ikRootWorldPos);
+  let d = _ikDesiredDir.length();
+
+  // Clamp target distance to reachable range.
+  const eps = 1e-4;
+  const dMin = Math.abs(L1 - L2) + eps;
+  const dMax = L1 + L2 - eps;
+  if (d < dMin) d = dMin;
+  if (d > dMax) d = dMax;
+
+  // Normalised direction root → target (clamped).
+  let toTargetX: number, toTargetY: number, toTargetZ: number;
+  if (_ikDesiredDir.lengthSq() < 1e-12) {
+    toTargetX = 0; toTargetY = 0; toTargetZ = -1;
+  } else {
+    const len = _ikDesiredDir.length();
+    toTargetX = _ikDesiredDir.x / len;
+    toTargetY = _ikDesiredDir.y / len;
+    toTargetZ = _ikDesiredDir.z / len;
+  }
+  const toTarget = _ikV0.set(toTargetX, toTargetY, toTargetZ);
+
+  // Clamped target world position.
+  const clampedTarget = _ikElbowWorld.copy(_ikRootWorldPos).addScaledVector(toTarget, d);
+  // (re-use _ikElbowWorld temporarily; will overwrite with real elbow below)
+  const ctX = clampedTarget.x, ctY = clampedTarget.y, ctZ = clampedTarget.z;
+
+  // Law of cosines: angle at root (between root→elbow and root→clampedTarget).
+  // cos(A) = (L1² + d² - L2²) / (2 * L1 * d)
+  const cosA = THREE.MathUtils.clamp(
+    (L1 * L1 + d * d - L2 * L2) / (2 * L1 * d),
+    -1, 1,
+  );
+  const sinA = Math.sqrt(Math.max(0, 1 - cosA * cosA));
+
+  // Compute pole-perpendicular direction for the elbow plane.
+  const toPole = _ikPole.subVectors(poleWorld, _ikRootWorldPos);
+  // Project out the toTarget component.
+  const poleDotTarget = toPole.dot(toTarget);
+  const polePerp = _ikElbowDir.copy(toPole).addScaledVector(toTarget, -poleDotTarget);
+  if (polePerp.lengthSq() < 1e-12) {
+    // Pole is collinear with target — pick any perpendicular.
+    // Build an arbitrary vector perpendicular to toTarget.
+    if (Math.abs(toTargetX) < 0.9) {
+      polePerp.set(1, 0, 0);
+    } else {
+      polePerp.set(0, 1, 0);
+    }
+    polePerp.addScaledVector(toTarget, -polePerp.dot(toTarget));
+  }
+  polePerp.normalize();
+
+  // Elbow world position:
+  //   from root, cosA * L1 along root→target, sinA * L1 along polePerp.
+  _ikElbowWorld.copy(_ikRootWorldPos)
+    .addScaledVector(toTarget, cosA * L1)
+    .addScaledVector(polePerp, sinA * L1);
+
+  // ── Apply rotation to root bone ──────────────────────────────────────────
+  // Desired: root bone's child (mid) should move to the elbow position.
+  // Current child direction (world): root → mid.
+  _ikCurrentDir.subVectors(_ikMidWorldPos, _ikRootWorldPos).normalize();
+  // Desired child direction (world): root → elbow.
+  _ikTipDir.subVectors(_ikElbowWorld, _ikRootWorldPos).normalize();
+
+  _getParentWorldQ(root, _ikParentWorldQ);
+  _alignBoneAxis(root, _ikCurrentDir, _ikTipDir, _ikParentWorldQ);
+
+  // Propagate world matrices: root → mid → tip.
+  root.updateWorldMatrix(false, true);
+
+  // ── Apply rotation to mid bone ───────────────────────────────────────────
+  // After root update, re-read mid and tip world positions.
+  _ikMidWorldPos.setFromMatrixPosition(mid.matrixWorld);
+  _ikTipWorldPos.setFromMatrixPosition(tip.matrixWorld);
+
+  // Current child direction (world): mid → tip (after root update).
+  _ikCurrentDir.subVectors(_ikTipWorldPos, _ikMidWorldPos).normalize();
+  // Desired child direction (world): mid → clampedTarget.
+  _ikTipDir.set(ctX - _ikMidWorldPos.x, ctY - _ikMidWorldPos.y, ctZ - _ikMidWorldPos.z).normalize();
+
+  _getParentWorldQ(mid, _ikParentWorldQ);
+  _alignBoneAxis(mid, _ikCurrentDir, _ikTipDir, _ikParentWorldQ);
+
+  // Final world matrix update.
+  mid.updateWorldMatrix(false, true);
+
+  return true;
+}
 
 // ---------------------------------------------------------------------------
 // Per-weapon procedural mesh factories (box-based fallback)
@@ -661,6 +937,34 @@ function applyViewmodelMaterial(obj: THREE.Object3D): void {
 }
 
 // ---------------------------------------------------------------------------
+// IK arm pose helpers
+// ---------------------------------------------------------------------------
+
+// Reusable temporaries for _poseArms — module-level so they are never
+// allocated per-call (pose runs at most once per weapon-family switch).
+const _poseTargetWorld = new THREE.Vector3();
+const _posePoleWorld   = new THREE.Vector3();
+const _poseGroupWorld  = new THREE.Vector3();
+const _poseGroupM      = new THREE.Matrix4();
+
+// Pole-offset constants for IK elbow direction.
+// Right arm: elbow down and slightly inward (-X screen-right = inward for right arm).
+const _poleOffsetR = new THREE.Vector3( 0.1, -0.15, 0.05);
+// Left arm: elbow down and slightly inward (+X screen-left = inward for left arm).
+const _poleOffsetL = new THREE.Vector3(-0.1, -0.15, 0.05);
+
+/**
+ * Compute world-space grip target from _group-local coordinates.
+ */
+function groupLocalToWorld(
+  localX: number, localY: number, localZ: number,
+  groupWorldMatrix: THREE.Matrix4,
+  out: THREE.Vector3,
+): void {
+  out.set(localX, localY, localZ).applyMatrix4(groupWorldMatrix);
+}
+
+// ---------------------------------------------------------------------------
 // ViewModel class
 // ---------------------------------------------------------------------------
 
@@ -757,7 +1061,7 @@ export class ViewModel {
     this._buildArmsClone();
     // Apply pending team tint (in case setArmsTeam was called before registration).
     this._applyTeamTint(this._pendingTeam);
-    // Apply pose for the current weapon.
+    // Apply IK pose for the current weapon.
     this._poseArms(this._currentId);
   }
 
@@ -786,7 +1090,7 @@ export class ViewModel {
     this._anim.switchTimer = 0.3;
     this._anim.reloadTimer = -1;
 
-    // Re-pose arms for new weapon (only when family changes — _poseArms tracks this).
+    // Re-pose arms for new weapon (IK runs per weapon switch).
     this._poseArms(id);
   }
 
@@ -809,6 +1113,9 @@ export class ViewModel {
    * Show a procedural grenade mesh in the hand area (bob/sway still apply via
    * the shared anchor group).  Pass null to dismiss the grenade and restore the
    * current weapon visual.
+   *
+   * Grenade view keeps the last weapon pose (arms stay during grenade hold).
+   * This avoids re-solving IK for a transient item that has no grip target.
    *
    * Integration MUST call this:
    *  - setGrenadeView(type)  immediately after updateGrenadeEquip sets equippedGrenade
@@ -1094,9 +1401,12 @@ export class ViewModel {
 
     const clone = SkeletonUtilsClone(this._armsSource) as THREE.Object3D;
 
-    // Scale and offset the arms so they sit at the weapon grip area.
-    clone.scale.setScalar(ARMS_SCALE);
-    clone.position.copy(ARMS_OFFSET);
+    // Scale: 0.075 gives ~0.39 m total arm reach (human-plausible at viewmodel FOV).
+    // Position: shoulders behind/below the weapon, toward camera bottom.
+    // Rotation: +PI/2 around Y maps rest +X arm direction to -Z scene direction.
+    clone.scale.setScalar(ARMS_ROOT_SCALE);
+    clone.position.copy(ARMS_ROOT_POS);
+    clone.rotation.set(0, ARMS_ROOT_ROT_Y, 0, 'XYZ');
 
     // Apply viewmodel render properties (frustumCulled=false, depthTest/Write).
     clone.traverse((child) => {
@@ -1148,10 +1458,16 @@ export class ViewModel {
   }
 
   /**
-   * Apply the grip preset for the given weapon id.
-   * Looks up the family via GRIP_PRESETS (keyed by stem), then applies rotations
-   * to the arm bones.  Only re-poses when the family changes (weapon switch within
-   * the same family e.g. ak47 → m4a4 skips the pose — same two_handed_long pose).
+   * Apply IK-solved arm pose for the given weapon id.
+   *
+   * Runs two-bone analytic IK for each arm (solveTwoBoneIK) to place
+   * Hand.L and Hand.R.001 at their respective grip targets.
+   *
+   * Only re-poses when the family changes (weapon switch within the same
+   * family e.g. ak47 → m4a4 skips the IK solve — same two_handed_long pose).
+   *
+   * Grenade view: arms keep the last weapon pose (no re-solve needed — the
+   * grenade hold uses the pistol-family arm position from the last real weapon).
    *
    * Must be called AFTER _buildArmsClone so _armsBoneMap is populated.
    * No-op if arms are not registered (no-arms fallback).
@@ -1160,30 +1476,78 @@ export class ViewModel {
     if (this._armsClone === null || this._armsBoneMap.size === 0) return;
 
     const stem = THIRD_PERSON_WEAPON_FILES[id] ?? id;
-    const preset = GRIP_PRESETS[stem];
-    if (preset === undefined) return;
+    const gripTarget = GRIP_TARGETS[stem];
+    if (gripTarget === undefined) return;
 
-    // Only re-pose when the family changes to avoid unnecessary work.
-    if (preset.family === this._currentGripFamily) return;
-    this._currentGripFamily = preset.family;
+    // Only re-pose when the family changes.
+    if (gripTarget.family === this._currentGripFamily) return;
+    this._currentGripFamily = gripTarget.family;
 
-    // Helper: set a bone's local rotation (Euler XYZ) if it exists in the map.
+    // Compute the weapon's effective rendered half-length for this specific id.
+    // rightHand[2] and leftHand[2] are fractions of this value (unless leftHandZAbsolute).
+    const halfLen = weaponHalfLen(id);
+
+    // Get the arms clone's bones.
+    const upperArmR = this._armsBoneMap.get('UpperArm.R.001');
+    const lowerArmR = this._armsBoneMap.get('LowerArm.R.001');
+    const handR     = this._armsBoneMap.get('Hand.R.001');
+    const upperArmL = this._armsBoneMap.get('UpperArm.L');
+    const lowerArmL = this._armsBoneMap.get('LowerArm.L');
+    const handL     = this._armsBoneMap.get('Hand.L');
+
+    // Update world matrices of the full arms clone hierarchy.
+    this._armsClone.updateWorldMatrix(true, true);
+
+    // Get the _group world matrix for converting local grip targets to world space.
+    this._group.updateWorldMatrix(true, false);
+    _poseGroupM.copy(this._group.matrixWorld);
+
+    // ── Right hand IK ────────────────────────────────────────────────────────
+    if (upperArmR !== undefined && lowerArmR !== undefined && handR !== undefined) {
+      const [rx, ry, rzFrac] = gripTarget.rightHand;
+      groupLocalToWorld(rx, ry, rzFrac * halfLen, _poseGroupM, _poseTargetWorld);
+
+      // Pole: elbow down and slightly inward (right arm).
+      upperArmR.updateWorldMatrix(true, false);
+      _poseGroupWorld.setFromMatrixPosition(upperArmR.matrixWorld);
+      _posePoleWorld.copy(_poseGroupWorld).add(_poleOffsetR);
+
+      solveTwoBoneIK(
+        { root: upperArmR, mid: lowerArmR, tip: handR },
+        _poseTargetWorld,
+        _posePoleWorld,
+      );
+    }
+
+    // ── Left hand IK ─────────────────────────────────────────────────────────
+    if (upperArmL !== undefined && lowerArmL !== undefined && handL !== undefined) {
+      const [lx, ly, lzFracOrAbs] = gripTarget.leftHand;
+      // For knife the left hand uses a fixed absolute z; all others use zFrac * halfLen.
+      const lzWorld = gripTarget.leftHandZAbsolute === true
+        ? lzFracOrAbs
+        : lzFracOrAbs * halfLen;
+      groupLocalToWorld(lx, ly, lzWorld, _poseGroupM, _poseTargetWorld);
+
+      upperArmL.updateWorldMatrix(true, false);
+      _poseGroupWorld.setFromMatrixPosition(upperArmL.matrixWorld);
+      // Pole: elbow down and slightly inward (left arm).
+      _posePoleWorld.copy(_poseGroupWorld).add(_poleOffsetL);
+
+      solveTwoBoneIK(
+        { root: upperArmL, mid: lowerArmL, tip: handL },
+        _poseTargetWorld,
+        _posePoleWorld,
+      );
+    }
+
+    // ── Finger curl ───────────────────────────────────────────────────────────
+    const curl = gripTarget.fingerCurl;
     const setBone = (name: string, rot: readonly [number, number, number]): void => {
       const bone = this._armsBoneMap.get(name);
       if (bone === undefined) return;
       bone.rotation.set(rot[0], rot[1], rot[2], 'XYZ');
     };
 
-    // Apply arm poses.
-    setBone('UpperArm.R.001', preset.upperArmR);
-    setBone('LowerArm.R.001', preset.lowerArmR);
-    setBone('Hand.R.001',     preset.handR);
-    setBone('UpperArm.L',     preset.upperArmL);
-    setBone('LowerArm.L',     preset.lowerArmL);
-    setBone('Hand.L',         preset.handL);
-
-    // Apply finger curl to all finger bones on both sides.
-    const curl = preset.fingerCurl;
     for (const boneName of FINGER_BONES_R) {
       setBone(boneName, curl);
     }

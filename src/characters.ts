@@ -125,70 +125,250 @@ export const THIRD_PERSON_WEAPON_FILES: Record<string, string> = {
 };
 
 // ---------------------------------------------------------------------------
-// Weapon attachment tuning — local transform relative to Wrist.R
-// (all values in MODEL-LOCAL units, i.e. pre-character-scale)
+// Third-person weapon normalization
+// NOTE: mirrors viewmodel.ts normalizeWeaponModel approach but is local to
+// avoid a circular import (viewmodel.ts already imports from characters.ts).
 // ---------------------------------------------------------------------------
 
-interface WeaponAttachTuning {
-  pos: readonly [number, number, number];
-  rot: readonly [number, number, number]; // Euler XYZ in radians
-  scale: number;
+/**
+ * World-space target lengths (meters) for each weapons_v2 stem, used to
+ * normalize third-person weapon holder scale so all weapons read as a
+ * plausible real-world size regardless of raw GLB scale.
+ *
+ * Ground truth raw longest extents from dump-rig:
+ *   pistol 1.82, revolver 1.99, smg 4.04, scifi_smg 2.20,
+ *   shotgun 5.78, assault_rifle 5.17, assault_rifle_2 5.42,
+ *   sniper_rifle 7.29, knife 1.56 (Y-long)
+ * Without normalization rifles render ~3-5 m long — invisible as "held."
+ */
+export const TP_WEAPON_TARGET_LEN: Readonly<Record<string, number>> = {
+  knife:           0.30,
+  pistol:          0.32,
+  revolver:        0.34,
+  smg:             0.65,
+  scifi_smg:       0.60,
+  shotgun:         1.00,
+  assault_rifle:   0.95,
+  assault_rifle_2: 0.98,
+  sniper_rifle:    1.15,
+} as const;
+
+/**
+ * Fraction of the normalized weapon length that sits behind the grip origin
+ * (rear end offset).  After axis alignment the "rear" of the gun (stock end)
+ * is placed at +z = GRIP_BACK_FRAC * targetLen so the holder origin sits
+ * near the grip/trigger area.  0.12 works for most rifles; knife is smaller.
+ */
+const GRIP_BACK_FRAC = 0.12;
+
+/**
+ * Pure function: compute the uniform scale and axis-alignment rotation needed
+ * to normalise a weapon GLB bbox to `targetLen` meters along its longest axis,
+ * aligning that axis to -Z (barrel forward in holder space).
+ *
+ * Mirrors viewmodel.ts normalizeWeaponModel (no import — avoids circular dep).
+ * Cross-reference: viewmodel.ts `normalizeWeaponModel` for the first-person path.
+ *
+ * @param bbox      - World-space bbox of the raw source GLB (before any scaling).
+ * @param targetLen - Desired world-space length of the longest axis (meters).
+ * @returns { scale, rotX, rotY } — apply scale uniformly; rotations are XYZ Euler.
+ */
+export function tpComputeWeaponNorm(
+  bbox: THREE.Box3,
+  targetLen: number,
+): { scale: number; rotX: number; rotY: number; centerZ: number } {
+  const size = new THREE.Vector3();
+  bbox.getSize(size);
+
+  const maxExtent = Math.max(size.x, size.y, size.z, 0.001);
+  const scale = targetLen / maxExtent;
+
+  // Determine which axis is longest and align it to -Z
+  let rotY = 0;
+  let rotX = 0;
+  if (size.x >= size.y && size.x >= size.z) {
+    // X-long (pistols, rifles): rotate 90° around Y → -Z becomes the long axis
+    rotY = Math.PI / 2;
+  } else if (size.y >= size.x && size.y >= size.z) {
+    // Y-long (knife): rotate -90° around X → -Z becomes the long axis
+    rotX = -Math.PI / 2;
+  }
+  // else Z-long: already aligned, no rotation needed
+
+  // After axis alignment and scaling the normalized length along -Z = targetLen.
+  // centerZ in holder space: place rear end at +GRIP_BACK_FRAC * targetLen from origin.
+  // Bbox center of the clone (after rotation) is at -0.5 * targetLen along -Z,
+  // so we shift it +z by (0.5 - GRIP_BACK_FRAC) * targetLen.
+  const centerZ = (0.5 - GRIP_BACK_FRAC) * targetLen;
+
+  return { scale, rotX, rotY, centerZ };
 }
 
-const DEFAULT_WEAPON_ATTACH: WeaponAttachTuning = {
-  pos:   [0, 0, 0.1],
-  rot:   [0, Math.PI / 2, 0],
-  scale: 0.5,
+// ---------------------------------------------------------------------------
+// Third-person weapon attach offsets — holder local to Wrist.R
+// (now sane because sizes are normalized; small tweaks only)
+// ---------------------------------------------------------------------------
+
+export interface TpAttachOffset {
+  /** Position of the holder relative to Wrist.R (meters, model-local after normalScale). */
+  pos: readonly [number, number, number];
+  /** Additional Euler XYZ rotation on the holder (radians). */
+  rot: readonly [number, number, number];
+}
+
+const _DEFAULT_TP_ATTACH: TpAttachOffset = {
+  pos: [0, 0, 0],
+  rot: [0, 0, 0],
 };
 
-/** Per-family overrides (keyed by file stem). */
-const WEAPON_ATTACH_OVERRIDES: Partial<Record<string, WeaponAttachTuning>> = {
+/**
+ * Per-stem attach offsets for the normalized weapon holder relative to Wrist.R.
+ * Exported for tuning from outside (e.g. debug UI, tests).
+ */
+export const TP_WEAPON_ATTACH_OFFSETS: Readonly<Record<string, TpAttachOffset>> = {
   knife: {
-    pos:   [0, 0, 0.08],
-    rot:   [0, Math.PI / 2, -Math.PI / 4],
-    scale: 0.45,
+    pos: [0.00,  0.00, -0.05],
+    rot: [0.00,  0.00,  0.40],  // slight outward cant
   },
   pistol: {
-    pos:   [0, 0, 0.1],
-    rot:   [0, Math.PI / 2, 0],
-    scale: 0.45,
-  },
-  smg: {
-    pos:   [0, 0.02, 0.12],
-    rot:   [0, Math.PI / 2, 0],
-    scale: 0.55,
-  },
-  scifi_smg: {
-    pos:   [0, 0.02, 0.12],
-    rot:   [0, Math.PI / 2, 0],
-    scale: 0.55,
-  },
-  assault_rifle: {
-    pos:   [0, 0.02, 0.15],
-    rot:   [0, Math.PI / 2, 0],
-    scale: 0.65,
-  },
-  assault_rifle_2: {
-    pos:   [0, 0.02, 0.15],
-    rot:   [0, Math.PI / 2, 0],
-    scale: 0.65,
-  },
-  sniper_rifle: {
-    pos:   [0, 0.02, 0.2],
-    rot:   [0, Math.PI / 2, 0],
-    scale: 0.75,
-  },
-  shotgun: {
-    pos:   [0, 0.02, 0.15],
-    rot:   [0, Math.PI / 2, 0],
-    scale: 0.65,
+    pos: [0.00,  0.00,  0.00],
+    rot: [0.00,  0.00,  0.00],
   },
   revolver: {
-    pos:   [0, 0, 0.1],
-    rot:   [0, Math.PI / 2, 0],
-    scale: 0.48,
+    pos: [0.00,  0.00,  0.00],
+    rot: [0.00,  0.00,  0.00],
   },
-};
+  smg: {
+    pos: [0.00,  0.00, -0.05],
+    rot: [0.00,  0.00,  0.00],
+  },
+  scifi_smg: {
+    pos: [0.00,  0.00, -0.05],
+    rot: [0.00,  0.00,  0.00],
+  },
+  shotgun: {
+    pos: [0.00,  0.00, -0.08],
+    rot: [0.00,  0.00,  0.00],
+  },
+  assault_rifle: {
+    pos: [0.00,  0.00, -0.08],
+    rot: [0.00,  0.00,  0.00],
+  },
+  assault_rifle_2: {
+    pos: [0.00,  0.00, -0.08],
+    rot: [0.00,  0.00,  0.00],
+  },
+  sniper_rifle: {
+    pos: [0.00,  0.00, -0.10],
+    rot: [0.00,  0.00,  0.00],
+  },
+} as const;
+
+// ---------------------------------------------------------------------------
+// Gun-hold arm pose constants — override after mixer.update every frame
+// for any living combatant with a weapon attached.
+//
+// Bone chain (Quaternius rig): Shoulder.R, UpperArm.R, LowerArm.R, Wrist.R
+//                             (mirrored .L side).
+// At rest (arms hang at sides): all rotations ≈ 0 in local space.
+// The model faces +Z at rest (before MODEL_YAW_OFFSET π flip),
+// but local bone axes are defined in Blender rest pose (arms down).
+// FK chain: rotate Shoulder to lift arm, UpperArm to angle forearm,
+// LowerArm to bend elbow, Wrist to orient hand.
+//
+// Positive X rotation on arm bones = flex forward (raise arm).
+// Positive Y rotation = abduct outward.
+// ---------------------------------------------------------------------------
+
+export type TpHoldFamily = 'twoHanded' | 'pistol' | 'knife';
+
+export interface TpArmPose {
+  family: TpHoldFamily;
+  /** Shoulder.R local Euler XYZ (radians). */
+  shoulderR: readonly [number, number, number];
+  /** UpperArm.R local Euler XYZ (radians). */
+  upperArmR: readonly [number, number, number];
+  /** LowerArm.R local Euler XYZ (radians). */
+  lowerArmR: readonly [number, number, number];
+  /** Wrist.R local Euler XYZ (radians). */
+  wristR:    readonly [number, number, number];
+  /** Shoulder.L local Euler XYZ (radians). */
+  shoulderL: readonly [number, number, number];
+  /** UpperArm.L local Euler XYZ (radians). */
+  upperArmL: readonly [number, number, number];
+  /** LowerArm.L local Euler XYZ (radians). */
+  lowerArmL: readonly [number, number, number];
+  /** Wrist.L local Euler XYZ (radians). */
+  wristL:    readonly [number, number, number];
+}
+
+/**
+ * Per-family arm-pose constants for third-person gun-hold override.
+ * Applied post-mixer.update every frame when alive + weapon attached.
+ * Legs/torso/head keep full clip animation — only arm chain is overridden.
+ * Exported for tuning and tests.
+ *
+ * Derivation notes (Quaternius rig, arms hang at rest):
+ *   - Lifting the arm to chest height requires ~1.0 rad flex (X) on UpperArm.
+ *   - Bringing forearm horizontal requires ~0.9 rad on LowerArm.
+ *   - Shoulder adds shoulder-forward shrug: small +X, slight abduction.
+ *   - The character faces +Z at rest (MODEL_YAW_OFFSET π not yet applied when
+ *     bone rotations are set — we operate in armature local space).
+ *   - twoHanded: right arm at grip (chest-high forearm), left arm across to foregrip.
+ *   - pistol: right arm forward-low, left supporting loosely.
+ *   - knife: right arm low-forward (blade at side), left relaxed.
+ */
+export const TP_HOLD_POSES: Readonly<Record<TpHoldFamily, TpArmPose>> = {
+  twoHanded: {
+    family:    'twoHanded',
+    shoulderR: [ 0.40,  0.10, -0.15],
+    upperArmR: [ 1.05,  0.25, -0.10],
+    lowerArmR: [ 0.90,  0.00,  0.00],
+    wristR:    [-0.10,  0.00,  0.00],
+    shoulderL: [ 0.30, -0.10,  0.10],
+    upperArmL: [ 1.20, -0.30,  0.10],
+    lowerArmL: [ 0.95,  0.00,  0.00],
+    wristL:    [-0.10,  0.00,  0.00],
+  },
+  pistol: {
+    family:    'pistol',
+    shoulderR: [ 0.30,  0.10, -0.10],
+    upperArmR: [ 0.85,  0.20, -0.10],
+    lowerArmR: [ 0.75,  0.00,  0.00],
+    wristR:    [ 0.00,  0.00,  0.00],
+    shoulderL: [ 0.20, -0.05,  0.05],
+    upperArmL: [ 0.70, -0.15,  0.05],
+    lowerArmL: [ 0.65,  0.00,  0.00],
+    wristL:    [ 0.00,  0.00,  0.00],
+  },
+  knife: {
+    family:    'knife',
+    shoulderR: [ 0.20,  0.05, -0.05],
+    upperArmR: [ 0.60,  0.15, -0.05],
+    lowerArmR: [ 0.55,  0.00,  0.00],
+    wristR:    [ 0.20, -0.25,  0.00],
+    shoulderL: [ 0.10,  0.00,  0.00],
+    upperArmL: [ 0.20,  0.00,  0.00],
+    lowerArmL: [ 0.20,  0.00,  0.00],
+    wristL:    [ 0.00,  0.00,  0.00],
+  },
+} as const;
+
+/**
+ * Map weapon stem → hold family for arm-pose selection.
+ * Exported for tests.
+ */
+export const TP_STEM_TO_FAMILY: Readonly<Record<string, TpHoldFamily>> = {
+  knife:           'knife',
+  pistol:          'pistol',
+  revolver:        'pistol',
+  smg:             'twoHanded',
+  scifi_smg:       'twoHanded',
+  shotgun:         'twoHanded',
+  assault_rifle:   'twoHanded',
+  assault_rifle_2: 'twoHanded',
+  sniper_rifle:    'twoHanded',
+} as const;
 
 // ---------------------------------------------------------------------------
 // Preloaded source assets (set once by integration)
@@ -415,6 +595,17 @@ export function crouchRootOffsetY(crouching: boolean): number {
 // Per-character animation state stored on the group
 // ---------------------------------------------------------------------------
 
+interface ArmBoneCache {
+  shoulderR: THREE.Bone | null;
+  upperArmR: THREE.Bone | null;
+  lowerArmR: THREE.Bone | null;
+  wristR:    THREE.Bone | null;
+  shoulderL: THREE.Bone | null;
+  upperArmL: THREE.Bone | null;
+  lowerArmL: THREE.Bone | null;
+  wristL:    THREE.Bone | null;
+}
+
 interface AnimMixerState {
   mixer:       THREE.AnimationMixer;
   actions:     Map<string, THREE.AnimationAction>;
@@ -434,10 +625,14 @@ interface AnimMixerState {
   wristRBone: THREE.Object3D | null;
   /** Currently attached weapon stem ('' = none). */
   attachedStem: string;
-  /** Cloned weapon meshes cached per stem (avoid re-cloning on every switch). */
-  weaponCache: Map<string, THREE.Object3D>;
-  /** The currently visible weapon attachment child (or null). */
+  /** Normalized weapon holders cached per stem (avoid re-building on every switch). */
+  weaponCache: Map<string, THREE.Group>;
+  /** The currently visible weapon holder child (or null). */
   currentWeaponAttach: THREE.Object3D | null;
+  /** Cached arm bone refs for gun-hold pose override. */
+  armBones: ArmBoneCache;
+  /** Cached wrist world scale (measured once, defensive against upstream changes). */
+  wristWorldScale: THREE.Vector3 | null;
 }
 
 interface MeshState {
@@ -506,6 +701,16 @@ function _findBone(root: THREE.Object3D, name: string): THREE.Object3D | null {
   return found;
 }
 
+function _findBoneTyped(root: THREE.Object3D, name: string): THREE.Bone | null {
+  let found: THREE.Bone | null = null;
+  root.traverse((obj) => {
+    if (found === null && obj.name === name && obj instanceof THREE.Bone) {
+      found = obj;
+    }
+  });
+  return found;
+}
+
 function buildRiggedMesh(assets: CharacterAssets): {
   outerGroup: THREE.Group;
   mixerState: AnimMixerState;
@@ -560,9 +765,21 @@ function buildRiggedMesh(assets: CharacterAssets): {
     }
   }
 
-  const hipsBone     = _findBone(clonedRoot, 'Hips')     as THREE.Bone | null;
-  const abdomenBone  = _findBone(clonedRoot, 'Abdomen')  as THREE.Bone | null;
+  const hipsBone     = _findBoneTyped(clonedRoot, 'Hips');
+  const abdomenBone  = _findBoneTyped(clonedRoot, 'Abdomen');
   const wristRBone   = _findBone(clonedRoot, 'Wrist.R');
+
+  // Cache arm bone references for gun-hold pose overrides
+  const armBones: ArmBoneCache = {
+    shoulderR: _findBoneTyped(clonedRoot, 'Shoulder.R'),
+    upperArmR: _findBoneTyped(clonedRoot, 'UpperArm.R'),
+    lowerArmR: _findBoneTyped(clonedRoot, 'LowerArm.R'),
+    wristR:    _findBoneTyped(clonedRoot, 'Wrist.R'),
+    shoulderL: _findBoneTyped(clonedRoot, 'Shoulder.L'),
+    upperArmL: _findBoneTyped(clonedRoot, 'UpperArm.L'),
+    lowerArmL: _findBoneTyped(clonedRoot, 'LowerArm.L'),
+    wristL:    _findBoneTyped(clonedRoot, 'Wrist.L'),
+  };
 
   const mixerState: AnimMixerState = {
     mixer,
@@ -577,6 +794,8 @@ function buildRiggedMesh(assets: CharacterAssets): {
     attachedStem:        '',
     weaponCache:         new Map(),
     currentWeaponAttach: null,
+    armBones,
+    wristWorldScale:     null,
   };
 
   return { outerGroup, mixerState };
@@ -748,6 +967,16 @@ function _updateRiggedMesh(
 
   // --- Third-person weapon attachment ---
   _updateWeaponAttachment(ms, c);
+
+  // --- Post-mixer: gun-hold arm pose override ---
+  // Applied after attachment so the wrist already has the correct weapon child.
+  // When dead: no override (Death clip plays arms naturally).
+  // When alive + weapon: override arm chain each frame for consistent hold pose
+  // across all locomotion clips (Walk/Run/strafe arms swing; this pins them).
+  // Even Idle_Gun gets the override for grip consistency with moving states.
+  if (ms.attachedStem !== '') {
+    _applyGunHoldPose(ms);
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -795,8 +1024,95 @@ function _crossfadeTo(
 }
 
 // ---------------------------------------------------------------------------
-// Weapon attachment update
+// Gun-hold arm pose override
 // ---------------------------------------------------------------------------
+
+// Module-scope scratch vector — avoids per-frame heap allocation.
+const _scratchWristScale = new THREE.Vector3();
+
+/**
+ * Apply the static gun-hold arm pose to the arm bone chain post mixer.update.
+ * Only called when alive + weapon attached. Does not touch legs/torso/head.
+ *
+ * Design: override arm bone local Euler rotations directly after mixer.update.
+ * The mixer would overwrite these next frame's mixer.update, so we re-apply
+ * every frame (cheap: just 8 rotation.set calls — no allocation).
+ */
+function _applyGunHoldPose(ms: AnimMixerState): void {
+  const family = TP_STEM_TO_FAMILY[ms.attachedStem];
+  if (family === undefined) return;
+
+  const pose = TP_HOLD_POSES[family];
+  const ab = ms.armBones;
+
+  if (ab.shoulderR !== null) ab.shoulderR.rotation.set(pose.shoulderR[0], pose.shoulderR[1], pose.shoulderR[2]);
+  if (ab.upperArmR !== null) ab.upperArmR.rotation.set(pose.upperArmR[0], pose.upperArmR[1], pose.upperArmR[2]);
+  if (ab.lowerArmR !== null) ab.lowerArmR.rotation.set(pose.lowerArmR[0], pose.lowerArmR[1], pose.lowerArmR[2]);
+  if (ab.wristR    !== null) ab.wristR.rotation.set(   pose.wristR[0],    pose.wristR[1],    pose.wristR[2]);
+
+  if (ab.shoulderL !== null) ab.shoulderL.rotation.set(pose.shoulderL[0], pose.shoulderL[1], pose.shoulderL[2]);
+  if (ab.upperArmL !== null) ab.upperArmL.rotation.set(pose.upperArmL[0], pose.upperArmL[1], pose.upperArmL[2]);
+  if (ab.lowerArmL !== null) ab.lowerArmL.rotation.set(pose.lowerArmL[0], pose.lowerArmL[1], pose.lowerArmL[2]);
+  if (ab.wristL    !== null) ab.wristL.rotation.set(   pose.wristL[0],    pose.wristL[1],    pose.wristL[2]);
+}
+
+// ---------------------------------------------------------------------------
+// Weapon attachment update — builds normalized holder Groups
+// ---------------------------------------------------------------------------
+
+/**
+ * Build a normalized weapon holder Group for a given stem.
+ * The holder wraps the weapon clone, applies axis alignment + scale so the
+ * longest axis equals TP_WEAPON_TARGET_LEN[stem] in world space.
+ *
+ * The holder is what attaches under Wrist.R; the holder's own scale compensates
+ * the ancestor normalScale so the world size equals the target length.
+ *
+ * Design mirrors viewmodel.ts normalizeWeaponModel but operates in 3P space.
+ */
+function _buildNormalizedHolder(
+  stem: string,
+  sourceModel: THREE.Object3D,
+  ancestorWorldScale: THREE.Vector3,
+): THREE.Group {
+  const targetLen = TP_WEAPON_TARGET_LEN[stem] ?? 0.50;
+
+  // Compute source bbox ONCE on the un-scaled source (clone for measurement only)
+  const measureClone = sourceModel.clone(true);
+  const bbox = new THREE.Box3().setFromObject(measureClone);
+
+  const { scale, rotX, rotY, centerZ } = tpComputeWeaponNorm(bbox, targetLen);
+
+  // The weapon clone will be the child of the holder Group.
+  const weaponClone = sourceModel.clone(true);
+
+  // Align and scale the clone inside the holder.
+  // The holder itself is unit scale (world compensation handled below).
+  weaponClone.rotation.set(rotX, rotY, 0);
+  weaponClone.position.set(0, 0, centerZ);
+
+  // Holder: compensate for ancestor scale so world size = target.
+  // ancestor = innerGroup (normalScale); CharacterArmature is identity; bones inherit armature.
+  // holderScale * ancestorScale * weaponGeomScale = targetLen / maxExtent * 1
+  // → holderScale = scale / ancestorScale (per axis — uniform, so use x)
+  const ancestorUniform = ancestorWorldScale.x > 0 ? ancestorWorldScale.x : 1;
+  const holderScale = scale / ancestorUniform;
+
+  const holder = new THREE.Group();
+  holder.scale.setScalar(holderScale);
+  holder.add(weaponClone);
+
+  // Apply per-stem attach offset + rotation on the holder
+  const attachOffset = TP_WEAPON_ATTACH_OFFSETS[stem] ?? _DEFAULT_TP_ATTACH;
+  const [px, py, pz] = attachOffset.pos;
+  const [arx, ary, arz] = attachOffset.rot;
+  holder.position.set(px, py, pz);
+  // Additional attach rotation stacks on top of holder (set after scale to avoid
+  // affecting scale compensation — holder.rotation is independent of scale).
+  holder.rotation.set(arx, ary, arz);
+
+  return holder;
+}
 
 function _updateWeaponAttachment(ms: AnimMixerState, c: Combatant): void {
   // Resolve current weapon id
@@ -822,25 +1138,24 @@ function _updateWeaponAttachment(ms: AnimMixerState, c: Combatant): void {
   const sourceModel = _weaponModels.get(stem);
   if (sourceModel === undefined) return;
 
-  // Use cached clone or create a new one
-  let weaponClone = ms.weaponCache.get(stem);
-  if (weaponClone === undefined) {
-    weaponClone = sourceModel.clone(true);
-    ms.weaponCache.set(stem, weaponClone);
+  // Use cached normalized holder or build a new one
+  let holder = ms.weaponCache.get(stem);
+  if (holder === undefined) {
+    // Measure ancestor world scale once (defensive — accounts for future upstream changes).
+    // The wrist bone's parent chain contains innerGroup (normalScale) as ancestor.
+    // We use the innerGroup's scale directly (normalScale uniform) but measure defensively.
+    if (ms.wristWorldScale === null) {
+      ms.wristRBone.getWorldScale(_scratchWristScale);
+      // wristWorldScale ≈ normalScale (bone inherits innerGroup scale)
+      // Store a copy (Vector3 is mutable — clone it)
+      ms.wristWorldScale = _scratchWristScale.clone();
+    }
+    holder = _buildNormalizedHolder(stem, sourceModel, ms.wristWorldScale);
+    ms.weaponCache.set(stem, holder);
   }
 
-  // Apply tuning
-  const tuning = WEAPON_ATTACH_OVERRIDES[stem] ?? DEFAULT_WEAPON_ATTACH;
-  const [px, py, pz] = tuning.pos;
-  const [rx, ry, rz] = tuning.rot;
-  weaponClone.position.set(px, py, pz);
-  weaponClone.rotation.set(rx, ry, rz);
-  // Compensate for the inner-group's normalScale so the weapon renders at tuning.scale
-  // in world units (the wrist bone lives inside the inner group scaled to normalScale).
-  weaponClone.scale.setScalar(tuning.scale / ms.normalScale);
-
-  ms.wristRBone.add(weaponClone);
-  ms.currentWeaponAttach = weaponClone;
+  ms.wristRBone.add(holder);
+  ms.currentWeaponAttach = holder;
 }
 
 // ---------------------------------------------------------------------------
