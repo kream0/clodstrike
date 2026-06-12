@@ -34,7 +34,7 @@ Routine work (picking features, creating tasks, spawning agents, committing to m
 
 - **Stack**: Bun 1.3, TypeScript strict (`tsc --noEmit` = `bun run check`), three@0.184. NO Vite.
 - **Entry**: `index.html` → `src/main.ts` — fixed-step simulation at 128 Hz with accumulator loop; render at RAF. Exported `clock.now` (game-time seconds) is THE time source for all game logic.
-- **Validation gate**: `bun run check && bun test && bun run build` — all three must pass before any commit. Tests baseline is **1209 tests green**; never let the suite shrink. (Two known intermittents — re-run once before treating as a regression: "F2: guard facing", "Flash blindness re-acquire".)
+- **Validation gate**: `bun run check && bun test && bun run build` — all three must pass before any commit. Tests baseline is **1414 tests green**; never let the suite shrink. (Two known intermittents — re-run once before treating as a regression: "F2: guard facing", "Flash blindness re-acquire".)
 - **Sim randomness is SEEDED** (`src/rng.ts`): all sim-state randomness flows through `game.rng`'s five per-system streams (combat/botAim/botDecision/botNav/round) so same-seed runs replay identically (`determinism.test.ts` enforces this). NEVER add `Math.random()` to a sim path — use the right stream; cosmetic paths (effects/audio/builder tint) may keep `Math.random()`.
 - **Dev server**: `bun run dev` → http://localhost:3000 (`scripts/dev.ts`, per-request Bun.build — works on Bun 1.1+)
 - **Repo**: https://github.com/kream0/clodstrike
@@ -47,6 +47,7 @@ Routine work (picking features, creating tasks, spawning agents, committing to m
 assets/             # CC0 textures (textures/) + GLB models (models/) + LICENSES.md — committed
 scripts/
   copy-assets.ts    # build step: cpSync assets/ -> dist/assets/ (cross-platform)
+  render-grid.ts    # headless top-down PNG rasterizer; optional radar-overlay walkable-mask IoU
 src/
   assets.ts         # Async asset loader: loadAllTextures/loadAllNormalTextures/loadGLB,
                     #   assetUrl() resolves vs document.baseURI (GH Pages subpath-safe)
@@ -75,8 +76,10 @@ src/
   maps/
     index.ts        # Map registry: MAPS (dust2/mirage + session maps), DEFAULT_MAP_ID, resolveMap, registerSessionMap
     validate.ts     # 7-tier custom-map JSON validator (never throws; error accumulation)
-    dust2.ts        # DUST2 MapData: 96×96 ASCII grid, legend, props, spawns, sites
+    dust2.ts        # DUST2 MapData: programmatic carve-from-solid builder driven by dust2_truth.ts
+    dust2_truth.ts  # GROUND-TRUTH landmark table: HU→world transform + all point/opening/region facts
     dust2.test.ts   # BFS connectivity suite (every route both directions)
+    fidelity.test.ts # Automated fidelity gate: 77 landmark/geometry checks against dust2_truth.ts
     mirage.ts       # MIRAGE MapData: window room, palace balcony, apps/market routes
     mirage.test.ts  # Mirage BFS suite (routes, one-ways, chokes, sites)
   bots/
@@ -84,6 +87,7 @@ src/
     nav.test.ts     # Nav unit tests
     bot.ts          # BotManager — per-bot FSM (objective/engage/hunt/plant/defuse/guard)
     bot.test.ts     # Bot behavior tests
+    stuck.test.ts   # Deterministic stuck-repro harness: 3 seeds × 2 maps × 3 rounds = zero stuck allowed
 ```
 
 ---
@@ -130,14 +134,14 @@ Every agent prompt must include:
 2. Files you own (exclusive write) — absolute paths, marked NEW / MODIFY / DELETE
 3. Files to read first — contracts and patterns; don't make the agent explore
 4. Detailed spec — function signatures, behavior, edge cases; no guessing
-5. TS reminders: `strict`, `noUncheckedIndexedAccess`, no `any`
+5. TS reminders: `strict` (note: `noUncheckedIndexedAccess` is NOT enabled in tsconfig.json — guard array accesses manually), no `any`
 6. **Validation**: `bun run check && bun test && bun run build` — report stdout/stderr
 7. **Report format**: files modified, exports, deviations from spec, validation result, concerns
 
 ### Validation gate (full)
 
 1. `bun run check` — zero TypeScript errors
-2. `bun test` — **1209 or more** tests green (never let the suite shrink)
+2. `bun test` — **1414 or more** tests green (never let the suite shrink)
 3. `bun run build` — completes; warn if bundle grows past 1.5 MB (baseline ~1.1 MB)
 4. Browser smoke where possible (pointer-lock caveat — see Known gotchas)
 
@@ -151,7 +155,8 @@ Every agent prompt must include:
 - **WebAudio needs `audio.unlock()` on gesture.** Call it alongside `requestPointerLock()` on the first user interaction that starts the match.
 - **ESM-only browser bundle.** `package.json` has `"type": "module"`. No `require()`, no CommonJS. Static imports only — no dynamic `import()` in hot paths.
 - **claude-in-chrome is loopback-isolated on this machine.** The MCP browser cannot reach `localhost:3000`. Smoke tests are done by the human playtester. Be honest about this rather than claiming browser verification.
-- **Map grid conventions.** Units are meters. Cell size = 1 m. Grid is 96×96; origin = world `x −48, z −48` (rebuilt 2026-06 from real-map radar/setpos calibration, 1 HU = 0.01905 m). Row 0 is north (CT/sites side); rows grow south (+Z, T side). Columns grow east (+X). Y = up. Floor heights are multiples of 0.375 m (0 = CT-spawn/lower-mid ground; T spawn plateau 4.5, A site 4.5, B site 1.5, T plat 5.25). Step-up ≤ 0.5 m — the one-way drops (catwalk→lower mid, B window→site, pit edges, T plat ledge) rely on this rule; don't "fix" them by adding steps. Covered cells (tunnels, doors) have explicit ceiling heights in the legend.
+- **URL-parameter debug modes** (no pointer lock or match required): `?inspect=vm` — first-person viewmodel/arms inspector; keys N/P cycle weapons, F fires; optional `&team=T` and `&walk=1`. `?spectate=1` — auto-start all-bot match with orbit/follow camera; keys `[`/`]` follow prev/next combatant, `O` orbit; optional `&map=<id>` and `&seed=<n>`. `?photo=<station>` — teleports a free camera to 9 iconic dust2 vantage points (`longdoors-t`, `mid-from-ct`, `bwindow`, `catwalk`, `pit`, `tunnels-exit`, `a-site`, `mid-doors`, `goose`) for human fidelity comparison; keys N/P cycle stations, WASD move, arrows look, Q/E up/down.
+- **Map grid conventions.** Units are meters. Cell size = 1 m. Grid is 96×96; origin = world `x −48, z −48` (rebuilt 2026-06 from real-map radar/setpos calibration, 1 HU = 0.01905 m). Row 0 is north (CT/sites side); rows grow south (+Z, T side). Columns grow east (+X). Y = up. Floor heights are multiples of 0.375 m — rebuilt ground-truth values: CT spawn 0.0 m (lowest, ground reference); mid/long/catwalk/B-site 3.75 m; upper tunnels 3.75 m floor (covered, ceil 6.0 m); B window platform 4.125 m; A site 4.5 m; T spawn 4.5 m. These come from the affine HU→grid transform in `dust2_truth.ts` (Y_OFFSET = +2.31 m so CT spawn lifts to 0; all other floors are the uniform-shifted real relative heights). Step-up ≤ 0.5 m — the one-way drops (catwalk→lower mid, B window→site, pit edges, T plat ledge) rely on this rule; don't "fix" them by adding steps. Covered cells (tunnels, doors) have explicit ceiling heights in the legend. **Dust2 is now ground-truth-first**: `dust2.ts` is a programmatic builder verified by `fidelity.test.ts` (77 checks) — keep both green when touching the grid.
 - **`dust2.test.ts` BFS connectivity is the safety net.** If you touch `dust2.ts` or `world.ts`, keep the BFS suite green. It verifies that every named route (Long/Short/Mid/Tunnels) is traversable in both directions.
 - **Props must stay axis-aligned AABBs.** `MapProp` sizes are full extents. The collision system and navgrid both assume no rotation on props.
 - **Renderer assumes greedy-merged static world.** `buildMapScene` merges adjacent cells of the same material into row-merged box meshes (<10 static draw calls). Adding per-cell meshes will blow the draw call budget and break the prop-occlusion assumptions.

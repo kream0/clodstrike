@@ -12,11 +12,12 @@ A Counter-Strike 2–style single-player FPS — bots, bomb defusal, and a low-p
 
 ### Map — de_dust2
 
-- **Geometry-faithful remake** of de_dust2 encoded as a 96×96 ASCII height grid — one character per square meter, each char mapping to floor height, optional ceiling, wall solidity, and material. The layout is calibrated against real-map reference data (radar overview + spawn coordinates, 1 unit = 0.01905 m): correct route proportions, chokepoint widths, site shapes and the real elevation profile (T spawn high plateau at +4.5 m, mid sloping down to CT-side ground at 0 m, A site plateau +4.5 m, B site +1.5 m).
+- **Ground-truth rebuild** — de_dust2 was completely rebuilt from a committed ground-truth coordinate table (`src/maps/dust2_truth.ts`) that derives every cell from public Source Engine Hammer Unit coordinates and the CS:GO radar calibration file (no Valve assets used). The rebuilt grid passes an automated fidelity gate (`src/maps/fidelity.test.ts` — 77/77 checks, runs in `bun test`) covering landmark walkability, floor heights, choke widths, and region connectivity. Programmatic grid construction (carve-from-solid with fill/ramp helpers) replaces the hand-typed ASCII rows. An optional headless renderer (`scripts/render-grid.ts`) produces a radar-calibrated top-down PNG for human side-by-side inspection.
+- **Geometry-faithful remake** of de_dust2 encoded as a 96×96 ASCII height grid — one character per square meter, each char mapping to floor height, optional ceiling, wall solidity, and material. The layout is calibrated against real-map reference data (radar overview + spawn coordinates, 1 HU = 0.01905 m): correct route proportions, chokepoint widths, site shapes and the real elevation profile (CT spawn is ground level 0.0 m; A site plateau +4.5 m; B site +3.75 m; mid/long/catwalk +3.75 m; upper tunnels +4.125 m; T spawn +4.5 m).
 - **All iconic areas reproduced**: LongA, Catwalk, UpperTunnels, CT Spawn, A Site, B Site, B Doors, Mid, Short, Pit, Goose, and more — 24+ named regions used by bot routing logic.
 - **One-way drops like the real map**: catwalk → lower mid, B window → site, pit edges, and the T-spawn ledge are drop-only (the ≤ 0.5 m step-up rule makes them unclimbable), forcing real rotation routes.
 - **Covered geometry**: tunnel and door cells carry explicit ceiling heights so players and bots move under realistic headroom rather than passing through flat ceilings.
-- **25 axis-aligned props**: crates, B-site car, Xbox box, sandbags, planks, and the classic mid-door pair — the gap between them is the AWP mid-doors sightline. Props carry full AABB collision and are included in the navgrid as impassable obstacles.
+- **25 axis-aligned props**: crates, B-site car, Xbox box, sandbags, planks, and the classic mid-door pair — the gap between them is the AWP mid-doors sightline. Props carry full AABB collision and are now included in the NavGrid as impassable obstacles — prop-aware routing prevents bots walking into crates and cars.
 - **5+5 spawns** with pre-aimed yaw angles; A and B bombsite rectangles used by the plant/defuse logic.
 - **BFS connectivity suite** in `dust2.test.ts` guarantees every canonical route (Long, Short, Mid, Upper/Lower Tunnels) is traversable in both directions at the map cell level — the safety net whenever the grid changes.
 - **Greedy row-merged renderer**: adjacent cells of the same material are merged into axis-aligned box meshes, producing fewer than 10 static draw calls for the entire map plus ~25 prop meshes. Lambert materials with per-box vertex-color tint; hemisphere + warm directional sun with 2048 PCF shadows; exponential fog; sand/stone palette.
@@ -101,7 +102,8 @@ Validation errors are shown in the menu (first 3 + count of remainder). JSON par
 
 - **CC0-textured world**: 8 open-licensed tiling materials (ambientCG + Poly Haven — sand, sandstone brick, plaster, paving stone, concrete, wood, painted metal, fabric), color + normal maps, applied across the greedy-merged map geometry with **world-anchored planar UVs** so tiles continue seamlessly across merged boxes. Per-kind prop texturing (wood crates, metal car/doors/xbox, fabric sandbags). Colors-only fallback if textures fail to load.
 - **CC0 GLB weapon viewmodels for all 30 weapons**: every roster weapon — including the knife — renders a real Quaternius CC0 model in first person, mapped through the same 9 model families used by third-person characters (loaded once, shared). Auto-normalized (longest-axis-to-barrel alignment + target-length scaling, per-stem tuning with per-id overrides) under the procedural animation anchor — bob/sway/kick/reload all still code-driven. Any model that fails to load falls back to the procedural box gun.
-- **First-person arms**: rigged low-poly arms (J-Toastie, CC-BY 4.0) hold every weapon — per-family grip poses (two-handed long guns, pistol with support hand, blade-forward knife) with curled fingers, parented to the weapon anchor so bob/sway/kick/reload move hands and gun together. Sleeve tinted per team (CT blue-grey / T sand). Arms missing → gun-only viewmodel, no regression.
+- **First-person arms with two-bone IK grips**: rigged low-poly arms (J-Toastie, CC-BY 4.0) hold every weapon — per-family grip poses (two-handed long guns, pistol with support hand, blade-forward knife) with curled fingers and hands placed on each weapon's actual grip points via IK, parented to the weapon anchor so bob/sway/kick/reload move hands and gun together. Sleeve tinted per team (CT blue-grey / T sand). Arms missing → gun-only viewmodel, no regression.
+- **Third-person weapon hold**: in third-person view, weapons are real-sized GLB models visibly held by characters during locomotion — the weapon is attached to the right-wrist bone and tracks the AnimationMixer skeleton through idle, walk, and run animations.
 - **Async boot with loading screen**: 28-asset progress bar (8 color maps, 8 normal maps, 9 weapon GLBs, 2 rigged characters, first-person arms), parallel loading, per-asset graceful fallback — a 404 can never brick the boot.
 - **Rigged characters with real animation clips**: Quaternius CC0 rigged characters (CT operator / T phoenix, shared 62-joint skeleton) driven by `THREE.AnimationMixer` — Idle_Gun, Walk, Run with directional Run_Left/Right/Back picked from velocity projected into model space, a real Death clip, 0.18 s crossfades, and playback speed synced to actual move speed (no foot-sliding). Crouch is a post-mixer hips-drop + abdomen tilt (the pack has no crouch clip). Characters hold real weapon models attached to the right wrist bone, mapped from all 30 roster ids and swapped live on weapon change. Visual-only: hitboxes and eye heights unchanged. Procedural box-bot fallback preserved.
 - **Modernized HUD & menus**: translucent glass plates, tabular numerals, sand-gold accent, team-colored scoreplate/scoreboard, killfeed chips, buy-menu cards with keycap badges, segmented difficulty picker, low-health states — all still DOM + injected CSS, no images or fonts.
@@ -154,7 +156,8 @@ Team-exclusive weapons are enforced at purchase time — a CT can never buy an A
 - **Honest walls**: losing line of sight freezes the bot's aim on the last-seen corner point (no live tracking through geometry), and the trigger is hard-gated on current-tick LOS — bots never fire at a target they cannot actually see.
 - **Difficulty tiers**: easy (550 ms reaction, ±3.2° aim error, 45 m vision), normal (350 ms, ±1.7°, 60 m), hard (220 ms, ±0.8°, 80 m). Aim error resamples every 0.25 s; locks in and shrinks after 1.2 s on the same target. Recoil control factor scales per difficulty.
 - **Shared code**: bots run the exact same `simulateMovement` and `updateWeapon` calls as the player, driving identical physics and weapon state machines — no separate bot-movement shortcuts.
-- **Stuck recovery**: horizontal speed below 0.3 m/s for 0.7 s triggers a jump; 1.5 s of stuck triggers a full A* replan; stuck escorts break formation permanently and route independently.
+- **Prop-aware NavGrid**: the A* grid now marks prop AABBs as impassable at build time — bots no longer route into crates, cars, or sandbags. This was the root cause of permanent bot-stuck events on the rebuilt dust2.
+- **Stuck recovery**: horizontal speed below 0.3 m/s for 0.7 s triggers a jump; 1.5 s of stuck triggers a full A* replan; stuck escorts break formation permanently and route independently. Cross-map routing is now map-agnostic (no dust2-only hardcoded area names), escort/deadlock and nav-oscillation guards added. A deterministic stuck-repro harness (`src/bots/stuck.test.ts`) runs 3 seeds × 2 maps × 3 rounds (18 round-segments) and asserts zero stuck events.
 - **Mission persistence**: a dropped bomb is actively retrieved — the closest living T is designated sticky retriever (re-designated if pinned in a fight for 4 s+); site guards face the enemy approach instead of a default angle; kill/shot intel inside enemy spawn zones is ignored (no spawn-camping detours); bot-vs-bot separation impulses prevent stacked clumps.
 - **Economy-aware buying**: per-round team strategy — eco (save), force-buy (loss streak / team-economy triggered), full-buy, and occasional AWP picks (max one fresh AWP per team per round). AWP bots scope in when engaging.
 - **Tiered buy pools from the full roster**: ecos draw budget pistols (P250 / Dual Berettas / Tec-9 / Five-SeveN / Deagle), force-buys draw SMGs (~80%) or shotguns (~20%), full-buys pick budget rifles (Galil/FAMAS) when tight and standard rifles when funded, with rich bots (> $6 000) occasionally splashing on AUG/SG 553 — meme tier (M249, Negev, autosnipers) deliberately excluded. Armor is topped up from live money after the gun buy.
@@ -213,19 +216,82 @@ Team-exclusive weapons are enforced at purchase time — a CT can never buy an A
 
 ## Upcoming features
 
-### Active track — visual & UX overhaul (user-directed)
-
-- **Open-licensed assets** — ✅ world textures · ✅ weapon models · ✅ character models (all shipped; credits in `assets/LICENSES.md`).
-- **UI improvement** — ✅ HUD/menu visual overhaul shipped.
-- **Performance** — ✅ shipped: tightened shadow frustum (104×96 m fit), high-performance GPU preference, 1.5× pixel-ratio cap, scoreboard/radar update gating, draw-call + triangle counters in the F3 overlay.
-
 ### Short term
 
+- **North-mid ramp climbability** — the redundant mid slope uses >step-up floor bands; making it climbable perturbs the seeded sim and re-breaks dust2 stuck tests, so it needs a bot-nav wall-hug/anti-oscillation change (tracked, low priority; connectivity is intact via the parallel CT ramp).
 - **Halftime side swap** — teams exchange CT/T at round 13; economy resets.
 
 ### Long term
 
 - **Multiplayer via WebSocket / WebRTC** — the deterministic seeded 128 Hz sim + per-tick input model (built for replay) are the groundwork; netcode model TBD.
+
+---
+
+## Debug & dev tools
+
+### URL parameter debug modes
+
+Append to the local dev URL (`http://localhost:3000`) — no pointer lock or match required.
+
+#### `?inspect=vm` — first-person viewmodel & arms inspector
+
+Bypasses the match flow; renders the first-person viewmodel in isolation (dark background). Useful for checking grip poses, arm IK, and weapon GLB alignment.
+
+| Key | Action |
+|:----|:-------|
+| **N** | Next weapon |
+| **P** | Previous weapon |
+| **F** | Trigger fire animation |
+
+Optional extra params:
+- `&team=T` — switch sleeve colour to T-side sand (default: CT blue-grey)
+- `&walk=1` — enable weapon-bob (simulates walking speed)
+
+#### `?spectate=1` — auto-start all-bot match with orbit/follow camera
+
+Starts a normal match immediately (no pointer lock, no audio) with the player removed — bots only. Use to verify bot behaviour and routing without interacting.
+
+| Key | Action |
+|:----|:-------|
+| **]** | Follow next combatant |
+| **[** | Follow previous combatant |
+| **O** | Switch to orbit camera |
+
+Optional extra params:
+- `&map=mirage` — choose map (default: dust2)
+- `&seed=<n>` — set a specific match seed for deterministic replay
+
+#### `?photo=<station>` — fidelity POV teleport
+
+Teleports a free camera to one of 9 iconic dust2 vantage points for human side-by-side comparison with real CS screenshots. Camera position is derived at runtime from `dust2_truth.ts` landmarks so it stays correct as the truth table grows.
+
+Stations: `longdoors-t` · `mid-from-ct` · `bwindow` · `catwalk` · `pit` · `tunnels-exit` · `a-site` · `mid-doors` · `goose`
+
+| Key | Action |
+|:----|:-------|
+| **N** | Next station |
+| **P** | Previous station |
+| **W A S D** | Move camera |
+| **Arrow keys** | Look |
+| **Q / E** | Move up / down |
+
+### Fidelity tooling
+
+**`src/maps/fidelity.test.ts`** — automated fidelity gate (committed, runs in `bun test`). Asserts the built `DUST2` map against the ground-truth landmark table in `src/maps/dust2_truth.ts`: landmark walkability, floor heights within tolerance, choke widths ±1 cell, and region connectivity. 77/77 checks pass. No images, no file I/O.
+
+**`src/maps/dust2_truth.ts`** — committed ground-truth landmark table. Every landmark is derived from public Source Engine HU coordinates with a documented affine transform (HU → metres → grid cell). The rebuild agent reads this to place rooms/chokes/sites; the fidelity gate reads it to verify the result.
+
+**`scripts/render-grid.ts`** — headless top-down PNG rasterizer. Renders any `MapData` at radar-calibrated scale with landmark markers overlaid.
+
+```bash
+# Render dust2 grid to a PNG
+bun scripts/render-grid.ts --map dust2 --out ref/dust2-grid.png
+
+# Compute walkable-mask IoU against a local radar image
+# (drop a LOCAL copy of de_dust2_radar.png at ref/de_dust2_radar.png first —
+#  Valve radar files are copyrighted and must never be committed)
+bun scripts/render-grid.ts --map dust2 --out ref/dust2-grid.png --overlay
+```
 
 ---
 
@@ -243,7 +309,7 @@ bun install
 |:---|:---|
 | `bun run dev` | Dev server at http://localhost:3000 — fresh bundle on every reload (works on Bun 1.1+) |
 | `bun run check` | TypeScript type-check only (`tsc --noEmit`) |
-| `bun test` | Run the test suite (1209 tests) |
+| `bun test` | Run the test suite (1414 tests) |
 | `bun run build` | Bundle for production into `dist/` (~1.1 MB) |
 
 ## Controls
@@ -296,6 +362,6 @@ See [`CLAUDE.md`](./CLAUDE.md) for the full project guide. Short module summary:
 ## Tech stack
 
 - **[Three.js](https://threejs.org/) 0.184** — WebGL rendering
-- **[TypeScript](https://www.typescriptlang.org/)** (strict, `noUncheckedIndexedAccess`)
+- **[TypeScript](https://www.typescriptlang.org/)** (strict mode)
 - **[Bun](https://bun.sh/) 1.3** — runtime, dev server (HTML entrypoint), bundler, test runner
 - **Open-licensed assets** — CC0 textures (ambientCG, Poly Haven) and CC0 rigged characters + weapon models (Quaternius); map geometry still generated from an ASCII grid; audio 100% synthesized with the Web Audio API (no audio files). Credits: [`assets/LICENSES.md`](./assets/LICENSES.md)
