@@ -604,6 +604,7 @@ export const WEAPONS: Record<string, WeaponDef> = {
     recoilPitch: 0, recoilYaw: 0, recoilRecovery: 0,
     auto: false, killReward: 1500,
     isKnife: true, range: 1.6,
+    // No penetration: melee can't wallbang
   },
 
   // -------------------------------------------------------------------------
@@ -623,6 +624,7 @@ export const WEAPONS: Record<string, WeaponDef> = {
     category: 'pistol', teams: ['T'],
     recoilPattern: GLOCK_PATTERN,
     spreadSpray: 0.002,
+    penetration: 0.35,
   },
   usp: {
     id: 'usp', name: 'USP-S', slot: 'secondary', price: 200,
@@ -636,6 +638,7 @@ export const WEAPONS: Record<string, WeaponDef> = {
     category: 'pistol', teams: ['CT'],
     recoilPattern: USP_PATTERN,
     spreadSpray: 0.0015,
+    penetration: 0.40,
   },
   deagle: {
     id: 'deagle', name: 'Desert Eagle', slot: 'secondary', price: 700,
@@ -648,6 +651,7 @@ export const WEAPONS: Record<string, WeaponDef> = {
     category: 'pistol',
     // No pattern: legacy formula (heavy single-shot punch)
     spreadSpray: 0.006,
+    penetration: 0.70,
   },
   dualies: {
     id: 'dualies', name: 'Dual Berettas', slot: 'secondary', price: 300,
@@ -660,6 +664,7 @@ export const WEAPONS: Record<string, WeaponDef> = {
     category: 'pistol',
     recoilPattern: DUALIES_PATTERN,
     spreadSpray: 0.002,
+    penetration: 0.40,
   },
   p250: {
     id: 'p250', name: 'P250', slot: 'secondary', price: 250,
@@ -672,6 +677,7 @@ export const WEAPONS: Record<string, WeaponDef> = {
     category: 'pistol',
     recoilPattern: P250_PATTERN,
     spreadSpray: 0.002,
+    penetration: 0.40,
   },
   fiveseven: {
     id: 'fiveseven', name: 'Five-SeveN', slot: 'secondary', price: 500,
@@ -684,6 +690,7 @@ export const WEAPONS: Record<string, WeaponDef> = {
     category: 'pistol', teams: ['CT'],
     recoilPattern: FIVESEVEN_PATTERN,
     spreadSpray: 0.0018,
+    penetration: 0.50,  // armor-piercing pistol
   },
   tec9: {
     id: 'tec9', name: 'Tec-9', slot: 'secondary', price: 500,
@@ -696,6 +703,7 @@ export const WEAPONS: Record<string, WeaponDef> = {
     category: 'pistol', teams: ['T'],
     recoilPattern: TEC9_PATTERN,
     spreadSpray: 0.003,
+    penetration: 0.35,
   },
 
   // -------------------------------------------------------------------------
@@ -714,6 +722,7 @@ export const WEAPONS: Record<string, WeaponDef> = {
     category: 'smg', teams: ['T'],
     recoilPattern: MAC10_PATTERN,
     spreadSpray: 0.003,
+    penetration: 0.45,
   },
   mp9: {
     id: 'mp9', name: 'MP9', slot: 'primary', price: 1250,
@@ -726,6 +735,7 @@ export const WEAPONS: Record<string, WeaponDef> = {
     category: 'smg', teams: ['CT'],
     recoilPattern: MP9_PATTERN,
     spreadSpray: 0.003,
+    penetration: 0.45,
   },
   mp7: {
     id: 'mp7', name: 'MP7', slot: 'primary', price: 1500,
@@ -738,6 +748,7 @@ export const WEAPONS: Record<string, WeaponDef> = {
     category: 'smg',
     recoilPattern: MP7_PATTERN,
     spreadSpray: 0.003,
+    penetration: 0.50,
   },
   ump45: {
     id: 'ump45', name: 'UMP-45', slot: 'primary', price: 1200,
@@ -750,6 +761,7 @@ export const WEAPONS: Record<string, WeaponDef> = {
     category: 'smg',
     recoilPattern: UMP45_PATTERN,
     spreadSpray: 0.003,
+    penetration: 0.55,
   },
   p90: {
     id: 'p90', name: 'P90', slot: 'primary', price: 2350,
@@ -762,6 +774,7 @@ export const WEAPONS: Record<string, WeaponDef> = {
     category: 'smg',
     recoilPattern: P90_PATTERN,
     spreadSpray: 0.003,
+    penetration: 0.50,
   },
   bizon: {
     id: 'bizon', name: 'PP-Bizon', slot: 'primary', price: 1400,
@@ -774,6 +787,7 @@ export const WEAPONS: Record<string, WeaponDef> = {
     category: 'smg',
     recoilPattern: BIZON_PATTERN,
     spreadSpray: 0.003,
+    penetration: 0.45,
   },
 
   // -------------------------------------------------------------------------
@@ -795,6 +809,7 @@ export const WEAPONS: Record<string, WeaponDef> = {
     category: 'heavy',
     // No recoilPattern: pump single-shot; spreadBase covers pellet spread proxy
     spreadSpray: 0.008,
+    penetration: 0.20,  // shotguns: low penetration
   },
   xm1014: {
     id: 'xm1014', name: 'XM1014', slot: 'primary', price: 2000,
@@ -806,6 +821,7 @@ export const WEAPONS: Record<string, WeaponDef> = {
     auto: false, killReward: 900,
     category: 'heavy',
     spreadSpray: 0.008,
+    penetration: 0.20,
   },
   sawedoff: {
     id: 'sawedoff', name: 'Sawed-Off', slot: 'primary', price: 1100,
@@ -817,6 +833,7 @@ export const WEAPONS: Record<string, WeaponDef> = {
     auto: false, killReward: 900,
     category: 'heavy', teams: ['T'],
     spreadSpray: 0.008,
+    penetration: 0.15,  // sawed-off: shortest range / lowest pen
   },
   mag7: {
     id: 'mag7', name: 'MAG-7', slot: 'primary', price: 1300,
@@ -828,6 +845,7 @@ export const WEAPONS: Record<string, WeaponDef> = {
     auto: false, killReward: 900,
     category: 'heavy', teams: ['CT'],
     spreadSpray: 0.008,
+    penetration: 0.20,
   },
   m249: {
     id: 'm249', name: 'M249', slot: 'primary', price: 5200,
@@ -840,6 +858,7 @@ export const WEAPONS: Record<string, WeaponDef> = {
     category: 'heavy',
     recoilPattern: M249_PATTERN,
     spreadSpray: 0.005,
+    penetration: 0.80,  // LMGs: rifle-class penetration
   },
   negev: {
     id: 'negev', name: 'Negev', slot: 'primary', price: 1700,
@@ -852,6 +871,7 @@ export const WEAPONS: Record<string, WeaponDef> = {
     category: 'heavy',
     recoilPattern: NEGEV_PATTERN,   // wild first 10; settles after (CS2 gimmick)
     spreadSpray: 0.005,
+    penetration: 0.80,
   },
 
   // -------------------------------------------------------------------------
@@ -869,6 +889,7 @@ export const WEAPONS: Record<string, WeaponDef> = {
     category: 'rifle', teams: ['CT'],
     recoilPattern: FAMAS_PATTERN,
     spreadSpray: 0.004,
+    penetration: 0.80,
   },
   galil: {
     id: 'galil', name: 'Galil AR', slot: 'primary', price: 1800,
@@ -881,6 +902,7 @@ export const WEAPONS: Record<string, WeaponDef> = {
     category: 'rifle', teams: ['T'],
     recoilPattern: GALIL_PATTERN,
     spreadSpray: 0.004,
+    penetration: 0.80,
   },
   // NOTE: M4A1-S is a loadout alternate for M4A4 — excluded.
   m4a4: {
@@ -895,6 +917,7 @@ export const WEAPONS: Record<string, WeaponDef> = {
     category: 'rifle', teams: ['CT'],
     recoilPattern: M4A4_PATTERN,
     spreadSpray: 0.004,
+    penetration: 0.80,
   },
   ak47: {
     id: 'ak47', name: 'AK-47', slot: 'primary', price: 2700,
@@ -908,6 +931,7 @@ export const WEAPONS: Record<string, WeaponDef> = {
     category: 'rifle', teams: ['T'],
     recoilPattern: AK47_PATTERN,
     spreadSpray: 0.004,
+    penetration: 0.85,
   },
   aug: {
     id: 'aug', name: 'AUG', slot: 'primary', price: 3300,
@@ -920,6 +944,7 @@ export const WEAPONS: Record<string, WeaponDef> = {
     category: 'rifle', teams: ['CT'],
     recoilPattern: AUG_PATTERN,
     spreadSpray: 0.004,
+    penetration: 0.80,
   },
   sg553: {
     id: 'sg553', name: 'SG 553', slot: 'primary', price: 3000,
@@ -932,6 +957,7 @@ export const WEAPONS: Record<string, WeaponDef> = {
     category: 'rifle', teams: ['T'],
     recoilPattern: SG553_PATTERN,
     spreadSpray: 0.004,
+    penetration: 0.85,
   },
   // Bolt-action sniper — scope:true; rpm 48 ≈ bolt cycle; no recoilPattern (single shot)
   // headshot check: 88 * 4 (headshotMult) = 352 dmg — OHKO through helmet (100 HP).
@@ -949,6 +975,7 @@ export const WEAPONS: Record<string, WeaponDef> = {
     category: 'rifle',
     // No recoilPattern: bolt-action single-pull like AWP
     spreadSpray: 0,
+    penetration: 0.75,
   },
   awp: {
     id: 'awp', name: 'AWP', slot: 'primary', price: 4750,
@@ -962,6 +989,7 @@ export const WEAPONS: Record<string, WeaponDef> = {
     category: 'rifle',
     // No pattern: legacy formula
     spreadSpray: 0,
+    penetration: 0.90,
   },
   // Auto-snipers — scope:true, auto:true; heavy spreadMove like AWP when moving
   // NOTE: R8 Revolver is a loadout alternate for Deagle — excluded.
@@ -976,6 +1004,7 @@ export const WEAPONS: Record<string, WeaponDef> = {
     category: 'rifle', teams: ['T'],
     recoilPattern: G3SG1_PATTERN,
     spreadSpray: 0,
+    penetration: 0.85,
   },
   scar20: {
     id: 'scar20', name: 'SCAR-20', slot: 'primary', price: 5000,
@@ -988,6 +1017,7 @@ export const WEAPONS: Record<string, WeaponDef> = {
     category: 'rifle', teams: ['CT'],
     recoilPattern: SCAR20_PATTERN,
     spreadSpray: 0,
+    penetration: 0.85,
   },
 };
 

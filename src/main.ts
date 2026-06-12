@@ -548,6 +548,16 @@ async function boot(): Promise<void> {
     }
   });
 
+  // --- Wallbang penetration impacts ---
+  // Both the entry and exit impacts of a penetrating shot are emitted as
+  // wallImpact events by combat.ts. Non-penetrating wall hits are still
+  // rendered by the existing ShotResult.surface branch below — this handler
+  // only fires for penetrating shots to avoid double-rendering.
+  gameEvents.on('wallImpact', (ev) => {
+    effects.impact(ev.pos, ev.normal, 'world');
+    effects.addDecal(ev.pos, ev.normal);
+  });
+
   // --- Kill / damage events ---
   gameEvents.on('kill', (ev) => {
     if (ev.attacker === player) {

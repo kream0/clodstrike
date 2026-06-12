@@ -82,6 +82,12 @@ export interface WeaponDef {
   category?: 'pistol' | 'smg' | 'heavy' | 'rifle';
   /** Teams allowed to buy. Omitted = both teams may buy. */
   teams?: ReadonlyArray<'CT' | 'T'>;
+  /**
+   * Bullet penetration power in [0, 1]. Higher = more penetration.
+   * Omitted or 0 = never penetrates (knife, grenades, shotguns below 0.25, etc.).
+   * Used by combat.ts to continue a shot through thin solids with reduced damage.
+   */
+  penetration?: number;
 }
 export interface WeaponState { def: WeaponDef; ammo: number; reserve: number; reloading: boolean; reloadEnd: number; nextFire: number; shotsFired: number }
 export interface Inventory { knife: WeaponState; secondary: WeaponState | null; primary: WeaponState | null; activeSlot: WeaponSlot }
@@ -132,4 +138,10 @@ export interface GameEvents {
   grenadeThrown: { thrower: Combatant; type: GrenadeType };
   grenadeDetonated: { type: GrenadeType; pos: Vec3 };
   combatantFlashed: { victim: Combatant; intensity: number; duration: number };
+  /**
+   * Fired for every wall/prop surface the bullet hits (entry and exit).
+   * The `penetrated` flag is true on the EXIT point of a penetrated solid,
+   * allowing the visual layer to render an exit decal/hole distinctly.
+   */
+  wallImpact: { pos: Vec3; normal: Vec3; surface: 'wall' | 'prop'; penetrated?: boolean };
 }

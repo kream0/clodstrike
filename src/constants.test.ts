@@ -196,6 +196,8 @@ describe('WEAPONS — canonical price spot-checks', () => {
 //    10.0 instead of 1.0, while allowing long MG patterns with high totals).
 // ---------------------------------------------------------------------------
 
+// (section 7 tests below, section 8 penetration tests after)
+
 describe('WEAPONS — recoilPattern sanity', () => {
   for (const def of ALL) {
     if (!def.recoilPattern) continue;
@@ -213,4 +215,53 @@ describe('WEAPONS — recoilPattern sanity', () => {
       expect(avg).toBeLessThan(1.5);
     });
   }
+});
+
+// ---------------------------------------------------------------------------
+// 8. Penetration field integrity
+// ---------------------------------------------------------------------------
+
+describe('WEAPONS — penetration field integrity', () => {
+  // All weapons that have a penetration field must be in [0, 1].
+  for (const def of ALL) {
+    if (def.penetration !== undefined) {
+      it(`${def.id}: penetration in [0, 1]`, () => {
+        expect(def.penetration).toBeGreaterThanOrEqual(0);
+        expect(def.penetration).toBeLessThanOrEqual(1);
+      });
+    }
+  }
+
+  it('knife has no penetration (undefined or 0)', () => {
+    const k = WEAPONS['knife'];
+    expect(k?.penetration ?? 0).toBe(0);
+  });
+
+  it('shotguns have penetration ≤ 0.30', () => {
+    const shotgunIds = ['nova', 'xm1014', 'sawedoff', 'mag7'];
+    for (const id of shotgunIds) {
+      const def = WEAPONS[id];
+      expect(def).toBeDefined();
+      // penetration is optional; if absent treat as 0
+      expect(def?.penetration ?? 0).toBeLessThanOrEqual(0.30);
+    }
+  });
+
+  it('AWP and auto-snipers have penetration ≥ 0.75', () => {
+    const sniperIds = ['awp', 'g3sg1', 'scar20'];
+    for (const id of sniperIds) {
+      const def = WEAPONS[id];
+      expect(def).toBeDefined();
+      expect(def?.penetration ?? 0).toBeGreaterThanOrEqual(0.75);
+    }
+  });
+
+  it('SSG08 has penetration ≥ 0.70', () => {
+    expect(WEAPONS['ssg08']?.penetration ?? 0).toBeGreaterThanOrEqual(0.70);
+  });
+
+  it('AK-47 and SG553 have penetration ≥ 0.80', () => {
+    expect(WEAPONS['ak47']?.penetration ?? 0).toBeGreaterThanOrEqual(0.80);
+    expect(WEAPONS['sg553']?.penetration ?? 0).toBeGreaterThanOrEqual(0.80);
+  });
 });

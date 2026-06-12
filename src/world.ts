@@ -7,6 +7,8 @@ export interface RayHit {
   normal: Vec3;
   distance: number;
   kind: 'floor' | 'wall' | 'ceiling' | 'prop';
+  /** Index into World.propBoxes for 'prop' hits; used by traceSolidExit. */
+  propIndex?: number;
 }
 
 
@@ -490,7 +492,8 @@ export class World {
     }
 
     // --- Prop rayAABB ---
-    for (const box of this.propBoxes) {
+    for (let pi = 0; pi < this.propBoxes.length; pi++) {
+      const box = this.propBoxes[pi]!;
       const hit = rayAABBNormal(origin, invDir, box);
       if (hit !== null && hit.t < bestDist) {
         bestDist = hit.t;
@@ -499,6 +502,7 @@ export class World {
           normal: hit.normal,
           distance: hit.t,
           kind: 'prop',
+          propIndex: pi,
         };
       }
     }
@@ -515,6 +519,173 @@ export class World {
     const dir: Vec3 = { x: dx / dist, y: dy / dist, z: dz / dist };
     const hit = this.raycast(a, dir, dist - 0.01);
     return hit === null;
+  }
+
+  /**
+   * Given an entry point on the surface of a solid (wall cell or prop AABB),
+   * trace through the solid along `dir` and return the exit point and thickness.
+   *
+   * For wall cells: DDA-marches forward while cells are solid (wall=true at the
+   * ray's Y height considering floor/ceiling), stopping at the first open cell or
+   * at maxThickness. Mind: a prop entry is detected by the caller from the
+   * worldHit.kind === 'prop'; for prop exits we use analytic AABB far-side
+   * intersection of the same box.
+   *
+   * For prop hits: the entry point is on a face of a propBox; we compute the
+   * analytic exit on the far face of that same box.
+   *
+   * Returns null when the solid region is thicker than maxThickness.
+   *
+   * No heap allocations beyond the return object (module-scope temp vecs reused).
+   */
+  traceSolidExit(
+    entryPoint: Vec3,
+    dir: Vec3,
+    maxThickness: number,
+    hitKind: 'wall' | 'prop',
+    hitPropIndex?: number,
+  ): { exitPoint: Vec3; thickness: number } | null {
+    if (hitKind === 'prop' && hitPropIndex !== undefined) {
+      // Analytic far-side exit for the known prop AABB.
+      const box = this.propBoxes[hitPropIndex];
+      if (box === undefined) return null;
+
+      // Shoot a ray from just inside the box along dir to find the exit t.
+      // Entry is on the near face; exit is on one of the other faces.
+      // We use a slab test from the entry point itself.
+      const invX = dir.x === 0 ? Infinity : 1 / dir.x;
+      const invY = dir.y === 0 ? Infinity : 1 / dir.y;
+      const invZ = dir.z === 0 ? Infinity : 1 / dir.z;
+
+      // Compute t to each max face (exit slabs).
+      const txMax = dir.x === 0 ? Infinity : (box.max.x - entryPoint.x) * invX;
+      const txMin = dir.x === 0 ? Infinity : (box.min.x - entryPoint.x) * invX;
+      const tyMax = dir.y === 0 ? Infinity : (box.max.y - entryPoint.y) * invY;
+      const tyMin = dir.y === 0 ? Infinity : (box.min.y - entryPoint.y) * invY;
+      const tzMax = dir.z === 0 ? Infinity : (box.max.z - entryPoint.z) * invZ;
+      const tzMin = dir.z === 0 ? Infinity : (box.min.z - entryPoint.z) * invZ;
+
+      // Exit t is the minimum positive t among the far slabs in our travel direction.
+      // tFar for each axis = the slab in the direction we're travelling.
+      const txFar = dir.x >= 0 ? txMax : txMin;
+      const tyFar = dir.y >= 0 ? tyMax : tyMin;
+      const tzFar = dir.z >= 0 ? tzMax : tzMin;
+
+      // The exit is at the minimum positive tFar (first face we exit through).
+      const tExit = Math.min(
+        txFar > 0 ? txFar : Infinity,
+        tyFar > 0 ? tyFar : Infinity,
+        tzFar > 0 ? tzFar : Infinity,
+      );
+
+      if (!isFinite(tExit) || tExit > maxThickness) return null;
+
+      return {
+        exitPoint: {
+          x: entryPoint.x + dir.x * tExit,
+          y: entryPoint.y + dir.y * tExit,
+          z: entryPoint.z + dir.z * tExit,
+        },
+        thickness: tExit,
+      };
+    }
+
+    // Wall-cell DDA exit trace.
+    // Step forward through solid cells until we find an open cell or exceed maxThickness.
+    const cs = this.map.cellSize;
+    const origX = this.map.origin.x;
+    const origZ = this.map.origin.z;
+
+    const ox = entryPoint.x;
+    const oy = entryPoint.y;
+    const oz = entryPoint.z;
+    const dx = dir.x;
+    const dz = dir.z;
+
+    // Start one epsilon past the entry to make sure we're inside the solid.
+    const epsilonT = 0.001;
+    const startX = ox + dx * epsilonT;
+    const startZ = oz + dz * epsilonT;
+
+    let col = Math.floor((startX - origX) / cs);
+    let row = Math.floor((startZ - origZ) / cs);
+
+    const stepC = dx > 0 ? 1 : dx < 0 ? -1 : 0;
+    const stepR = dz > 0 ? 1 : dz < 0 ? -1 : 0;
+
+    // Handle purely vertical ray (dx=dz=0): walls are full-height in the 2.5D model,
+    // so a vertical ray can never exit a wall cell horizontally — return null (blocked).
+    if (stepC === 0 && stepR === 0) {
+      return null;
+    }
+
+    const tDeltaC = Math.abs(cs / (dx === 0 ? 1e-10 : dx));
+    const tDeltaR = Math.abs(cs / (dz === 0 ? 1e-10 : dz));
+
+    let tMaxC: number;
+    let tMaxR: number;
+    if (dx === 0) {
+      tMaxC = Infinity;
+    } else if (dx > 0) {
+      tMaxC = ((origX + (col + 1) * cs) - startX) / dx;
+    } else {
+      tMaxC = ((origX + col * cs) - startX) / dx;
+    }
+    if (dz === 0) {
+      tMaxR = Infinity;
+    } else if (dz > 0) {
+      tMaxR = ((origZ + (row + 1) * cs) - startZ) / dz;
+    } else {
+      tMaxR = ((origZ + row * cs) - startZ) / dz;
+    }
+
+    // DDA march forward while cells are solid.
+    // Each time we exit a cell boundary, check if the new cell is open.
+    for (let step = 0; step < 128; step++) {
+      // Capture the crossing t BEFORE advancing so we have the exact boundary distance.
+      // This avoids the tMax-tDelta recovery formula which produces large negative numbers
+      // on non-axis-aligned rays (the non-advancing axis has tMax-tDelta < 0).
+      const tCrossed = Math.min(tMaxC, tMaxR);
+      const tSoFar = tCrossed + epsilonT;
+      if (tSoFar > maxThickness) return null; // exceeded cap
+
+      // Advance to the next cell boundary.
+      if (tMaxC <= tMaxR) {
+        tMaxC += tDeltaC;
+        col += stepC;
+      } else {
+        tMaxR += tDeltaR;
+        row += stepR;
+      }
+
+      // Check the new cell.
+      let cellLeg: { floor: number; wall?: boolean; ceil?: number };
+      if (col < 0 || col >= this._cols || row < 0 || row >= this._rows) {
+        // Out of bounds is always solid — return blocked.
+        return null;
+      }
+      const ch = this.map.grid[row]?.[col];
+      cellLeg = (ch !== undefined ? this.map.legend[ch] : undefined) ?? { floor: 0, wall: true };
+
+      // Is this cell open at the ray's Y?
+      const isOpen = !(cellLeg.wall ?? false);
+      if (isOpen) {
+        // tCrossed is the ray-distance from the DDA start (epsilonT past entry) to this boundary.
+        // Add epsilonT back to get distance from the original entry point, then clamp.
+        // Invariant: thickness is always positive (tCrossed ≥ 0, +epsilonT > 0) and ≤ maxThickness.
+        const clampedT = Math.min(tCrossed + epsilonT, maxThickness);
+        return {
+          exitPoint: {
+            x: ox + dx * clampedT,
+            y: oy + dir.y * clampedT,
+            z: oz + dz * clampedT,
+          },
+          thickness: clampedT,
+        };
+      }
+    }
+
+    return null; // exceeded step budget — treat as too thick
   }
 }
 

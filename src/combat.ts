@@ -5,6 +5,26 @@ import { Emitter } from './events';
 import { RULES, ECONOMY } from './constants';
 import { type AABB, rayAABB, v3 } from './math';
 
+// ---------------------------------------------------------------------------
+// Penetration constants
+// ---------------------------------------------------------------------------
+
+/** Maximum solid thickness (meters) a bullet can pass through (1-cell wall + margin). */
+export const MAX_PEN_THICKNESS = 1.25;
+
+/** Minimum effective penDamageFactor below which we treat the shot as blocked. */
+const MIN_PEN_FACTOR = 0.05;
+
+/**
+ * Compute the penetration damage multiplier for a given power and thickness.
+ * Returns 0 when the wall is too thick or the weapon cannot penetrate.
+ */
+export function penDamageFactor(power: number, thickness: number): number {
+  if (power <= 0 || thickness < 0 || thickness >= MAX_PEN_THICKNESS) return 0;
+  const factor = power * (1 - thickness / MAX_PEN_THICKNESS);
+  return factor < MIN_PEN_FACTOR ? 0 : factor;
+}
+
 // Global event bus — imported by later agents.
 export const gameEvents = new Emitter<GameEvents>();
 
@@ -57,6 +77,8 @@ export interface ShotResult {
   headshot: boolean;
   surface: RayHit['kind'] | null;
   normal: Vec3 | null;
+  /** True when the bullet passed through a solid surface before hitting the target. */
+  penetrated?: boolean;
 }
 
 // ---------------------------------------------------------------------------
@@ -181,12 +203,16 @@ export function fireHitscan(
   };
 
   const maxDist = 512;
+  // 1-cm epsilon to step past a penetrated surface's exit point.
+  const PEN_EPSILON = 0.01;
 
-  // World raycast.
+  // ---------------------------------------------------------------------------
+  // Ray 1: standard raycast
+  // ---------------------------------------------------------------------------
   const worldHit = world.raycast(origin, dir, maxDist);
   const worldDist = worldHit ? worldHit.distance : maxDist;
 
-  // Test all alive enemy combatants.
+  // Test all alive enemy combatants against ray 1.
   let nearestTarget: { combatant: Combatant; t: number; hitGroup: HitGroup } | null = null;
 
   for (const target of targets) {
@@ -202,8 +228,10 @@ export function fireHitscan(
     }
   }
 
+  // Emit 'shot' after the combatant scan resolves — restores pre-refactor ordering.
   gameEvents.emit('shot', { shooter, pos: origin, weaponId: weapon.id });
 
+  // Common path: combatant hit before any wall — no change from pre-penetration.
   if (nearestTarget !== null) {
     const tgt = nearestTarget.combatant;
     const dist = nearestTarget.t;
@@ -226,7 +254,132 @@ export function fireHitscan(
     };
   }
 
-  // World surface hit.
+  // No combatant hit. If there is a wall/prop hit and the weapon can penetrate, attempt ray 2.
+  if (worldHit !== null && (worldHit.kind === 'wall' || worldHit.kind === 'prop')) {
+    const power = weapon.penetration ?? 0;
+    if (power > 0) {
+      // Determine if this is a prop hit or wall hit for traceSolidExit.
+      const penKind: 'wall' | 'prop' = worldHit.kind === 'prop' ? 'prop' : 'wall';
+      const solidTrace = world.traceSolidExit(
+        worldHit.point,
+        dir,
+        MAX_PEN_THICKNESS,
+        penKind,
+        worldHit.propIndex,
+      );
+
+      if (solidTrace !== null) {
+        const factor = penDamageFactor(power, solidTrace.thickness);
+        if (factor > 0) {
+          // Emit entry impact event (existing wallbang entry).
+          gameEvents.emit('wallImpact', {
+            pos: { ...worldHit.point },
+            normal: { ...worldHit.normal },
+            surface: worldHit.kind,
+          });
+
+          // Emit exit impact event with penetrated flag.
+          const exitPoint = solidTrace.exitPoint;
+          gameEvents.emit('wallImpact', {
+            pos: { ...exitPoint },
+            normal: { x: -worldHit.normal.x, y: -worldHit.normal.y, z: -worldHit.normal.z },
+            surface: worldHit.kind,
+            penetrated: true,
+          });
+
+          // ---------------------------------------------------------------------------
+          // Ray 2: continue from just past the exit point
+          // ---------------------------------------------------------------------------
+          const ray2Origin: Vec3 = {
+            x: exitPoint.x + dir.x * PEN_EPSILON,
+            y: exitPoint.y + dir.y * PEN_EPSILON,
+            z: exitPoint.z + dir.z * PEN_EPSILON,
+          };
+          // Distance already consumed: worldHit.distance + solidTrace.thickness + epsilon.
+          const distConsumed = worldHit.distance + solidTrace.thickness + PEN_EPSILON;
+          const remainingDist = maxDist - distConsumed;
+
+          if (remainingDist > 0) {
+            const worldHit2 = world.raycast(ray2Origin, dir, remainingDist);
+            const worldDist2 = worldHit2 ? worldHit2.distance : remainingDist;
+
+            let nearestTarget2: { combatant: Combatant; t: number; hitGroup: HitGroup } | null = null;
+
+            for (const target of targets) {
+              if (!target.alive) continue;
+              if (target === shooter) continue;
+              if (target.team === shooter.team) continue;
+
+              const hit = rayHitCombatant(ray2Origin, dir, Math.min(worldDist2, remainingDist), target);
+              if (hit !== null) {
+                if (nearestTarget2 === null || hit.t < nearestTarget2.t) {
+                  nearestTarget2 = { combatant: target, t: hit.t, hitGroup: hit.hitGroup };
+                }
+              }
+            }
+
+            if (nearestTarget2 !== null) {
+              const tgt = nearestTarget2.combatant;
+              const localDist = nearestTarget2.t;
+              const totalDist = distConsumed + localDist;
+              const hitPt: Vec3 = {
+                x: ray2Origin.x + dir.x * localDist,
+                y: ray2Origin.y + dir.y * localDist,
+                z: ray2Origin.z + dir.z * localDist,
+              };
+
+              // Build a reduced-damage weapon proxy: same weapon but damage scaled by penDamageFactor.
+              // We do this without allocating a full object by passing a modified damage inline.
+              // applyDamage uses weapon.damage and weapon.rangeModifier so we need a proxy.
+              const penWeapon: typeof weapon = {
+                ...weapon,
+                damage: weapon.damage * factor,
+              };
+
+              const { killed } = applyDamage(tgt, shooter, penWeapon, totalDist, nearestTarget2.hitGroup, now);
+
+              return {
+                endPoint:  hitPt,
+                target:    tgt,
+                hitGroup:  nearestTarget2.hitGroup,
+                killed,
+                headshot:  nearestTarget2.hitGroup === 'head',
+                surface:   null,
+                normal:    null,
+                penetrated: true,
+              };
+            }
+
+            // Ray 2 hits another surface (or nothing) — return that as the endpoint.
+            const endPoint2: Vec3 = worldHit2
+              ? { ...worldHit2.point }
+              : {
+                  x: ray2Origin.x + dir.x * remainingDist,
+                  y: ray2Origin.y + dir.y * remainingDist,
+                  z: ray2Origin.z + dir.z * remainingDist,
+                };
+
+            return {
+              endPoint:  endPoint2,
+              target:    null,
+              hitGroup:  null,
+              killed:    false,
+              headshot:  false,
+              surface:   worldHit2 ? worldHit2.kind : null,
+              normal:    worldHit2 ? { ...worldHit2.normal } : null,
+              penetrated: true,
+            };
+          }
+        }
+      }
+    }
+  }
+
+  // No penetration or penetration was blocked — standard wall hit.
+  // Impact visuals for non-penetrating hits are rendered by the caller (main.ts)
+  // via ShotResult.surface + ShotResult.normal (the existing path). No wallImpact
+  // event is needed here — emitting one would cause a double-render.
+
   const endPoint: Vec3 = worldHit
     ? { ...worldHit.point }
     : {
