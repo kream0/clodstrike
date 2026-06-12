@@ -20,6 +20,12 @@ import {
   VIEWMODEL_SCALE,
   resolveWeaponTuning,
   GRIP_PRESETS,
+  FP_ARMS_BONE_NAMES,
+  ARMS_SCALE,
+  ARMS_OFFSET,
+  ARMS_TINT_CT,
+  ARMS_TINT_T,
+  teamSleeveColor,
   type WeaponTuning,
   type GripFamily,
 } from './viewmodel';
@@ -337,6 +343,22 @@ describe('GRIP_PRESETS', () => {
   const VALID_FAMILIES: GripFamily[] = ['two_handed_long', 'pistol', 'knife'];
   const ALL_STEMS = Object.keys(THIRD_PERSON_WEAPON_PATHS);
 
+  // Authoritative set of the 24 real bone names in fp_arms.glb (J-Toastie rig).
+  // If a bone name in a GRIP_PRESETS entry doesn't match this set the pose is a no-op
+  // (the map lookup silently returns undefined).  Hardcoded here so typos are caught at test time.
+  const AUTHORITATIVE_BONE_NAMES = new Set<string>([
+    // Left side (no suffix)
+    'UpperArm.L', 'LowerArm.L', 'Hand.L',
+    'DoubleFingersBeginning', 'DoubleFingers.L', 'DoubleFingersTip.L',
+    'IndexBeginning.L', 'Index.L', 'IndexTip.L',
+    'ThumbBeginning.L', 'Thumb.L', 'ThumbTip.L',
+    // Right side (Blender mirror: .001 suffix)
+    'UpperArm.R.001', 'LowerArm.R.001', 'Hand.R.001',
+    'DoubleFingersBeginning.001', 'DoubleFingers.R.001', 'DoubleFingersTip.R.001',
+    'IndexBeginning.R.001', 'Index.R.001', 'IndexTip.R.001',
+    'ThumbBeginning.R.001', 'Thumb.R.001', 'ThumbTip.R.001',
+  ]);
+
   test('every weapons_v2 stem has a grip preset entry', () => {
     const missing: string[] = [];
     for (const stem of ALL_STEMS) {
@@ -356,10 +378,12 @@ describe('GRIP_PRESETS', () => {
     }
   });
 
-  test('every preset bone rotation value is finite', () => {
+  test('every preset bone rotation value is finite (new fp_arms fields: upperArm/lowerArm/hand/fingerCurl)', () => {
+    // New interface: upperArmR, lowerArmR, handR, upperArmL, lowerArmL, handL, fingerCurl
     const fields: Array<keyof typeof GRIP_PRESETS[string]> = [
-      'shoulderR', 'upperArmR', 'lowerArmR', 'wristR',
-      'shoulderL', 'upperArmL', 'lowerArmL', 'wristL',
+      'upperArmR', 'lowerArmR', 'handR',
+      'upperArmL', 'lowerArmL', 'handL',
+      'fingerCurl',
     ];
     const failures: string[] = [];
     for (const [stem, preset] of Object.entries(GRIP_PRESETS)) {
@@ -402,6 +426,112 @@ describe('GRIP_PRESETS', () => {
 
   test('knife is knife family', () => {
     expect(GRIP_PRESETS['knife']?.family).toBe('knife');
+  });
+
+  // Verify that the bones referenced by the presets are real bones from the rig.
+  // This catches the previous bug where bone names were written for the Quaternius
+  // 62-joint rig (e.g. 'Shoulder.R', 'Wrist.R') rather than the J-Toastie 24-joint rig.
+  test('FP_ARMS_BONE_NAMES exported list has exactly 24 entries', () => {
+    expect(FP_ARMS_BONE_NAMES).toHaveLength(24);
+  });
+
+  test('FP_ARMS_BONE_NAMES: all entries are in the authoritative set', () => {
+    const unknown = [...FP_ARMS_BONE_NAMES].filter((n) => !AUTHORITATIVE_BONE_NAMES.has(n));
+    expect(unknown).toHaveLength(0);
+  });
+
+  test('FP_ARMS_BONE_NAMES: right-side bones all have .001 suffix', () => {
+    const rightBones = [...FP_ARMS_BONE_NAMES].filter((n) => n.includes('.R.') || n.endsWith('.001'));
+    // There are 12 right-side bones (all with .001 suffix)
+    expect(rightBones).toHaveLength(12);
+    for (const b of rightBones) {
+      expect(b.endsWith('.001')).toBe(true);
+    }
+  });
+
+  test('FP_ARMS_BONE_NAMES: includes the 6 primary arm bones used by pose application', () => {
+    const required = [
+      'UpperArm.L', 'LowerArm.L', 'Hand.L',
+      'UpperArm.R.001', 'LowerArm.R.001', 'Hand.R.001',
+    ];
+    for (const b of required) {
+      expect([...FP_ARMS_BONE_NAMES]).toContain(b);
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// teamSleeveColor — pure helper tests
+// ---------------------------------------------------------------------------
+
+describe('teamSleeveColor', () => {
+  test('returns ARMS_TINT_CT for team CT', () => {
+    expect(teamSleeveColor('CT')).toBe(ARMS_TINT_CT);
+  });
+
+  test('returns ARMS_TINT_T for team T', () => {
+    expect(teamSleeveColor('T')).toBe(ARMS_TINT_T);
+  });
+
+  test('CT and T tints are different', () => {
+    expect(ARMS_TINT_CT).not.toBe(ARMS_TINT_T);
+  });
+
+  test('CT tint matches characters.ts TEAM_TORSO CT (0x5a7da8)', () => {
+    expect(ARMS_TINT_CT).toBe(0x5a7da8);
+  });
+
+  test('T tint matches characters.ts TEAM_TORSO T (0xa8824f)', () => {
+    expect(ARMS_TINT_T).toBe(0xa8824f);
+  });
+
+  test('both tints are valid 24-bit colors (0..0xFFFFFF)', () => {
+    expect(ARMS_TINT_CT).toBeGreaterThanOrEqual(0);
+    expect(ARMS_TINT_CT).toBeLessThanOrEqual(0xffffff);
+    expect(ARMS_TINT_T).toBeGreaterThanOrEqual(0);
+    expect(ARMS_TINT_T).toBeLessThanOrEqual(0xffffff);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// ARMS tuning constants
+// ---------------------------------------------------------------------------
+
+describe('ARMS_SCALE and ARMS_OFFSET', () => {
+  test('ARMS_SCALE is a finite positive number', () => {
+    expect(typeof ARMS_SCALE).toBe('number');
+    expect(isFinite(ARMS_SCALE)).toBe(true);
+    expect(ARMS_SCALE).toBeGreaterThan(0);
+  });
+
+  test('ARMS_OFFSET is a THREE.Vector3 with finite components', () => {
+    expect(ARMS_OFFSET).toBeInstanceOf(THREE.Vector3);
+    expect(isFinite(ARMS_OFFSET.x)).toBe(true);
+    expect(isFinite(ARMS_OFFSET.y)).toBe(true);
+    expect(isFinite(ARMS_OFFSET.z)).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// fp_arms.glb on disk
+// ---------------------------------------------------------------------------
+
+describe('fp_arms.glb asset', () => {
+  const fpArmsPath = join(repoRoot, 'assets', 'models', 'rigged', 'fp_arms.glb');
+
+  test('fp_arms.glb exists on disk', () => {
+    expect(existsSync(fpArmsPath)).toBe(true);
+  });
+
+  test('fp_arms.glb starts with glTF magic bytes', () => {
+    const buf = readFileSync(fpArmsPath);
+    const magic = String.fromCharCode(buf[0] ?? 0, buf[1] ?? 0, buf[2] ?? 0, buf[3] ?? 0);
+    expect(magic).toBe('glTF');
+  });
+
+  test('fp_arms.glb is > 200 KB (sanity: full rigged mesh, not empty)', () => {
+    const { size } = Bun.file(fpArmsPath);
+    expect(size).toBeGreaterThan(200 * 1024);
   });
 });
 
@@ -489,6 +619,22 @@ describe('LICENSES.md — models section', () => {
     for (const file of expectedFiles) {
       expect(content).toContain(file);
     }
+  });
+
+  // CC-BY attribution REQUIREMENT: fp_arms.glb is CC BY 4.0 (not CC0); attribution is mandatory.
+  test('LICENSES.md credits J-Toastie as author of fp_arms.glb (CC BY attribution requirement)', () => {
+    const content = readFileSync(licensePath, 'utf-8');
+    expect(content).toContain('J-Toastie');
+  });
+
+  test('LICENSES.md mentions fp_arms.glb file', () => {
+    const content = readFileSync(licensePath, 'utf-8');
+    expect(content).toContain('fp_arms.glb');
+  });
+
+  test('LICENSES.md records CC BY 4.0 license for fp_arms.glb', () => {
+    const content = readFileSync(licensePath, 'utf-8');
+    expect(content).toContain('CC BY 4.0');
   });
 });
 

@@ -96,7 +96,7 @@ function createCombatant(id: number, name: string, team: Team, isPlayer: boolean
 // Loading overlay helpers
 // ---------------------------------------------------------------------------
 
-const TOTAL_ASSETS = 27; // 8 color textures + 8 normals + 9 weapons_v2 GLBs (shared with viewmodel) + 2 rigged character GlTFs
+const TOTAL_ASSETS = 28; // 8 color textures + 8 normals + 9 weapons_v2 GLBs (shared with viewmodel) + 2 rigged character GlTFs + 1 fp_arms GLB
 
 function createLoadingOverlay(): {
   overlay: HTMLDivElement;
@@ -202,7 +202,7 @@ async function boot(): Promise<void> {
 
   // ---------------------------------------------------------------------------
   // Asset loading — groups in parallel, each independent
-  // Total progress units: 8 color + 8 normals + 9 weapons_v2 GLBs + 2 rigged GlTFs = 27
+  // Total progress units: 8 color + 8 normals + 9 weapons_v2 GLBs + 2 rigged GlTFs + 1 fp_arms = 28
   // weapons_v2 GLBs are shared between characters.ts (third-person wrist attachments)
   // and viewmodel.ts (first-person weapon models) — loaded once, consumed by both.
   // ---------------------------------------------------------------------------
@@ -217,9 +217,10 @@ async function boot(): Promise<void> {
   let sharedWeaponModels: Record<string, THREE.Object3D> = {};
   let ctGltfResult: GLTF | undefined;
   let tGltfResult:  GLTF | undefined;
+  let fpArmsGltfResult: GLTF | undefined;
 
   try {
-    const [texResult, normResult, wpnResults, ctResult, tResult] = await Promise.allSettled([
+    const [texResult, normResult, wpnResults, ctResult, tResult, fpArmsResult] = await Promise.allSettled([
       // Group 1: 8 color textures — callback fires once per loaded texture
       loadAllTextures((_loaded, _total) => {
         onAssetLoaded(1);
@@ -247,6 +248,12 @@ async function boot(): Promise<void> {
       // Group 5: T rigged character GlTF (1 progress unit)
       (async (): Promise<GLTF> => {
         const gltf = await loadGLB(CHARACTER_MODEL_PATHS.t);
+        onAssetLoaded(1);
+        return gltf;
+      })(),
+      // Group 6: fp_arms rigged GLB (1 progress unit) — first-person arms viewmodel
+      (async (): Promise<GLTF> => {
+        const gltf = await loadGLB('models/rigged/fp_arms.glb');
         onAssetLoaded(1);
         return gltf;
       })(),
@@ -303,6 +310,13 @@ async function boot(): Promise<void> {
       tGltfResult = tResult.value;
     } else {
       console.warn('[boot] T rigged character failed to load — using procedural mesh:', tResult.reason);
+    }
+
+    // --- fp_arms GLB (first-person arms viewmodel) ---
+    if (fpArmsResult.status === 'fulfilled') {
+      fpArmsGltfResult = fpArmsResult.value;
+    } else {
+      console.warn('[boot] fp_arms.glb failed to load — viewmodel will render without arms:', fpArmsResult.reason);
     }
   } finally {
     // Overlay is always removed — even on catastrophic failure
@@ -362,11 +376,14 @@ async function boot(): Promise<void> {
   // --- ViewModel ---
   // setWeaponModelsV2 shares the same weapons_v2 scenes already registered with
   // setThirdPersonWeaponModels — no second load; both consumers reference the same objects.
-  // setArmsAssets is a no-op stub (arms skipped: no isolated arm mesh in these character GLTFs).
+  // setArmsAssets registers fp_arms.glb for visible first-person hands (failure-tolerant:
+  // only called when the load succeeded; missing arms degrade gracefully to gun-only).
   const viewmodel = new ViewModel(camera);
   viewmodel.setWeaponModelsV2(sharedWeaponModels);
-  viewmodel.setArmsAssets({ ct: ctGltfResult, t: tGltfResult });
   viewmodel.setArmsTeam(player.team);
+  if (fpArmsGltfResult !== undefined) {
+    viewmodel.setArmsAssets(fpArmsGltfResult);
+  }
   viewmodel.setWeapon(player.inventory.secondary?.def.id ?? 'usp');
 
   // --- GrenadeManager callbacks ---
