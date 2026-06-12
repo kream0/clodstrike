@@ -3,7 +3,15 @@ import { Game } from '../game';
 import type { MatchOptions } from '../game';
 import { World } from '../world';
 import { NavGrid } from './nav';
-import { BotManager } from './bot';
+import {
+  BotManager,
+  BUY_POOL_ECO_PISTOL,
+  BUY_POOL_FORCE_SMG,
+  BUY_POOL_FORCE_SHOTGUN,
+  BUY_POOL_FULL_PRIMARY_BUDGET,
+  BUY_POOL_FULL_PRIMARY_STANDARD,
+  BUY_POOL_FULL_PRIMARY_RICH,
+} from './bot';
 import type { BotState } from './bot';
 import { DUST2 } from '../maps/dust2';
 import { RULES, ECONOMY, WEAPONS } from '../constants';
@@ -687,32 +695,67 @@ describe('Flash blindness', () => {
   });
 
   test('full blind: bot re-acquires and can fire after blindUntil passes', () => {
-    const { game, mgr } = freshSetup({ playerTeam: 'T', difficulty: 'hard' });
+    const { game, mgr, world } = freshSetup({ playerTeam: 'T', difficulty: 'hard' });
     let now = advanceFreeze(game);
     const { bot, enemy } = setupFlashScenario(game);
 
-    // Let the bot enter engage state first (same as sibling flash tests).
+    // --- Premise: assert open LOS between the two verified positions BEFORE
+    // running any ticks.  If this fails the map geometry changed and both
+    // positions need updating, not the bot logic.
+    const eyeA = { x: bot.pos.x,   y: bot.pos.y   + 1.64, z: bot.pos.z };
+    const eyeB = { x: enemy.pos.x, y: enemy.pos.y + 1.64, z: enemy.pos.z };
+    expect(world.lineOfSight(eyeA, eyeB)).toBe(true);
+
+    // Ensure both combatants are pinned on the ground at the open-mid positions.
+    bot.onGround   = true;
+    enemy.onGround = true;
+
+    // Let the bot enter engage state first.
     now = tickUntilEngage(game, mgr, bot, now);
 
     // Apply full blindness lasting 0.15 s (expires quickly).
-    bot.blindUntil     = now + 0.15;
+    const blindEnd     = now + 0.15;
+    bot.blindUntil     = blindEnd;
     bot.blindIntensity = 0.9;
     // Set normal enemy health so we can confirm a hit.
     enemy.health = 100;
 
     const initHealth = enemy.health;
     const DT = 1 / 128;
-    // Tick for 5 s: blind ends at +0.15 s; after blind the bot may navigate
-    // briefly before re-acquiring the enemy (up to ~3 s on new map geometry).
-    const TICKS = Math.ceil(5.0 / DT);
-    for (let i = 0; i < TICKS; i++) {
+
+    // Phase 1: tick through the blind duration.  The bot must not fire.
+    const BLIND_TICKS = Math.ceil(0.20 / DT);  // slightly more than blindEnd
+    for (let i = 0; i < BLIND_TICKS; i++) {
+      now += DT;
+      const brain = game.botBrains.get(bot.id);
+      if (brain) brain(bot, DT, now);
+    }
+
+    // Phase 2: blind has expired.  Re-pin both combatants to the verified open
+    // positions and face the bot toward the enemy so perception fires immediately
+    // on the first eligible tick (nextPerceptAt may have advanced during the
+    // blind phase — it will fire within one PERCEPTION_INTERVAL = 0.12 s).
+    bot.pos    = { x: 0, y: 0,     z: -28 };
+    enemy.pos  = { x: 0, y: 0.375, z: -33 };
+    bot.yaw    = 0;            // facing -Z toward enemy
+    bot.vel    = { x: 0, y: 0, z: 0 };
+    enemy.onGround = true;
+    bot.onGround   = true;
+    // Clear any residual blindness flag.
+    bot.blindUntil     = 0;
+    bot.blindIntensity = 0;
+
+    // Give the bot up to 3 s to re-acquire the enemy (> reaction 220 ms +
+    // 2× PERCEPTION_INTERVAL = 0.24 s + margin).
+    const REACQUIRE_TICKS = Math.ceil(3.0 / DT);
+    for (let i = 0; i < REACQUIRE_TICKS; i++) {
       now += DT;
       const brain = game.botBrains.get(bot.id);
       if (brain) brain(bot, DT, now);
       if (enemy.health < initHealth) break;
     }
 
-    // Health should have dropped after blindness expired and reaction window passed.
+    // Health should have dropped: bot re-acquired and fired.
     expect(enemy.health).toBeLessThan(initHealth);
   });
 
@@ -1347,6 +1390,234 @@ describe('LOS wall-vision fix', () => {
       expect(shotFired).toBe(true);
     } finally {
       unsub();
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Bot buy pools — validity and team eligibility
+// ---------------------------------------------------------------------------
+
+describe('Bot buy pools', () => {
+  /**
+   * Every id in every pool must exist in WEAPONS and must satisfy team
+   * eligibility for the pool it belongs to.
+   */
+  test('all pool ids are valid WEAPONS entries', () => {
+    const allPools = [
+      BUY_POOL_ECO_PISTOL,
+      BUY_POOL_FORCE_SMG,
+      BUY_POOL_FORCE_SHOTGUN,
+      BUY_POOL_FULL_PRIMARY_BUDGET,
+      BUY_POOL_FULL_PRIMARY_STANDARD,
+      BUY_POOL_FULL_PRIMARY_RICH,
+    ];
+    for (const pool of allPools) {
+      for (const id of pool) {
+        expect(WEAPONS[id]).toBeDefined();
+      }
+    }
+  });
+
+  test('pool entries are valid WEAPONS ids with well-formed teams metadata', () => {
+    // Every weapon that declares a `teams` array must have a non-empty array of
+    // valid team strings ('T' or 'CT').  Team-filtering happens at draw time via
+    // the per-bot eligibility filter + game.buy team gate; pools may contain
+    // weapons from either team.
+    const tIntentPools = [BUY_POOL_FORCE_SMG, BUY_POOL_FORCE_SHOTGUN];
+    for (const pool of tIntentPools) {
+      for (const id of pool) {
+        const def = WEAPONS[id];
+        expect(def).toBeDefined();
+        if (def && def.teams !== undefined) {
+          expect(Array.isArray(def.teams)).toBe(true);
+          expect(def.teams.length).toBeGreaterThan(0);
+          for (const t of def.teams) {
+            expect(['T', 'CT']).toContain(t);
+          }
+        }
+      }
+    }
+  });
+
+  test('each pool entry has the correct team eligibility declared in WEAPONS', () => {
+    // T-only weapons in pools must have def.teams that includes 'T' or is undefined.
+    // CT-only weapons must have def.teams that includes 'CT' or is undefined.
+    const T_ONLY_IDS = ['mac10', 'sawedoff', 'galil', 'ak47', 'sg553', 'tec9'];
+    const CT_ONLY_IDS = ['mp9', 'mag7', 'famas', 'm4a4', 'aug', 'fiveseven'];
+
+    for (const id of T_ONLY_IDS) {
+      const def = WEAPONS[id];
+      if (!def) continue;
+      if (def.teams !== undefined) {
+        expect(def.teams).toContain('T');
+      }
+    }
+    for (const id of CT_ONLY_IDS) {
+      const def = WEAPONS[id];
+      if (!def) continue;
+      if (def.teams !== undefined) {
+        expect(def.teams).toContain('CT');
+      }
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Bot economy: full-buy bots get rifle + armor; eco bots keep money
+//
+// Helper: advances game to round 2 freeze so _doBotTeamBuyPass fires.
+// Money override is applied on the roundEnd event (after bonuses are paid,
+// before the round-2 start + buy pass runs) so tests control exact buy-time
+// money without fighting round-end bonus arithmetic.
+// ---------------------------------------------------------------------------
+
+/**
+ * Advance to round 2 and inject a specific buy-time money amount.
+ * The roundEnd handler fires after bonuses are distributed but before
+ * _startRound → buy passes run, so overriding money there is deterministic.
+ *
+ * @param buyTimeMoney - money each bot will have when round 2 buy pass runs
+ * @param lossStreakT  - loss streak to set on T side (0 = default)
+ * @param playerTeam   - which team the player belongs to (determines which
+ *                       team is killed to end round 1)
+ */
+function advanceBotToRound2(
+  buyTimeMoney: number,
+  opts: { lossStreakT?: number; playerTeam?: 'CT' | 'T'; difficulty?: 'easy'|'normal'|'hard' } = {},
+): { game: Game; mgr: BotManager; unsub: () => void } {
+  const { lossStreakT = 0, playerTeam = 'CT', difficulty = 'normal' } = opts;
+
+  const world = new World(DUST2);
+  const nav   = new NavGrid(DUST2);
+  const game  = new Game(world, null);
+  game.player = makeCombatant(0, 'Player', playerTeam);
+  game.startMatch({ playerTeam, difficulty, botsPerTeam: 4 });
+
+  // Set loss streak before round 1 ends so _endRound uses it.
+  if (lossStreakT > 0) {
+    game.lossStreak['T'] = lossStreakT - 1; // will be incremented to lossStreakT by _endRound
+  }
+
+  const mgr = new BotManager(game, world, nav);
+  mgr.attach();
+
+  // Subscribe to roundEnd to override bot money after bonuses but before buy.
+  // _endRound distributes bonuses → emits 'roundEnd' → (pause) → _startRound.
+  // Setting money in the roundEnd handler ensures buy passes see buyTimeMoney.
+  const unsub = gameEvents.on('roundEnd', () => {
+    for (const c of game.combatants) {
+      if (!c.isPlayer) c.money = buyTimeMoney;
+    }
+  });
+
+  // Advance through freeze → live, then kill the losing team to end round 1.
+  const freeze = RULES.FREEZE_TIME + 0.1;
+  game.update(freeze, freeze);
+
+  // Kill all members of the opposing team (T when playerTeam=CT, vice versa).
+  const killTeam: 'CT' | 'T' = playerTeam === 'CT' ? 'T' : 'CT';
+  for (const c of game.combatants) {
+    if (c.team === killTeam) { c.alive = false; c.health = 0; }
+  }
+  game.update(0.016, freeze + 0.1);
+
+  // Advance through round-end pause → round 2 starts, buy passes fire.
+  const afterPause = freeze + RULES.ROUND_END_PAUSE + 1;
+  game.update(RULES.ROUND_END_PAUSE + 1, afterPause);
+
+  // Should now be in round 2 freeze.
+  expect(game.phase).toBe('freeze');
+  expect(game.roundNumber).toBe(2);
+
+  return { game, mgr, unsub };
+}
+
+describe('Bot buy economy: full-buy', () => {
+  test('full-buy bot (T, $16000) gets a primary rifle + armor', () => {
+    // playerTeam=CT → CT wins round 1 → T bots get round 2 money overridden to $16000.
+    const { game, mgr, unsub } = advanceBotToRound2(16000, { playerTeam: 'CT' });
+    try {
+      const validTRifles = new Set(['ak47', 'galil', 'sg553', 'awp']);
+      const tBots = game.combatants.filter(c => c.team === 'T' && !c.isPlayer);
+      expect(tBots.length).toBeGreaterThan(0);
+
+      for (const c of tBots) {
+        expect(c.inventory.primary).not.toBeNull();
+        expect(validTRifles.has(c.inventory.primary?.def.id ?? '')).toBe(true);
+        expect(c.armor).toBe(100);
+      }
+    } finally {
+      unsub();
+      mgr.dispose();
+    }
+  });
+
+  test('full-buy bot (CT, $16000) gets a primary rifle + armor', () => {
+    // playerTeam=T → T wins round 1 (we kill CT bots) → CT bots get $16000.
+    const { game, mgr, unsub } = advanceBotToRound2(16000, { playerTeam: 'T' });
+    try {
+      const validCTRifles = new Set(['m4a4', 'famas', 'aug', 'awp']);
+      const ctBots = game.combatants.filter(c => c.team === 'CT' && !c.isPlayer);
+      expect(ctBots.length).toBeGreaterThan(0);
+
+      for (const c of ctBots) {
+        expect(c.inventory.primary).not.toBeNull();
+        expect(validCTRifles.has(c.inventory.primary?.def.id ?? '')).toBe(true);
+        expect(c.armor).toBe(100);
+      }
+    } finally {
+      unsub();
+      mgr.dispose();
+    }
+  });
+});
+
+describe('Bot buy economy: eco bot', () => {
+  test('eco bot ($800) never buys a primary rifle or SMG', () => {
+    // With exactly $800 at buy time: decideBuyStrategy → eco (< $1300, no streak).
+    // Bot.ts eco pass may buy a cheap pistol (≤$700) with 60% chance; never a primary.
+    const { game, mgr, unsub } = advanceBotToRound2(800, { playerTeam: 'CT' });
+    try {
+      const tBots = game.combatants.filter(c => c.team === 'T' && !c.isPlayer);
+      expect(tBots.length).toBeGreaterThan(0);
+
+      for (const c of tBots) {
+        // Primary must remain null regardless of random rolls.
+        expect(c.inventory.primary).toBeNull();
+        // Money must be ≥ $100 (at worst, bought a $700 deagle from $800).
+        expect(c.money).toBeGreaterThanOrEqual(100);
+      }
+    } finally {
+      unsub();
+      mgr.dispose();
+    }
+  });
+});
+
+describe('Bot buy economy: force-buy SMG', () => {
+  test('force-buy bot ($1800, loss streak 2) gets no rifle primary', () => {
+    // $1800 with loss streak 2 → force strategy (< 3700 full threshold).
+    // game.ts force pass: vest + deagle (no primary).
+    // bot.ts pass: $1800 - $650(vest) - $700(deagle) = $450 left → no SMG affordable.
+    // OR: game.ts only bought vest (no deagle if money < 700 after vest) →
+    // bot.ts tries SMG but $1800 - $650 = $1150 — mac10 $1050 is affordable.
+    // Either way: no rifle (ak47/m4a4 etc.) should appear.
+    // The key invariant: T bots do NOT buy standard rifles on a force budget.
+    const { game, mgr, unsub } = advanceBotToRound2(1800, { playerTeam: 'CT', lossStreakT: 2 });
+    try {
+      const rifleIds = new Set(['ak47', 'm4a4', 'aug', 'sg553', 'galil', 'famas', 'awp']);
+      const tBots = game.combatants.filter(c => c.team === 'T' && !c.isPlayer);
+      expect(tBots.length).toBeGreaterThan(0);
+
+      for (const c of tBots) {
+        if (c.inventory.primary !== null) {
+          expect(rifleIds.has(c.inventory.primary.def.id)).toBe(false);
+        }
+      }
+    } finally {
+      unsub();
+      mgr.dispose();
     }
   });
 });

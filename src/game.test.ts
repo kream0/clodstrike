@@ -300,11 +300,12 @@ describe('buy', () => {
     game.startMatch(DEFAULT_OPTS);
     game.player.money = 5000;
 
-    const ok = game.buy(game.player, 'ak47', 0);
+    // Player is CT — use m4a4 (CT-only rifle).
+    const ok = game.buy(game.player, 'm4a4', 0);
     expect(ok).toBe(true);
     expect(game.player.inventory.primary).not.toBeNull();
-    expect(game.player.inventory.primary!.def.id).toBe('ak47');
-    expect(game.player.money).toBe(5000 - 2700);
+    expect(game.player.inventory.primary!.def.id).toBe('m4a4');
+    expect(game.player.money).toBe(5000 - WEAPONS.m4a4.price);
   });
 
   test('refuses purchase when insufficient funds', () => {
@@ -312,7 +313,8 @@ describe('buy', () => {
     game.startMatch(DEFAULT_OPTS);
     game.player.money = 100;
 
-    const ok = game.buy(game.player, 'ak47', 0);
+    // Player is CT — use m4a4 (CT-only rifle).
+    const ok = game.buy(game.player, 'm4a4', 0);
     expect(ok).toBe(false);
     expect(game.player.inventory.primary).toBeNull();
     expect(game.player.money).toBe(100);
@@ -332,7 +334,8 @@ describe('buy', () => {
     game.update(buyWindowEnd - freezeEnd, buyWindowEnd);
     game.player.money = 5000;
 
-    const ok = game.buy(game.player, 'ak47', buyWindowEnd);
+    // Player is CT — use m4a4; the window is expired so it still returns false.
+    const ok = game.buy(game.player, 'm4a4', buyWindowEnd);
     expect(ok).toBe(false);
   });
 
@@ -369,11 +372,11 @@ describe('canBuy across rounds', () => {
     expect(game.roundNumber).toBe(2);
     // canBuy must be true at current game-time during freeze.
     expect(game.canBuy(afterPause1)).toBe(true);
-    // buy must succeed when called with the same game-time.
+    // buy must succeed when called with the same game-time (player is CT → use m4a4).
     game.player.money = 5000;
-    const ok = game.buy(game.player, 'ak47', afterPause1);
+    const ok = game.buy(game.player, 'm4a4', afterPause1);
     expect(ok).toBe(true);
-    expect(game.player.inventory.primary?.def.id).toBe('ak47');
+    expect(game.player.inventory.primary?.def.id).toBe('m4a4');
   });
 
   test('canBuy is true during buy window of live in round 2, false after 30 s from freeze start', () => {
@@ -877,5 +880,81 @@ describe('applyExplosionDamage', () => {
     // Should not throw or mutate.
     game.applyExplosionDamage(victim, 200, null, 'he');
     expect(victim.health).toBe(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// buy team exclusivity
+// ---------------------------------------------------------------------------
+
+describe('buy team exclusivity', () => {
+  test('CT player cannot buy ak47', () => {
+    game = freshGame();
+    game.startMatch(DEFAULT_OPTS);
+    game.player.team   = 'CT';
+    game.player.money  = 5000;
+    const ok = game.buy(game.player, 'ak47', 0);
+    expect(ok).toBe(false);
+    expect(game.player.money).toBe(5000);
+  });
+
+  test('T player cannot buy m4a4', () => {
+    game = freshGame();
+    game.startMatch({ playerTeam: 'T', difficulty: 'normal', botsPerTeam: 4 });
+    game.player.team   = 'T';
+    game.player.money  = 5000;
+    const ok = game.buy(game.player, 'm4a4', 0);
+    expect(ok).toBe(false);
+    expect(game.player.money).toBe(5000);
+  });
+
+  test('CT player can buy p250 (no teams restriction)', () => {
+    game = freshGame();
+    game.startMatch(DEFAULT_OPTS);
+    game.player.team   = 'CT';
+    game.player.money  = 5000;
+    const ok = game.buy(game.player, 'p250', 0);
+    expect(ok).toBe(true);
+    expect(game.player.money).toBe(5000 - WEAPONS.p250.price);
+  });
+
+  test('T player can buy p250 (no teams restriction)', () => {
+    game = freshGame();
+    game.startMatch({ playerTeam: 'T', difficulty: 'normal', botsPerTeam: 4 });
+    game.player.team   = 'T';
+    game.player.money  = 5000;
+    const ok = game.buy(game.player, 'p250', 0);
+    expect(ok).toBe(true);
+    expect(game.player.money).toBe(5000 - WEAPONS.p250.price);
+  });
+
+  test('CT player can buy awp (no teams restriction)', () => {
+    game = freshGame();
+    game.startMatch(DEFAULT_OPTS);
+    game.player.team   = 'CT';
+    game.player.money  = 5000;
+    const ok = game.buy(game.player, 'awp', 0);
+    expect(ok).toBe(true);
+    expect(game.player.money).toBe(5000 - WEAPONS.awp.price);
+  });
+
+  test('T player can buy awp (no teams restriction)', () => {
+    game = freshGame();
+    game.startMatch({ playerTeam: 'T', difficulty: 'normal', botsPerTeam: 4 });
+    game.player.team   = 'T';
+    game.player.money  = 5000;
+    const ok = game.buy(game.player, 'awp', 0);
+    expect(ok).toBe(true);
+    expect(game.player.money).toBe(5000 - WEAPONS.awp.price);
+  });
+
+  test('T player cannot buy kit (pre-existing CT-only gate)', () => {
+    game = freshGame();
+    game.startMatch({ playerTeam: 'T', difficulty: 'normal', botsPerTeam: 4 });
+    game.player.team   = 'T';
+    game.player.money  = 5000;
+    const ok = game.buy(game.player, 'kit', 0);
+    expect(ok).toBe(false);
+    expect(game.player.money).toBe(5000);
   });
 });

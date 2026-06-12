@@ -888,6 +888,7 @@ export class Game {
     // Weapon.
     const def = WEAPONS[itemId];
     if (!def) return false;
+    if (def.teams && !def.teams.includes(c.team)) return false;
     if (c.money < def.price) return false;
 
     this._spend(c, def.price);

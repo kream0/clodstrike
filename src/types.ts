@@ -78,6 +78,10 @@ export interface WeaponDef {
   recoilPattern?: ReadonlyArray<readonly [number, number]>;
   /** Extra spread (radians) accumulated per consecutive shot in a spray, capped at 10 shots. */
   spreadSpray?: number;
+  /** Buy-menu category for grouping. Weapons without one don't show in the menu (knife). */
+  category?: 'pistol' | 'smg' | 'heavy' | 'rifle';
+  /** Teams allowed to buy. Omitted = both teams may buy. */
+  teams?: ReadonlyArray<'CT' | 'T'>;
 }
 export interface WeaponState { def: WeaponDef; ammo: number; reserve: number; reloading: boolean; reloadEnd: number; nextFire: number; shotsFired: number }
 export interface Inventory { knife: WeaponState; secondary: WeaponState | null; primary: WeaponState | null; activeSlot: WeaponSlot }

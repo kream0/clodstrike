@@ -14,7 +14,7 @@ import type { World } from '../world';
 import type { Game } from '../game';
 import type { ShotResult } from '../combat';
 import { gameEvents } from '../combat';
-import { BOT_DIFFICULTY } from '../constants';
+import { BOT_DIFFICULTY, WEAPONS, ECONOMY } from '../constants';
 import { simulateMovement } from '../movement';
 import type { MoveIntent } from '../movement';
 import { updateWeapon, getViewPunch, switchSlot, isScoped } from '../weapons';
@@ -61,6 +61,93 @@ const BOT_SEPARATION_DIST    = 0.6;   // meters — start pushing when closer th
 const BOT_SEPARATION_IMPULSE = 2.0;   // m/s at full overlap
 const ESCORT_STOP_DIST       = 2.0;   // stop pushing toward carrier within this dist
 const SPAWN_ZONE_MARGIN      = 6.0;   // meters padding around spawn AABBs
+
+// ---------------------------------------------------------------------------
+// Bot economy: tiered buy pools (CS2-style)
+//
+// Each pool is an explicit list of weapon ids.  Pools are filtered at runtime
+// by def.teams so adding a weapon to WEAPONS that belongs to only one team
+// will not require touching these lists — the eligibility check enforces it.
+//
+// NEVER add m249, negev, g3sg1, scar20 to any pool: bots skip meme tier
+// (MGs are impractical in 5v5; auto-snipers are camp-fest weapons).
+// ---------------------------------------------------------------------------
+
+/**
+ * Pistol-round / eco upgrade pool.
+ * Used when the bot chose 'eco' strategy and has some leftover budget.
+ * Filtered by team at runtime; deagle is both-teams and appears only at $700+.
+ */
+export const BUY_POOL_ECO_PISTOL: readonly string[] = [
+  'p250',     // $250 — both teams
+  'dualies',  // $300 — both teams
+  'tec9',     // $500 — T only (filtered below)
+  'fiveseven',// $500 — CT only (filtered below)
+  'deagle',   // $700 — both teams (classic eco deagle)
+];
+
+/**
+ * Force-buy SMG / shotgun pool.
+ * Used when strategy is 'force'.  mac10 is T-only; mp9 is CT-only; rest both.
+ * Shotguns appear at ~20% rate — handled by caller logic.
+ */
+export const BUY_POOL_FORCE_SMG: readonly string[] = [
+  'mac10',  // $1050 — T only
+  'mp9',    // $1250 — CT only
+  'ump45',  // $1200 — both teams
+  'mp7',    // $1500 — both teams
+  'bizon',  // $1400 — both teams (budget option, large mag)
+];
+
+export const BUY_POOL_FORCE_SHOTGUN: readonly string[] = [
+  'nova',    // $1050 — both teams
+  'sawedoff',// $1100 — T only
+  'mag7',    // $1300 — CT only
+];
+
+/**
+ * Full-buy primary pool.
+ * ak47 is T-only; m4a4 is CT-only; galil T-only; famas CT-only.
+ * aug is CT-only; sg553 is T-only.
+ * Hard bots with $6000+ may roll aug(CT)/sg553(T) at 25% chance.
+ */
+export const BUY_POOL_FULL_PRIMARY_BUDGET: readonly string[] = [
+  'galil',  // $1800 — T only (mid-budget T rifle)
+  'famas',  // $2050 — CT only (mid-budget CT rifle)
+];
+
+export const BUY_POOL_FULL_PRIMARY_STANDARD: readonly string[] = [
+  'ak47',   // $2700 — T only
+  'm4a4',   // $2900 — CT only
+];
+
+export const BUY_POOL_FULL_PRIMARY_RICH: readonly string[] = [
+  'aug',    // $3300 — CT only
+  'sg553',  // $3000 — T only
+];
+
+// ---------------------------------------------------------------------------
+// Module-init pool validity check (catches id typos at boot, not at runtime).
+// Runs once when the module is first imported.
+// ---------------------------------------------------------------------------
+
+(function _assertBuyPoolIds(): void {
+  const allPools: ReadonlyArray<readonly string[]> = [
+    BUY_POOL_ECO_PISTOL,
+    BUY_POOL_FORCE_SMG,
+    BUY_POOL_FORCE_SHOTGUN,
+    BUY_POOL_FULL_PRIMARY_BUDGET,
+    BUY_POOL_FULL_PRIMARY_STANDARD,
+    BUY_POOL_FULL_PRIMARY_RICH,
+  ];
+  for (const pool of allPools) {
+    for (const id of pool) {
+      if (!WEAPONS[id]) {
+        throw new Error(`BotManager buy-pool: weapon id '${id}' not found in WEAPONS table`);
+      }
+    }
+  }
+})();
 
 const TURN_SPEED: Record<'easy' | 'normal' | 'hard', number> = {
   easy:   4.5,
@@ -357,7 +444,13 @@ export class BotManager {
 
     // Event subscriptions.
     this._unsubs.push(
-      gameEvents.on('roundStart', () => {
+      gameEvents.on('roundStart', ({ roundNumber }) => {
+        // Tiered buy pass runs BEFORE per-brain round-start so weapon slots
+        // are ready when brains enter their first tick.
+        // Skip round 1: bots start with pistols only (800 start money).
+        if (roundNumber > 1) {
+          this._doBotTeamBuyPass(this._lastNow);
+        }
         for (const [, br] of this._brains) this._roundStart(br);
       }),
       gameEvents.on('kill', (ev) => this._onKill(ev.victim)),
@@ -425,6 +518,156 @@ export class BotManager {
 
       wasBlind:          false,
     };
+  }
+
+  // ---------------------------------------------------------------------------
+  // Bot tiered buy pass — runs once per round (round 2+) for all bots.
+  //
+  // Design: game.ts _botTeamBuy already ran a simple pass (ak47/m4a4 for full,
+  // deagle for force, nothing for eco/awp).  This pass runs AFTER that (fired
+  // by the roundStart event which fires after _botTeamBuy), and:
+  //   - Full-buy: game.ts already set primary; we may swap to galil/famas on
+  //     a budget, or to aug/sg553 for rich hard-difficulty bots.
+  //   - Force-buy: game.ts left primary null; we pick from the SMG/shotgun pool.
+  //   - Eco-buy:   occasionally buy a pistol upgrade or deagle.
+  //   - AWP:       game.ts already bought AWP; we leave it untouched.
+  //
+  // AWP cap: game.ts already enforces max-1-AWP per team via its own pass.
+  // We never add a second AWP here.
+  // ---------------------------------------------------------------------------
+
+  private _doBotTeamBuyPass(now: number): void {
+    const game = this._game;
+    const teams: Array<'CT' | 'T'> = ['CT', 'T'];
+
+    for (const team of teams) {
+      const teamBots = game.combatants.filter(c => !c.isPlayer && c.team === team && c.alive);
+      if (teamBots.length === 0) continue;
+
+      const teamAvgMoney = teamBots.reduce((s, c) => s + c.money, 0) / teamBots.length;
+
+      for (const c of teamBots) {
+        this._doBotBuyForCombatant(c, team, teamAvgMoney, now);
+      }
+    }
+  }
+
+  /**
+   * Pick items for a single bot based on money and current inventory state.
+   * Called after game.ts has already run its own buy pass for this round.
+   */
+  private _doBotBuyForCombatant(
+    c: Combatant,
+    team: 'CT' | 'T',
+    _teamAvgMoney: number,
+    now: number,
+  ): void {
+    const game = this._game;
+    const money = c.money;
+
+    // If the bot already holds an AWP, leave it completely alone — game.ts AWP
+    // logic already equipped armor.  Do not buy additional items that could
+    // waste the remaining money needed for next-round AWP.
+    if (c.inventory.primary?.def.id === 'awp') return;
+
+    // -----------------------------------------------------------------------
+    // Case: bot has NO primary after game.ts pass (eco or force with no deagle).
+    // This means game.ts chose eco (no primary bought) or force (deagle secondary,
+    // no primary).  We may upgrade with an SMG/shotgun or pistol.
+    // -----------------------------------------------------------------------
+    const hasPrimary = c.inventory.primary !== null;
+
+    if (!hasPrimary) {
+      // Rich enough for force-tier SMG?
+      const FORCE_BUDGET = 1400; // enough for any force SMG; vest added on top when live money still allows
+      if (money >= FORCE_BUDGET) {
+        // 20% chance of shotgun instead of SMG on force buys.
+        const useShotgun = Math.random() < 0.20;
+        const rawPool = useShotgun ? BUY_POOL_FORCE_SHOTGUN : BUY_POOL_FORCE_SMG;
+        // Filter by team eligibility.
+        const pool = rawPool.filter(id => {
+          const def = WEAPONS[id];
+          return def !== undefined && (def.teams === undefined || def.teams.includes(team));
+        });
+        if (pool.length > 0) {
+          // Try in random order until one fits the budget.
+          const shuffled = pool.slice().sort(() => Math.random() - 0.5);
+          for (const id of shuffled) {
+            const def = WEAPONS[id];
+            if (def && money >= def.price) {
+              game.buy(c, id, now);
+              break;
+            }
+          }
+        }
+      } else if (money >= 250) {
+        // Eco pistol upgrade: skip if bot starts with a decent pistol already
+        // (usp $200 / glock $200 are start pistols — we only upgrade to something
+        // meaningfully better).
+        // Deagle requires $700 to be meaningful; cheaper pistols at $250+.
+        const ecoPool = BUY_POOL_ECO_PISTOL.filter(id => {
+          const def = WEAPONS[id];
+          if (!def) return false;
+          if (def.teams !== undefined && !def.teams.includes(team)) return false;
+          if (money < def.price) return false;
+          // Deagle only on $700+ eco (classic CS2 eco deagle).
+          if (id === 'deagle') return money >= 700;
+          return true;
+        });
+        if (ecoPool.length > 0) {
+          // 60% chance to actually spend (sometimes just save).
+          if (Math.random() < 0.60) {
+            const id = ecoPool[Math.floor(Math.random() * ecoPool.length)]!;
+            game.buy(c, id, now);
+          }
+        }
+      }
+      // Regardless of primary choice, buy vest if affordable and not already armored.
+      if (c.armor === 0 && c.money >= ECONOMY.ARMOR_PRICE) {
+        game.buy(c, 'armor', now);
+      }
+      return;
+    }
+
+    // -----------------------------------------------------------------------
+    // Case: bot HAS a primary (game.ts full-buy gave ak47/m4a4).
+    // We may swap to galil/famas (budget) or aug/sg553 (rich, hard difficulty).
+    // Only replace if we can afford the upgrade while keeping armor.
+    // -----------------------------------------------------------------------
+    const primaryId = c.inventory.primary?.def.id ?? '';
+
+    // Already has a non-standard primary from a previous pass (should not happen
+    // in normal flow, but guard it).
+    const standardIds = new Set(['ak47', 'm4a4']);
+    if (!standardIds.has(primaryId)) return;
+
+    const armorCost = c.armor > 0 ? 0 : ECONOMY.ARMOR_HELMET_PRICE;
+
+    // Rich hard-bot upgrade: aug(CT)/sg553(T) at 25% chance.
+    const richPool = BUY_POOL_FULL_PRIMARY_RICH.filter(id => {
+      const def = WEAPONS[id];
+      return def !== undefined && (def.teams === undefined || def.teams.includes(team));
+    });
+    const richId = richPool[0]; // one entry per team
+    const richDef = richId !== undefined ? WEAPONS[richId] : undefined;
+    if (
+      this._game.difficulty === 'hard' &&
+      richDef !== undefined &&
+      richId !== undefined &&
+      money >= richDef.price + armorCost &&
+      Math.random() < 0.25
+    ) {
+      // Swap: use game.buy which replaces primary slot.
+      game.buy(c, richId, now);
+      return;
+    }
+
+    // Budget rifle swap: galil(T)/famas(CT) when bot got the standard rifle
+    // but happens to have less money (edge case: game.ts gave ak47 even at
+    // 2700, which leaves very little; famas/galil might already be cheaper
+    // but game.ts already bought the standard — skip downgrade, only upgrade).
+    // → We only upgrade, never downgrade.  This branch is a no-op for standard
+    // rifles; included for future extensibility.
   }
 
   // ---------------------------------------------------------------------------

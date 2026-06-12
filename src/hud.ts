@@ -1,5 +1,5 @@
 import type { Game, GamePhase, MatchOptions } from './game';
-import { RULES, GRENADES, ECONOMY } from './constants';
+import { RULES, GRENADES, ECONOMY, WEAPONS } from './constants';
 import { gameEvents } from './combat';
 import { isScoped, currentSpread } from './weapons';
 import { DUST2 } from './maps/dust2';
@@ -637,7 +637,59 @@ const HUD_CSS = `
 .ms-play-again {
   width: 100%; margin-top: 8px;
 }
+
+/* ── Buy menu CS2 category layout ──────────────────────────────── */
+.buy-layout {
+  display: flex; align-items: flex-start; gap: 6px;
+}
+.buy-cat-rail {
+  background: rgba(8,10,14,0.92);
+  border: 1px solid rgba(255,255,255,0.09);
+  border-radius: 6px;
+  padding: 10px 6px;
+  min-width: 168px;
+  display: flex; flex-direction: column; gap: 2px;
+}
+.buy-cat-rail .buy-time-label {
+  margin-bottom: 8px; padding-bottom: 8px;
+}
+.buy-cat-item {
+  display: flex; align-items: center; gap: 8px;
+  padding: 7px 8px; border-radius: 4px;
+  cursor: pointer; font-size: 12px;
+  transition: background 0.1s;
+}
+.buy-cat-item:hover { background: rgba(201,160,106,0.10); }
+.buy-cat-item:hover .buy-key { border-color: #c9a06a; color: #c9a06a; }
+.buy-cat-item.active {
+  background: rgba(201,160,106,0.16);
+  color: #c9a06a;
+}
+.buy-cat-item.active .buy-key {
+  border-color: #c9a06a; color: #c9a06a;
+  background: rgba(201,160,106,0.20);
+}
+.buy-items-panel {
+  background: rgba(8,10,14,0.92);
+  border: 1px solid rgba(255,255,255,0.09);
+  border-radius: 6px;
+  padding: 10px 8px 8px;
+  min-width: 210px;
+  display: flex; flex-direction: column; gap: 0;
+}
+.buy-items-panel .buy-panel-title {
+  font-size: 9px; text-transform: uppercase; letter-spacing: 0.14em;
+  opacity: 0.5; margin-bottom: 6px; padding: 0 4px 6px;
+  border-bottom: 1px solid rgba(255,255,255,0.07);
+}
+.buy-items-panel .buy-back-hint {
+  font-size: 9px; text-transform: uppercase; letter-spacing: 0.10em;
+  opacity: 0.38; margin-top: 6px; padding-top: 6px;
+  border-top: 1px solid rgba(255,255,255,0.07);
+  text-align: center;
+}
 `;
+
 
 
 
@@ -722,6 +774,8 @@ export class HUD {
   private _buyVisible  = false;
   // Cached team used to build current buy menu DOM (detects team change for rebuild).
   private _buyMenuTeam: 'CT' | 'T' | null = null;
+  // Active category tab (1-5) or null = category overview shown.
+  private _buyCategory: number | null = null;
 
   // Callbacks.
   onStart?:   (opts: MatchOptions) => void;
@@ -1311,6 +1365,18 @@ export class HUD {
   private _wireBuyMenu(): void {
     // Use event delegation so the listener survives buy menu DOM rebuilds.
     this._buyMenu.addEventListener('click', (e) => {
+      // Category tab click.
+      const catItem = (e.target as HTMLElement).closest<HTMLElement>('.buy-cat-item');
+      if (catItem) {
+        const catKey = parseInt(catItem.dataset.catKey ?? '0', 10);
+        if (catKey >= 1 && catKey <= 5) {
+          // Toggle: clicking the already-active tab goes back to overview.
+          this._setBuyCategory(this._buyCategory === catKey ? null : catKey);
+        }
+        return;
+      }
+
+      // Buy item click.
       const item = (e.target as HTMLElement).closest<HTMLElement>('.buy-item');
       if (!item) return;
       const id   = item.dataset.id!;
@@ -1319,7 +1385,8 @@ export class HUD {
       const ok   = game.buy(game.player, id, now);
       if (ok) {
         item.dispatchEvent(new CustomEvent('hud-buy-success', { bubbles: true, detail: { id } }));
-        // Refresh affordability + grenade maxCarry states after purchase.
+        // Rebuild and refresh after purchase (owned states change).
+        this._rebuildBuyMenu();
         this._refreshBuyAffordability();
       } else {
         item.classList.add('flash-fail');
@@ -1404,82 +1471,103 @@ export class HUD {
 
   /**
    * Build or rebuild the buy menu inner HTML for the given player team.
-   * Called on open and on team change. Does NOT re-attach the delegated listener
-   * (that is wired once in _wireBuyMenu and survives innerHTML replacement).
+   * Renders CS2-style: left category rail (tabs 1–5) + right item panel.
+   * Called on open, team change, and after each purchase.
+   * Does NOT re-attach the delegated listener (wired once in _wireBuyMenu).
    */
   private _rebuildBuyMenu(): void {
     const player = this._game.player;
     if (!player) return;
     const team = player.team;
     this._buyMenuTeam = team;
-
     const isCT = team === 'CT';
 
-    // Slot 1: team pistol.
-    const pistolId    = isCT ? 'usp' : 'glock';
-    const pistolLabel = isCT ? 'USP-S' : 'Glock-18';
+    // Category names for the rail.
+    const CAT_LABELS = ['PISTOLS', 'MID-TIER', 'RIFLES', 'GRENADES', 'GEAR'] as const;
 
-    // Slot 3: team rifle.
-    const rifleId    = isCT ? 'm4a4' : 'ak47';
-    const rifleLabel = isCT ? 'M4A4' : 'AK-47';
-    const riflePrice = isCT ? 2900 : 2700;
+    // Category rail rows (data-cat-key="1"–"5").
+    const railRows = CAT_LABELS.map((label, i) => {
+      const n = i + 1;
+      const isActive = this._buyCategory === n;
+      return `<div class="buy-cat-item${isActive ? ' active' : ''}" data-cat-key="${n}">
+        <span class="buy-key">${n}</span>${label}
+      </div>`;
+    }).join('');
 
-    // Slot 5: armor — context-sensitive.
-    const hasArmor  = player.armor > 0;
-    const hasHelmet = player.helmet;
-    let armorId: string;
-    let armorLabel: string;
-    let armorPrice: number;
-    let armorDisabled = false;
-    if (!hasArmor) {
-      armorId    = 'armor';
-      armorLabel = 'Vest';
-      armorPrice = ECONOMY.ARMOR_PRICE;
-    } else if (!hasHelmet) {
-      armorId    = 'armorHelmet';
-      armorLabel = 'Helmet upgrade';
-      armorPrice = ECONOMY.ARMOR_UPGRADE_PRICE;
-    } else {
-      armorId      = 'armorHelmet';
-      armorLabel   = 'Armored';
-      armorPrice   = 0;
-      armorDisabled = true;
+    // Item panel HTML — depends on active category.
+    let itemsHtml = '';
+    if (this._buyCategory === null) {
+      itemsHtml = '';
+    } else if (this._buyCategory === 1) {
+      // PISTOLS: filter WEAPONS by category='pistol', team-eligible, sort by price asc.
+      const eligible = _eligibleWeapons('pistol', team);
+      itemsHtml = _weaponItemsHtml('PISTOLS', eligible);
+    } else if (this._buyCategory === 2) {
+      // MID-TIER: smg then heavy, team-eligible, sort by price asc, cap at 9.
+      const smgs   = _eligibleWeapons('smg',   team);
+      const heavy  = _eligibleWeapons('heavy', team);
+      // Combine and sort by price; cap at 9.
+      const combined = [...smgs, ...heavy].sort((a, b) => a.price - b.price).slice(0, 9);
+      itemsHtml = _weaponItemsHtml('MID-TIER', combined);
+    } else if (this._buyCategory === 3) {
+      // RIFLES: filter WEAPONS by category='rifle', team-eligible, sort by price asc.
+      const eligible = _eligibleWeapons('rifle', team);
+      itemsHtml = _weaponItemsHtml('RIFLES', eligible);
+    } else if (this._buyCategory === 4) {
+      // GRENADES.
+      const grens = player.grenades ?? { he: 0, flash: 0, smoke: 0 };
+      const heDisabled = grens.he  >= GRENADES.he.maxCarry;
+      const fbDisabled = grens.flash >= GRENADES.flash.maxCarry;
+      const smDisabled = grens.smoke >= GRENADES.smoke.maxCarry;
+      const fbLabel    = `Flashbang (${grens.flash}/${GRENADES.flash.maxCarry})`;
+      itemsHtml = `<div class="buy-items-panel">
+        <div class="buy-panel-title">GRENADES</div>
+        ${_buyRow('he',    'HE Grenade', GRENADES.he.price,    1, heDisabled)}
+        ${_buyRow('flash', fbLabel,      GRENADES.flash.price, 2, fbDisabled)}
+        ${_buyRow('smoke', 'Smoke',      GRENADES.smoke.price, 3, smDisabled)}
+        <div class="buy-money-label">$—</div>
+        <div class="buy-back-hint">[0] BACK</div>
+      </div>`;
+    } else if (this._buyCategory === 5) {
+      // GEAR.
+      const hasArmor  = player.armor > 0;
+      const hasHelmet = player.helmet;
+      let armorId: string;
+      let armorLabel: string;
+      let armorPrice: number;
+      let armorDisabled = false;
+      if (!hasArmor) {
+        armorId    = 'armor';
+        armorLabel = 'Vest';
+        armorPrice = ECONOMY.ARMOR_PRICE;
+      } else if (!hasHelmet) {
+        armorId    = 'armorHelmet';
+        armorLabel = 'Helmet upgrade';
+        armorPrice = ECONOMY.ARMOR_UPGRADE_PRICE;
+      } else {
+        armorId       = 'armorHelmet';
+        armorLabel    = 'Armored';
+        armorPrice    = 0;
+        armorDisabled = true;
+      }
+      const kitDisabledForT = !isCT;
+      itemsHtml = `<div class="buy-items-panel">
+        <div class="buy-panel-title">GEAR</div>
+        ${_buyRow(armorId, armorLabel,    armorPrice,               1, armorDisabled)}
+        ${_buyRow('kit',   'Defuse Kit',  ECONOMY.DEFUSE_KIT_PRICE, 2, kitDisabledForT)}
+        <div class="buy-money-label">$—</div>
+        <div class="buy-back-hint">[0] BACK</div>
+      </div>`;
     }
 
-    // Slot 6: defuse kit — CT only; greyed for T.
-    const kitDisabledForT = !isCT;
-
-    // Grenade owned counts (default 0 each).
-    const grens = player.grenades ?? { he: 0, flash: 0, smoke: 0 };
-
-    // Row 7: HE — disable when owned >= maxCarry.
-    const heDisabled  = grens.he  >= GRENADES.he.maxCarry;
-    // Row 8: Flashbang — disable when owned >= maxCarry.
-    const fbDisabled  = grens.flash >= GRENADES.flash.maxCarry;
-    // Row 9: Smoke — disable when owned >= maxCarry.
-    const smDisabled  = grens.smoke >= GRENADES.smoke.maxCarry;
-
-    // Flash label shows owned/max.
-    const fbLabel = `Flashbang (${grens.flash}/${GRENADES.flash.maxCarry})`;
-
     this._buyMenu.innerHTML = `
-      <div class="buy-panel">
-        <h3>Weapons</h3>
-        <div class="buy-time-label">BUY TIME: —</div>
-        ${_buyRow(pistolId,  pistolLabel,     200,              1)}
-        ${_buyRow('deagle', 'Desert Eagle',   700,              2)}
-        ${_buyRow(rifleId,   rifleLabel,      riflePrice,       3)}
-        ${_buyRow('awp',    'AWP',            4750,             4)}
-        <div class="buy-money-label">$—</div>
-      </div>
-      <div class="buy-panel">
-        <h3>Gear</h3>
-        ${_buyRow(armorId,  armorLabel,       armorPrice,  5, armorDisabled)}
-        ${_buyRow('kit',    'Defuse Kit',      400,         6, kitDisabledForT)}
-        ${_buyRow('he',     'HE Grenade',      GRENADES.he.price,    7, heDisabled)}
-        ${_buyRow('flash',  fbLabel,           GRENADES.flash.price, 8, fbDisabled)}
-        ${_buyRow('smoke',  'Smoke',           GRENADES.smoke.price, 9, smDisabled)}
-        <div class="buy-money-label">$—</div>
+      <div class="buy-layout">
+        <div class="buy-cat-rail">
+          <div class="buy-time-label">BUY TIME: —</div>
+          ${railRows}
+          <div class="buy-money-label">$—</div>
+        </div>
+        ${itemsHtml}
       </div>
     `;
   }
@@ -1546,16 +1634,22 @@ export class HUD {
   private _setBuyVisible(v: boolean): void {
     this._buyVisible = v;
     if (v) {
-      // Rebuild menu if first open or team changed since last build.
-      const currentTeam = this._game.player?.team ?? null;
-      if (this._buyMenuTeam !== currentTeam) {
-        this._rebuildBuyMenu();
-      }
+      // Always reset to category overview on each open.
+      this._buyCategory = null;
+      // Rebuild menu (always on open — category reset requires fresh DOM).
+      this._rebuildBuyMenu();
       this._buyMenu.classList.add('visible');
       this._refreshBuyAffordability();
     } else {
       this._buyMenu.classList.remove('visible');
     }
+  }
+
+  /** Navigate to a buy category tab (1–5) or back to overview (null). */
+  private _setBuyCategory(cat: number | null): void {
+    this._buyCategory = cat;
+    this._rebuildBuyMenu();
+    this._refreshBuyAffordability();
   }
 
   // Public getter so main.ts can suppress slot switching while buy menu is open.
@@ -1583,16 +1677,32 @@ export class HUD {
       if (e.code === 'Escape' && this._buyVisible) {
         this._setBuyVisible(false);
       }
-      // Digit1–9 / Numpad1–9: buy shortcut while menu is open.
+      // All digits 0–9 are consumed by the buy menu when it is open.
       if (this._buyVisible) {
+        // Digit0 / Numpad0 / Backspace: return to category overview.
+        if (e.code === 'Digit0' || e.code === 'Numpad0' || e.code === 'Backspace') {
+          if (this._buyCategory !== null) {
+            e.preventDefault();
+            this._setBuyCategory(null);
+          }
+          return;
+        }
+        // Digit1–9 / Numpad1–9.
         const digitMatch = e.code.match(/^(?:Digit|Numpad)([1-9])$/);
         if (digitMatch) {
           e.preventDefault();
           const key = parseInt(digitMatch[1], 10);
-          // Map key 1-9 to item data-key attributes.
-          const item = this._buyMenu.querySelector<HTMLElement>(`.buy-item[data-key="${key}"]`);
-          if (item) {
-            item.click();
+          if (this._buyCategory === null) {
+            // Category level: keys 1–5 select a tab.
+            if (key >= 1 && key <= 5) {
+              this._setBuyCategory(key);
+            }
+          } else {
+            // Item level: click the matching buy-item.
+            const item = this._buyMenu.querySelector<HTMLElement>(`.buy-item[data-key="${key}"]`);
+            if (item) {
+              item.click();
+            }
           }
         }
       }
@@ -1945,5 +2055,42 @@ function _buyRow(
   return `<div class="buy-item${cantClass}" data-id="${id}" data-price="${price}" data-key="${key}"${grenAttr}${disabledAttr}>
     <span><span class="buy-key">${key}</span>${label}</span>
     <span class="buy-price">${priceDisplay}</span>
+  </div>`;
+}
+
+/**
+ * Return weapon definitions eligible for `team` in the given category,
+ * sorted ascending by price. Max 9 entries (spec cap).
+ */
+function _eligibleWeapons(
+  category: 'pistol' | 'smg' | 'heavy' | 'rifle',
+  team: 'CT' | 'T',
+): Array<{ id: string; name: string; price: number }> {
+  const out: Array<{ id: string; name: string; price: number }> = [];
+  for (const def of Object.values(WEAPONS)) {
+    if (def.category !== category) continue;
+    if (def.teams && !def.teams.includes(team)) continue;
+    out.push({ id: def.id, name: def.name, price: def.price });
+  }
+  out.sort((a, b) => a.price - b.price);
+  return out.slice(0, 9);
+}
+
+/**
+ * Render a weapon list item panel with title, up to 9 rows, money label and
+ * back hint.
+ */
+function _weaponItemsHtml(
+  title: string,
+  items: Array<{ id: string; name: string; price: number }>,
+): string {
+  const rows = items
+    .map((it, i) => _buyRow(it.id, it.name, it.price, i + 1))
+    .join('');
+  return `<div class="buy-items-panel">
+    <div class="buy-panel-title">${title}</div>
+    ${rows}
+    <div class="buy-money-label">$—</div>
+    <div class="buy-back-hint">[0] BACK</div>
   </div>`;
 }

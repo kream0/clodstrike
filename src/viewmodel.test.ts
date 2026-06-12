@@ -17,9 +17,13 @@ import { clone as skeletonClone } from 'three/examples/jsm/utils/SkeletonUtils.j
 import {
   normalizeWeaponModel,
   WEAPON_MODEL_PATHS,
+  WEAPON_MODEL_ALIAS,
   VIEWMODEL_SCALE,
+  resolveWeaponTuning,
   type WeaponId,
+  type WeaponTuning,
 } from './viewmodel';
+import { WEAPONS } from './constants';
 
 const repoRoot = join(import.meta.dir, '..');
 
@@ -388,5 +392,121 @@ describe('SkeletonUtils.clone — non-skinned group sanity', () => {
     for (let i = 0; i < source.children.length; i++) {
       expect(cloned.children[i]).not.toBe(source.children[i]);
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// WEAPON_MODEL_ALIAS — alias chain resolution for all 30 WEAPONS ids
+// ---------------------------------------------------------------------------
+
+describe('WEAPON_MODEL_ALIAS — every WEAPONS id resolves to a WEAPON_MODEL_PATHS entry', () => {
+  const modelledIds = new Set(Object.keys(WEAPON_MODEL_PATHS));
+
+  // Helper: walk alias chain, max 2 hops (no chain is longer than 1 hop in practice)
+  function resolveToModelledId(id: string): string | undefined {
+    if (modelledIds.has(id)) return id;
+    const alias = WEAPON_MODEL_ALIAS[id];
+    if (alias === undefined) return undefined;
+    if (modelledIds.has(alias)) return alias;
+    // Two-hop (not expected, but guard)
+    const alias2 = WEAPON_MODEL_ALIAS[alias];
+    if (alias2 !== undefined && modelledIds.has(alias2)) return alias2;
+    return undefined;
+  }
+
+  test('data-driven: every WEAPONS id (excluding knife) resolves to a WEAPON_MODEL_PATHS entry or is modelled directly', () => {
+    const failures: string[] = [];
+    for (const id of Object.keys(WEAPONS)) {
+      if (id === 'knife') continue; // knife is intentionally procedural
+      const resolved = resolveToModelledId(id);
+      if (resolved === undefined) failures.push(id);
+    }
+    if (failures.length > 0) {
+      throw new Error(`Weapon ids with no GLB resolution: ${failures.join(', ')}`);
+    }
+  });
+
+  test('knife is NOT in WEAPON_MODEL_ALIAS (stays procedural)', () => {
+    expect(WEAPON_MODEL_ALIAS['knife']).toBeUndefined();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// resolveWeaponTuning — finite scale/offsets for every id (noUncheckedIndexedAccess safe)
+// ---------------------------------------------------------------------------
+
+describe('resolveWeaponTuning — all WEAPONS ids return finite tuning', () => {
+  test('data-driven: every WEAPONS id returns a tuning with finite scaleMult, muzzleZ, targetLength', () => {
+    const failures: string[] = [];
+    for (const id of Object.keys(WEAPONS)) {
+      const tuning: WeaponTuning = resolveWeaponTuning(id);
+      const ok =
+        isFinite(tuning.scaleMult) &&
+        tuning.scaleMult > 0 &&
+        isFinite(tuning.muzzleZ) &&
+        isFinite(tuning.targetLength) &&
+        tuning.targetLength > 0 &&
+        isFinite(tuning.gripOffset.x) &&
+        isFinite(tuning.gripOffset.y) &&
+        isFinite(tuning.gripOffset.z) &&
+        isFinite(tuning.extraRotation.x) &&
+        isFinite(tuning.extraRotation.y) &&
+        isFinite(tuning.extraRotation.z);
+      if (!ok) failures.push(id);
+    }
+    if (failures.length > 0) {
+      throw new Error(`Weapon ids with non-finite tuning fields: ${failures.join(', ')}`);
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Spot checks
+// ---------------------------------------------------------------------------
+
+describe('WEAPON_MODEL_ALIAS spot checks', () => {
+  test('mp9 resolves to m4a4 path', () => {
+    const aliasId = WEAPON_MODEL_ALIAS['mp9'];
+    expect(aliasId).toBe('m4a4');
+    expect(WEAPON_MODEL_PATHS[aliasId as WeaponId]).toBe('models/weapons/m4a4.glb');
+  });
+
+  test('mp9 effective scaleMult is less than m4a4 scaleMult (SMG compact feel)', () => {
+    const mp9Tuning   = resolveWeaponTuning('mp9');
+    const m4a4Tuning  = resolveWeaponTuning('m4a4');
+    expect(mp9Tuning.scaleMult).toBeLessThan(m4a4Tuning.scaleMult);
+  });
+
+  test('scar20 resolves to awp path', () => {
+    const aliasId = WEAPON_MODEL_ALIAS['scar20'];
+    expect(aliasId).toBe('awp');
+    expect(WEAPON_MODEL_PATHS[aliasId as WeaponId]).toBe('models/weapons/awp.glb');
+  });
+
+  test('scar20 tuning is finite with scaleMult > 0', () => {
+    const tuning = resolveWeaponTuning('scar20');
+    expect(isFinite(tuning.scaleMult)).toBe(true);
+    expect(tuning.scaleMult).toBeGreaterThan(0);
+  });
+
+  test('dualies resolves to deagle (single-gun stand-in)', () => {
+    expect(WEAPON_MODEL_ALIAS['dualies']).toBe('deagle');
+  });
+
+  test('ssg08 resolves to awp with smaller targetLength than awp', () => {
+    const ssg08Tuning = resolveWeaponTuning('ssg08');
+    const awpTuning   = resolveWeaponTuning('awp');
+    expect(WEAPON_MODEL_ALIAS['ssg08']).toBe('awp');
+    expect(ssg08Tuning.targetLength).toBeLessThan(awpTuning.targetLength);
+  });
+
+  test('m249 and negev alias to m4a4 with enlarged scaleMult', () => {
+    const m249Tuning  = resolveWeaponTuning('m249');
+    const negevTuning = resolveWeaponTuning('negev');
+    const m4a4Tuning  = resolveWeaponTuning('m4a4');
+    expect(WEAPON_MODEL_ALIAS['m249']).toBe('m4a4');
+    expect(WEAPON_MODEL_ALIAS['negev']).toBe('m4a4');
+    expect(m249Tuning.scaleMult).toBeGreaterThan(m4a4Tuning.scaleMult);
+    expect(negevTuning.scaleMult).toBeGreaterThan(m4a4Tuning.scaleMult);
   });
 });

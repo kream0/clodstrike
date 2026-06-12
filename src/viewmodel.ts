@@ -22,6 +22,48 @@ export const WEAPON_MODEL_PATHS: Readonly<Partial<Record<WeaponId, string>>> = {
 } as const;
 
 // ---------------------------------------------------------------------------
+// Weapon model alias table — maps new weapon ids to an existing modeled id.
+// Resolution order in _applyCurrentWeaponVisual:
+//   1. exact id in WEAPON_MODEL_PATHS  (modeled id, use directly)
+//   2. WEAPON_MODEL_ALIAS lookup        (use aliased id's path + tuning with override)
+//   3. procedural fallback              (no GLB loaded or load failed)
+// ---------------------------------------------------------------------------
+
+export const WEAPON_MODEL_ALIAS: Readonly<Record<string, WeaponId>> = {
+  // Rifles
+  famas:  'm4a4',
+  aug:    'm4a4',
+  galil:  'ak47',
+  sg553:  'ak47',
+  ssg08:  'awp',
+  g3sg1:  'awp',
+  scar20: 'awp',
+
+  // Pistols
+  p250:      'usp',
+  fiveseven: 'usp',
+  tec9:      'glock',
+  // Dual Berettas: single-gun stand-in — deagle model used as a large pistol proxy
+  dualies:   'deagle',
+
+  // SMGs — all alias to m4a4, compact feel via reduced scale override
+  mac10:  'm4a4',
+  mp9:    'm4a4',
+  mp7:    'm4a4',
+  ump45:  'm4a4',
+  p90:    'm4a4',
+  bizon:  'm4a4',
+
+  // Heavy
+  nova:    'ak47',
+  xm1014:  'ak47',
+  sawedoff:'ak47',
+  mag7:    'ak47',
+  m249:    'm4a4',
+  negev:   'm4a4',
+} as const;
+
+// ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------
 
@@ -188,7 +230,7 @@ export function normalizeWeaponModel(
 // Single place to tweak offsets/rotation/scale after playtesting.
 // ---------------------------------------------------------------------------
 
-interface WeaponTuning {
+export interface WeaponTuning {
   /** targetLength fed into normalizeWeaponModel (approximate Z-span in meters). */
   targetLength: number;
   /** Grip/anchor offset in viewmodel local space — fine-tune after playtesting. */
@@ -244,7 +286,59 @@ const WEAPON_TUNING: Record<string, WeaponTuning> = {
     scaleMult: 1.0,
     muzzleZ: -0.45,
   },
-} as const satisfies Record<string, WeaponTuning>;
+} satisfies Record<string, WeaponTuning>;
+
+// ---------------------------------------------------------------------------
+// Per-id tuning overrides for aliased weapons.
+// Only fields that differ from the aliased id's tuning need to be listed.
+// Resolution: alias tuning + override (spread operator) = effective tuning.
+// DRY: we do NOT copy-paste 23 full tuning rows; we patch only what differs.
+// ---------------------------------------------------------------------------
+
+interface TuningOverride {
+  scaleMult?: number;
+  muzzleZ?: number;
+  targetLength?: number;
+}
+
+const WEAPON_TUNING_OVERRIDES: Record<string, TuningOverride> = {
+  // --- Rifles aliased to m4a4 ---
+  // famas, aug: same size/feel as m4a4 — no override needed
+
+  // --- Rifles aliased to ak47 ---
+  // galil, sg553: same size/feel as ak47 — no override needed
+
+  // --- Snipers aliased to awp ---
+  // ssg08: shorter bolt-action (scout) — slightly smaller
+  ssg08:  { scaleMult: 0.92, targetLength: 0.55, muzzleZ: -0.40 },
+  // g3sg1, scar20: auto-sniper — same visual length as AWP
+  g3sg1:  { scaleMult: 1.00 },
+  scar20: { scaleMult: 1.00 },
+
+  // --- Pistols aliased to usp ---
+  // p250: compact pistol
+  p250:      { scaleMult: 0.92, targetLength: 0.20, muzzleZ: -0.12 },
+  // fiveseven: similar to usp — no override needed
+  // tec9: aliased to glock — no override needed
+
+  // --- SMGs aliased to m4a4 — compact feel: ~0.82× alias scale ---
+  mac10:  { scaleMult: 0.82, targetLength: 0.30, muzzleZ: -0.22 },
+  mp9:    { scaleMult: 0.82, targetLength: 0.30, muzzleZ: -0.22 },
+  mp7:    { scaleMult: 0.84, targetLength: 0.32, muzzleZ: -0.24 },
+  ump45:  { scaleMult: 0.86, targetLength: 0.34, muzzleZ: -0.26 },
+  p90:    { scaleMult: 0.88, targetLength: 0.36, muzzleZ: -0.28 },
+  bizon:  { scaleMult: 0.84, targetLength: 0.32, muzzleZ: -0.24 },
+
+  // --- Heavy: shotguns aliased to ak47 — slightly larger (+1.05×) ---
+  nova:    { scaleMult: 1.05, muzzleZ: -0.30 },
+  xm1014:  { scaleMult: 1.05, muzzleZ: -0.30 },
+  sawedoff:{ scaleMult: 0.98, targetLength: 0.32, muzzleZ: -0.24 },
+  mag7:    { scaleMult: 1.02, targetLength: 0.36, muzzleZ: -0.28 },
+
+  // --- Heavy: MGs aliased to m4a4 — enlarged (+1.15×) ---
+  m249:  { scaleMult: 1.15, targetLength: 0.44, muzzleZ: -0.36 },
+  negev: { scaleMult: 1.15, targetLength: 0.44, muzzleZ: -0.36 },
+};
 
 // Fallback tuning for unknown ids (procedural fallback anyway)
 const DEFAULT_TUNING: WeaponTuning = {
@@ -254,6 +348,29 @@ const DEFAULT_TUNING: WeaponTuning = {
   scaleMult: 1.0,
   muzzleZ: -0.14,
 };
+
+/**
+ * Resolve effective tuning for any weapon id.
+ * Order: exact entry in WEAPON_TUNING → alias tuning + per-id override → DEFAULT_TUNING.
+ * Returns a fresh object; callers may not mutate WEAPON_TUNING or WEAPON_TUNING_OVERRIDES.
+ * Exported for tests.
+ */
+export function resolveWeaponTuning(id: string): WeaponTuning {
+  // 1. Direct tuning entry (the 6 modelled ids)
+  const direct = WEAPON_TUNING[id];
+  if (direct !== undefined) return { ...direct };
+
+  // 2. Alias path: base tuning from alias + per-id override
+  const aliasId = WEAPON_MODEL_ALIAS[id];
+  if (aliasId !== undefined) {
+    const baseTuning = WEAPON_TUNING[aliasId] ?? DEFAULT_TUNING;
+    const override   = WEAPON_TUNING_OVERRIDES[id] ?? {};
+    return { ...baseTuning, ...override };
+  }
+
+  // 3. Fallback
+  return DEFAULT_TUNING;
+}
 
 // ---------------------------------------------------------------------------
 // Grenade procedural mesh builders (lazy, pooled once per type)
@@ -613,11 +730,14 @@ export class ViewModel {
     // Remove previous visuals before reattaching
     this._removeWeaponVisuals();
 
-    const tuning = WEAPON_TUNING[id] ?? DEFAULT_TUNING;
+    const tuning = resolveWeaponTuning(id);
     this._muzzle.position.set(0, 0.02, tuning.muzzleZ);
 
-    const weaponId = id as WeaponId;
-    const sourceModel = this._models[weaponId];
+    // Resolve model source: exact id first, then alias, then procedural fallback.
+    const modelId: WeaponId = (id in WEAPON_MODEL_PATHS)
+      ? (id as WeaponId)
+      : (WEAPON_MODEL_ALIAS[id] ?? (id as WeaponId));
+    const sourceModel = this._models[modelId];
 
     if (sourceModel !== undefined) {
       // --- GLB path ---
@@ -649,10 +769,12 @@ export class ViewModel {
       this._group.add(modelClone);
       this._activeModel = modelClone;
     } else {
-      // --- Procedural fallback ---
+      // --- Procedural fallback (GLBs not loaded or load failed) ---
+      // Resolve shape family via alias so new weapon ids get a sensible mesh.
+      const shapeId = WEAPON_MODEL_ALIAS[id] ?? id;
       let weaponMesh: THREE.Group;
 
-      switch (id) {
+      switch (shapeId) {
         case 'ak47':
         case 'm4a4':
           weaponMesh = buildRifle();

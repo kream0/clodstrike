@@ -216,8 +216,8 @@ describe('moneySpent via buy()', () => {
     const initialMoney = 5000;
     player.money = initialMoney;
 
-    const price = WEAPONS.ak47.price; // 2700
-    const ok = game.buy(player, 'ak47', 0);
+    const price = WEAPONS.m4a4.price; // 2900 — player is CT, use CT-only rifle
+    const ok = game.buy(player, 'm4a4', 0);
     expect(ok).toBe(true);
     expect(player.money).toBe(initialMoney - price);
     expect(game.statsFor(player).moneySpent).toBe(price);
@@ -242,9 +242,9 @@ describe('moneySpent via buy()', () => {
   test('multiple purchases accumulate moneySpent', () => {
     const player = game.player;
     player.money = 5000;
-    game.buy(player, 'ak47', 0);
+    game.buy(player, 'm4a4', 0); // player is CT — CT-only rifle
     game.buy(player, 'armor', 0);
-    const expected = WEAPONS.ak47.price + ECONOMY.ARMOR_PRICE;
+    const expected = WEAPONS.m4a4.price + ECONOMY.ARMOR_PRICE; // 2900 + 650 = 3550
     expect(game.statsFor(player).moneySpent).toBe(expected);
   });
 

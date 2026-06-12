@@ -174,7 +174,7 @@ describe('buy() rejected after buy window', () => {
     const justBefore = RULES.BUY_TIME - 1; // 1 s before window closes
     g1.update(justBefore - live1, justBefore);
     g1.player.money = 5000;
-    const ok1 = g1.buy(g1.player, 'ak47', justBefore);
+    const ok1 = g1.buy(g1.player, 'm4a4', justBefore); // player is CT — CT-only rifle
     expect(ok1).toBe(true);
     g1.dispose();
 
@@ -186,7 +186,7 @@ describe('buy() rejected after buy window', () => {
     const justAfter = RULES.BUY_TIME + 1; // 1 s after window closes
     g2.update(justAfter - live2, justAfter);
     g2.player.money = 5000;
-    const ok2 = g2.buy(g2.player, 'ak47', justAfter);
+    const ok2 = g2.buy(g2.player, 'm4a4', justAfter); // player is CT — CT-only rifle
     expect(ok2).toBe(false);
     g2.dispose();
   });
