@@ -696,6 +696,26 @@ const HUD_CSS = `
   width: 100%; margin-top: 8px;
 }
 
+/* ── Ranking rating line (start menu) ──────────────────────────── */
+.rating-line {
+  font-size: 11px; opacity: 0.65; letter-spacing: 0.06em;
+  text-align: center; margin-top: 8px; margin-bottom: -12px;
+  color: #c9a06a;
+  font-variant-numeric: tabular-nums;
+}
+
+/* ── Match-end rating delta ─────────────────────────────────────── */
+.ms-rating-delta {
+  text-align: center;
+  font-size: 14px; font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  margin-bottom: 14px;
+  letter-spacing: 0.04em;
+}
+.ms-rating-delta.gain   { color: #54c87a; }
+.ms-rating-delta.loss   { color: #e05b4b; }
+.ms-rating-delta.draw   { color: rgba(232,230,225,0.60); }
+
 /* ── Buy menu CS2 category layout ──────────────────────────────── */
 .buy-layout {
   display: flex; align-items: flex-start; gap: 6px;
@@ -802,6 +822,7 @@ export class HUD {
   private _matchStats!:     HTMLElement;
   private _replayBadge!:    HTMLElement;
   private _replayFinished!: HTMLElement;
+  private _ratingLine!:     HTMLElement;
 
   // State.
   private _hitmarkerTimer   = 0;
@@ -853,6 +874,9 @@ export class HUD {
 
   // Replay state.
   private _replayAvailable = false;
+
+  // Pending rating delta for the match-end screen (set by main.ts before matchEnd fires).
+  private _pendingRatingDelta: { oldRating: number; newRating: number; delta: number } | null = null;
 
   // Game-time provider — set by main.ts to use clock.now instead of wall time.
   getNow: () => number = () => performance.now() / 1000;
@@ -1213,6 +1237,28 @@ export class HUD {
     this._updateWatchLastRoundBtn();
   }
 
+  /**
+   * Refresh the compact "RATING X · Y matches" line in the start menu.
+   * Called at boot and after each match end.
+   */
+  updateRatingDisplay(rating: number, matches: number, wins: number, losses: number): void {
+    const wl = matches > 0 ? ` · ${wins}W ${losses}L` : '';
+    this._ratingLine.textContent = `RATING ${rating}${wl}`;
+  }
+
+  /**
+   * Store the rating delta to show on the next match-end stats screen.
+   * main.ts calls this BEFORE the matchEnd event fires so _showMatchStats
+   * can read it synchronously.
+   */
+  setRatingDelta(oldRating: number, newRating: number): void {
+    this._pendingRatingDelta = {
+      oldRating,
+      newRating,
+      delta: newRating - oldRating,
+    };
+  }
+
   private _updateWatchLastRoundBtn(): void {
     const btn = this._pauseMenu.querySelector<HTMLButtonElement>('#hud-watch-replay-btn');
     if (!btn) return;
@@ -1465,10 +1511,12 @@ export class HUD {
         <input type="file" id="hud-custom-map-input" accept=".json,application/json" style="display:none">
         <div class="custom-map-feedback"></div>
         <button class="menu-btn primary" id="hud-start-btn">Start Match</button>
+        <div class="rating-line" id="hud-rating-line">RATING 1000</div>
       </div>
     `;
     root.appendChild(startMenu);
     this._startMenu = startMenu;
+    this._ratingLine = startMenu.querySelector<HTMLElement>('#hud-rating-line')!;
 
     // ── Pause menu ──
     const pauseMenu = document.createElement('div');
@@ -1705,6 +1753,7 @@ export class HUD {
       <div class="ms-panel">
         <div class="ms-headline ${teamClass}">${teamName}</div>
         <div class="ms-score">CT ${game.score.CT} &mdash; ${game.score.T} T</div>
+        <div class="ms-rating-delta" id="ms-rating-delta-line"></div>
         <div class="ms-team-label ct">Counter-Terrorists</div>
         ${buildTable('CT')}
         <div class="ms-team-label t">Terrorists</div>
@@ -1715,6 +1764,26 @@ export class HUD {
         </div>
       </div>
     `;
+
+    // Inject rating delta using textContent (no innerHTML interpolation of dynamic values).
+    const ratingDeltaEl = this._matchStats.querySelector<HTMLElement>('#ms-rating-delta-line');
+    if (ratingDeltaEl !== null) {
+      const rd = this._pendingRatingDelta;
+      if (rd !== null) {
+        const sign = rd.delta > 0 ? '+' : '';
+        ratingDeltaEl.textContent = `Rating: ${rd.oldRating} → ${rd.newRating} (${sign}${rd.delta})`;
+        ratingDeltaEl.className = rd.delta > 0
+          ? 'ms-rating-delta gain'
+          : rd.delta < 0
+            ? 'ms-rating-delta loss'
+            : 'ms-rating-delta draw';
+      } else {
+        ratingDeltaEl.remove();
+      }
+    }
+    // Clear the pending delta so a subsequent match (play again) starts fresh.
+    this._pendingRatingDelta = null;
+
     // Wire Watch Final Round button.
     const watchBtn = this._matchStats.querySelector<HTMLElement>('.ms-watch-final');
     if (watchBtn) {

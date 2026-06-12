@@ -36,6 +36,7 @@ import type { LoadedTextures, TextureSlot } from './assets';
 import { makeMatchSeed } from './rng';
 import { ReplayRecorder, ReplayCursor } from './replay';
 import type { ReplayTickInput, ReplayLog } from './replay';
+import { RankStore } from './ranking';
 
 // ---------------------------------------------------------------------------
 // Game-time clock (seconds) — advanced by fixed-step simulation.
@@ -423,8 +424,57 @@ async function boot(): Promise<void> {
   const game = new Game(world, scene);
   game.player = player;
 
+  // --- Ranking store ---
+  // Guard typeof localStorage: non-DOM contexts (test runner) may not have it.
+  const rankStore = new RankStore(
+    typeof localStorage !== 'undefined' ? localStorage : undefined,
+  );
+
+  // Subscribe to matchEnd BEFORE HUD construction so our handler fires first
+  // and can call hud.setRatingDelta() before HUD's own matchEnd listener
+  // renders the stats screen.
+  // NOTE: this closure captures `hud` by reference — hud is assigned immediately
+  // after, so by the time any matchEnd fires (in-game), hud is valid.
+  let _hudRef: HUD | null = null;
+  gameEvents.on('matchEnd', (ev) => {
+    const h = _hudRef;
+    if (h === null) return;
+
+    // Only update rating during live play — NOT during replay reconstruction.
+    // replayLog being non-null means we are in replay mode.
+    if (replayLog !== null) return;
+
+    const playerTeam = player.team;
+    const winnerTeam = ev.winner;
+
+    // Determine result: 12–12 tie score → draw.
+    let score: 0 | 0.5 | 1;
+    if (game.score.CT === 12 && game.score.T === 12) {
+      score = 0.5;
+    } else if (winnerTeam === playerTeam) {
+      score = 1;
+    } else {
+      score = 0;
+    }
+
+    const difficulty = game.difficulty;
+    const oldState = rankStore.load();
+    const newState = rankStore.applyMatch(oldState, difficulty, score);
+    rankStore.save(newState);
+
+    h.setRatingDelta(oldState.rating, newState.rating);
+    h.updateRatingDisplay(newState.rating, newState.matches, newState.wins, newState.losses);
+  });
+
   // --- HUD ---
   const hud = new HUD(document.body, game);
+  _hudRef = hud;
+
+  // Initialize rating display with persisted data.
+  {
+    const rs = rankStore.load();
+    hud.updateRatingDisplay(rs.rating, rs.matches, rs.wins, rs.losses);
+  }
 
   // --- Effects ---
   const effects = new Effects(scene);
