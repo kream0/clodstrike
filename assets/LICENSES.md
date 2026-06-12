@@ -46,3 +46,34 @@ All character GLBs in `models/characters/` are from **Kenney Blocky Characters 2
 | character-t.glb | character-d.glb | Kenney Blocky Characters 2.0 | https://kenney.nl/assets/blocky-characters | CC0 1.0 | 2026-06-11 |
 
 Note: Each GLB references an external texture PNG in `models/characters/Textures/`. Textures `texture-b.png` (CT) and `texture-d.png` (T) are included from the same pack and are also CC0 1.0.
+
+## Rigged Characters (v2) — models/rigged/
+
+All rigged character GLTF files in `models/rigged/` are from the **Ultimate Modular Men Pack** by **Quaternius** (laulhet@gmail.com), published under CC0 1.0 Universal (Public Domain Dedication). Pack page: https://quaternius.com/packs/ultimatemodularcharacters.html — Google Drive download folder: https://drive.google.com/drive/folders/1USAAquX2JJWuA2m6zol0KUkFe3UkZ8zX
+
+Each GLTF is self-contained (binary data base64-embedded, no external .bin), 62-bone humanoid rig named "CharacterArmature", 24 embedded animation clips.
+
+| File | Source File | Drive File ID | License | Downloaded |
+|---|---|---|---|---|
+| ct_operator.gltf | Swat.gltf | 1VGmU5f8a43NBT22JWB507NDSLbmNxzF9 | CC0 1.0 | 2026-06-12 |
+| t_phoenix.gltf | Punk.gltf | 1yHWu5ezXq4dYBcn4sWiNd16YN9fMtXo0 | CC0 1.0 | 2026-06-12 |
+
+Embedded animation clips (identical set in both files): Death, Gun_Shoot, HitRecieve, HitRecieve_2, Idle, Idle_Gun, Idle_Gun_Pointing, Idle_Gun_Shoot, Idle_Neutral, Idle_Sword, Interact, Kick_Left, Kick_Right, Punch_Left, Punch_Right, Roll, Run, Run_Back, Run_Left, Run_Right, Run_Shoot, Sword_Slash, Walk, Wave.
+
+Note: The Universal Animation Library (separate clip library for retargeting) is hosted on itch.io (https://quaternius.itch.io/universal-animation-library) and requires a CAPTCHA-gated download; it was not obtainable in this session. The 24 clips embedded in each character file cover all required FPS gameplay states (idle, walk, run, strafe, shoot, reload-pose, death, hit-react, crouch).
+
+## Weapons v2 — models/weapons_v2/
+
+All weapon GLBs in `models/weapons_v2/` are by **Quaternius**, published under CC0 1.0 Universal (Public Domain Dedication), mirrored on **Poly Pizza** (https://poly.pizza/u/Quaternius). Static prop meshes (no rig, no animations) — suitable for viewmodel and world-model rendering.
+
+| File | Poly Pizza Page | Resource ID | License | Downloaded |
+|---|---|---|---|---|
+| pistol.glb | https://poly.pizza/m/J3i9KDQ3kt | f5a88c73-af97-49ca-8650-4bde579d2f80 | CC0 1.0 | 2026-06-12 |
+| assault_rifle.glb | https://poly.pizza/m/Bgvuu4CUMV | 9a0e478c-de82-4773-9b70-a0219bb0057c | CC0 1.0 | 2026-06-12 |
+| assault_rifle_2.glb | https://poly.pizza/m/K2lXTYFSLC | b3e6be61-0299-4866-a227-58f5f3fe610b | CC0 1.0 | 2026-06-12 |
+| shotgun.glb | https://poly.pizza/m/ZmPTnh7njL | f71d6771-f512-4374-bd23-ba00b564db68 | CC0 1.0 | 2026-06-12 |
+| sniper_rifle.glb | https://poly.pizza/m/ASOMZIErq3 | f03e21b7-e3b7-49fd-b47d-d1908649fcee | CC0 1.0 | 2026-06-12 |
+| smg.glb | https://poly.pizza/m/7ehatxr7FY | fb8ae707-d5b9-4eb8-ab8c-1c78d3c1f710 | CC0 1.0 | 2026-06-12 |
+| scifi_smg.glb | https://poly.pizza/m/NHYaHnTNIM | cc2ce213-28b2-4aed-a6f7-4b9cf8f80568 | CC0 1.0 | 2026-06-12 |
+| revolver.glb | https://poly.pizza/m/9C26wSpMS0 | 9e728565-67a3-44db-9567-982320abff09 | CC0 1.0 | 2026-06-12 |
+| knife.glb | https://poly.pizza/m/N9bfPFP1hr | db1c8b42-5e15-47c3-99dc-0d19b1ee5115 | CC0 1.0 | 2026-06-12 |
