@@ -40,17 +40,16 @@ A Counter-Strike 2–style single-player FPS — bots, bomb defusal, and a low-p
 
 ### Weapons
 
-Seven weapons across three slots with individually tuned stats:
+The full CS2 roster — 29 guns + knife across three slots, every entry with CS2-faithful price, damage, RPM, magazine, recoil pattern and movement-spread values:
 
-| Weapon | Slot | Price | Notes |
-|:---|:---|:---|:---|
-| Knife | Knife | — | Always carried; fast switch |
-| Glock-18 | Secondary | $200 | T default; 20-round mag |
-| USP-S | Secondary | $200 | CT default; suppressed feel |
-| Desert Eagle | Secondary | $700 | High damage, slow RPM |
-| AK-47 | Primary | $2 700 | T rifle; auto, 600 RPM |
-| M4A4 | Primary | $2 900 | CT rifle; auto, 666 RPM |
-| AWP | Primary | $4 750 | Scope + FOV zoom; 41 RPM |
+| Category | Weapons |
+|:---|:---|
+| Pistols | Glock-18 (T) · USP-S (CT) · Dual Berettas · P250 · Five-SeveN (CT) · Tec-9 (T) · Desert Eagle |
+| SMGs | MAC-10 (T) · MP9 (CT) · MP7 · UMP-45 · P90 · PP-Bizon |
+| Heavy | Nova · XM1014 · Sawed-Off (T) · MAG-7 (CT) · M249 · Negev |
+| Rifles | FAMAS (CT) · Galil AR (T) · M4A4 (CT) · AK-47 (T) · AUG (CT) · SG 553 (T) · SSG 08 · AWP · G3SG1 (T) · SCAR-20 (CT) |
+
+Team-exclusive weapons are enforced at purchase time — a CT can never buy an AK, a T can never buy an M4, exactly like CS2. A ~500-case generated test suite pins every roster entry's category/slot/team/price/pattern integrity.
 
 - **RPM gate, reload, recoil**: each weapon has an independent `nextFire` timer, a timed reload sequence, and a view-punch-and-recovery system (recovery in radians/second, suppressed while actively spraying so punch genuinely accumulates).
 - **Learnable spray patterns**: per-weapon recoil patterns (±15% jitter) — the AK-47 climbs hard for ~9 bullets then weaves right/left/right in the classic "7"; the M4A4 runs the same family at ~75% magnitude; pistols have short climbs; Deagle/AWP keep heavy single-shot punch. Pull down and counter-weave to control it, exactly like the real thing.
@@ -80,6 +79,7 @@ Seven weapons across three slots with individually tuned stats:
 - **Stuck recovery**: horizontal speed below 0.3 m/s for 0.7 s triggers a jump; 1.5 s of stuck triggers a full A* replan; stuck escorts break formation permanently and route independently.
 - **Mission persistence**: a dropped bomb is actively retrieved — the closest living T is designated sticky retriever (re-designated if pinned in a fight for 4 s+); site guards face the enemy approach instead of a default angle; kill/shot intel inside enemy spawn zones is ignored (no spawn-camping detours); bot-vs-bot separation impulses prevent stacked clumps.
 - **Economy-aware buying**: per-round team strategy — eco (save), force-buy (loss streak / team-economy triggered), full-buy, and occasional AWP picks (max one fresh AWP per team per round). AWP bots scope in when engaging.
+- **Tiered buy pools from the full roster**: ecos draw budget pistols (P250 / Dual Berettas / Tec-9 / Five-SeveN / Deagle), force-buys draw SMGs (~80%) or shotguns (~20%), full-buys pick budget rifles (Galil/FAMAS) when tight and standard rifles when funded, with rich bots (> $6 000) occasionally splashing on AUG/SG 553 — meme tier (M249, Negev, autosnipers) deliberately excluded. Armor is topped up from live money after the gun buy.
 
 ### Rounds & economy
 
@@ -93,7 +93,7 @@ Seven weapons across three slots with individually tuned stats:
   - Loss streak: $1 400 / $1 900 / $2 400 / $2 900 / $3 400 (rounds 1–5+)
   - Bomb plant — team bonus: $800; planter bonus: $300
   - Max money: $16 000
-  - Prices: Glock/USP $200, Deagle $700, AK $2 700, M4A4 $2 900, AWP $4 750, Vest $650, Vest+Helmet $1 000, Defuse Kit $400
+  - Prices: CS2-faithful across the whole roster (e.g. P250 $300, MAC-10 $1 050, Galil $1 800, AK $2 700, M4A4 $2 900, AWP $4 750), Vest $650, Vest+Helmet $1 000, Defuse Kit $400
 
 ### HUD & UX
 
@@ -104,7 +104,7 @@ Seven weapons across three slots with individually tuned stats:
 - **Killfeed**: attacker → victim entries with weapon icons, auto-expire after 5 s.
 - **Radar**: pre-rendered from the same ASCII grid as the world. Teammates always visible; enemies appear when within hearing range or near a recently heard shot. Bomb marker shown when dropped or planted. Player position + yaw arrow updates every frame.
 - **Tab scoreboard**: kills / deaths / money per player, team totals.
-- **Buy menu** (B key): nine keycap digit shortcuts — 1 USP-S · 2 Glock-18 · 3 Desert Eagle · 4 AK-47 · 5 M4A4 · 6 AWP · 7 Vest · 8 Vest+Helmet · 9 Defuse Kit. Items greyed out when unaffordable or wrong team. Digit keys 1–3 suppressed for weapon switching while the buy menu is open.
+- **Buy menu** (B key): CS2-style two-level navigation — a category rail (1 Pistols · 2 Mid-Tier · 3 Rifles · 4 Grenades · 5 Gear) opening data-driven item panels filtered to your team, sorted by price, with keycap digit shortcuts per item; 0/Backspace steps back to the rail. Items greyed out when unaffordable. All digit keys are consumed by the menu while open, so weapon switching is unaffected.
 - **Start menu**: pick CT or T side, choose difficulty. **Pause menu**: resume, restart, sensitivity slider. **Banners** for round win/loss.
 - **Match-end stats screen**: full-screen panel on match end with winner headline, final score, and per-team tables — kills, deaths, headshot %, damage dealt, MVP rounds (defuser > planter > top fragger), money spent — plus a Play Again button. Stats accumulate silently all match via the `gameEvents` bus.
 - **Death spectate**: short death cam, then first-person spectate of living teammates until the round ends — click cycles targets, auto-advances when the spectated bot dies, HUD shows who you're watching.
@@ -170,7 +170,7 @@ bun install
 |:---|:---|
 | `bun run dev` | Dev server at http://localhost:3000 — fresh bundle on every reload (works on Bun 1.1+) |
 | `bun run check` | TypeScript type-check only (`tsc --noEmit`) |
-| `bun test` | Run the test suite (376 tests) |
+| `bun test` | Run the test suite (876 tests) |
 | `bun run build` | Bundle for production into `dist/` (~1.1 MB) |
 
 ## Controls
@@ -187,7 +187,7 @@ bun install
 | **Space** | Jump |
 | **E (hold)** | Plant / defuse bomb |
 | **B** | Open / close buy menu |
-| **1–9 (buy menu)** | Buy: 1 Pistol (team) · 2 Desert Eagle · 3 Rifle (team) · 4 AWP · 5 Armor (vest → helmet upgrade) · 6 Defuse Kit · 7 HE · 8 Flashbang · 9 Smoke |
+| **1–9 (buy menu)** | Navigate: pick category (1 Pistols · 2 Mid-Tier · 3 Rifles · 4 Grenades · 5 Gear), then digit buys the item; 0 / Backspace goes back |
 | **1 / 2 / 3** | Switch weapon slot: primary / secondary / knife |
 | **4** | Equip / cycle grenades (LMB throws) |
 | **Mouse wheel** | Cycle weapon slots |

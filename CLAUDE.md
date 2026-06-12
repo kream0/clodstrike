@@ -34,8 +34,8 @@ Work through this standing track cycle by cycle with the agent workflow until ex
 
 - **Stack**: Bun 1.3, TypeScript strict (`tsc --noEmit` = `bun run check`), three@0.184. NO Vite.
 - **Entry**: `index.html` → `src/main.ts` — fixed-step simulation at 128 Hz with accumulator loop; render at RAF. Exported `clock.now` (game-time seconds) is THE time source for all game logic.
-- **Validation gate**: `bun run check && bun test && bun run build` — all three must pass before any commit. Tests baseline is **361 tests green**; never let the suite shrink.
-- **Dev server**: `bun run dev` → http://localhost:3000 (Bun's built-in HTML entrypoint)
+- **Validation gate**: `bun run check && bun test && bun run build` — all three must pass before any commit. Tests baseline is **876 tests green**; never let the suite shrink. (One known intermittent: "F2: guard facing" bot-timing flake — re-run once before treating as a regression.)
+- **Dev server**: `bun run dev` → http://localhost:3000 (`scripts/dev.ts`, per-request Bun.build — works on Bun 1.1+)
 - **Repo**: https://github.com/kream0/clodstrike
 
 ---
@@ -130,7 +130,7 @@ Every agent prompt must include:
 ### Validation gate (full)
 
 1. `bun run check` — zero TypeScript errors
-2. `bun test` — **98 or more** tests green (never let the suite shrink)
+2. `bun test` — **876 or more** tests green (never let the suite shrink)
 3. `bun run build` — completes; warn if bundle grows past 1.5 MB (baseline ~1.1 MB)
 4. Browser smoke where possible (pointer-lock caveat — see Known gotchas)
 
