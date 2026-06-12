@@ -25,7 +25,8 @@ A Counter-Strike 2–style single-player FPS — bots, bomb defusal, and a low-p
 
 - **CC0-textured world**: 8 open-licensed tiling materials (ambientCG + Poly Haven — sand, sandstone brick, plaster, paving stone, concrete, wood, painted metal, fabric), color + normal maps, applied across the greedy-merged map geometry with **world-anchored planar UVs** so tiles continue seamlessly across merged boxes. Per-kind prop texturing (wood crates, metal car/doors/xbox, fabric sandbags). Colors-only fallback if textures fail to load.
 - **CC0 GLB weapon viewmodels for all 30 weapons**: every roster weapon — including the knife — renders a real Quaternius CC0 model in first person, mapped through the same 9 model families used by third-person characters (loaded once, shared). Auto-normalized (longest-axis-to-barrel alignment + target-length scaling, per-stem tuning with per-id overrides) under the procedural animation anchor — bob/sway/kick/reload all still code-driven. Any model that fails to load falls back to the procedural box gun.
-- **Async boot with loading screen**: 27-asset progress bar (8 color maps, 8 normal maps, 9 weapon GLBs, 2 rigged characters), parallel loading, per-asset graceful fallback — a 404 can never brick the boot.
+- **First-person arms**: rigged low-poly arms (J-Toastie, CC-BY 4.0) hold every weapon — per-family grip poses (two-handed long guns, pistol with support hand, blade-forward knife) with curled fingers, parented to the weapon anchor so bob/sway/kick/reload move hands and gun together. Sleeve tinted per team (CT blue-grey / T sand). Arms missing → gun-only viewmodel, no regression.
+- **Async boot with loading screen**: 28-asset progress bar (8 color maps, 8 normal maps, 9 weapon GLBs, 2 rigged characters, first-person arms), parallel loading, per-asset graceful fallback — a 404 can never brick the boot.
 - **Rigged characters with real animation clips**: Quaternius CC0 rigged characters (CT operator / T phoenix, shared 62-joint skeleton) driven by `THREE.AnimationMixer` — Idle_Gun, Walk, Run with directional Run_Left/Right/Back picked from velocity projected into model space, a real Death clip, 0.18 s crossfades, and playback speed synced to actual move speed (no foot-sliding). Crouch is a post-mixer hips-drop + abdomen tilt (the pack has no crouch clip). Characters hold real weapon models attached to the right wrist bone, mapped from all 30 roster ids and swapped live on weapon change. Visual-only: hitboxes and eye heights unchanged. Procedural box-bot fallback preserved.
 - **Modernized HUD & menus**: translucent glass plates, tabular numerals, sand-gold accent, team-colored scoreplate/scoreboard, killfeed chips, buy-menu cards with keycap badges, segmented difficulty picker, low-health states — all still DOM + injected CSS, no images or fonts.
 - **Full credits**: every asset's source + license in [`assets/LICENSES.md`](./assets/LICENSES.md).
@@ -170,7 +171,7 @@ bun install
 |:---|:---|
 | `bun run dev` | Dev server at http://localhost:3000 — fresh bundle on every reload (works on Bun 1.1+) |
 | `bun run check` | TypeScript type-check only (`tsc --noEmit`) |
-| `bun test` | Run the test suite (955 tests) |
+| `bun test` | Run the test suite (973 tests) |
 | `bun run build` | Bundle for production into `dist/` (~1.1 MB) |
 
 ## Controls

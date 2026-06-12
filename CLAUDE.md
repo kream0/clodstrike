@@ -20,13 +20,13 @@
 
 Routine work (picking features, creating tasks, spawning agents, committing to main, pushing, doc updates, memory writes) proceeds WITHOUT asking.
 
-## Current long-term directive (user-issued 2026-06-11 — overrides README roadmap ordering)
+## Current long-term directive (user-issued 2026-06-11)
 
-Work through this standing track cycle by cycle with the agent workflow until exhausted or superseded. (The original track — open-licensed assets, UI overhaul, performance — shipped in full; the directive below supersedes it.)
+**The 2026-06-11 standing track is EXHAUSTED (both items shipped 2026-06-12):** (1) dust2 fidelity rebuild (task #28); (2) realistic characters & weapons with proper animations — rigged AnimationMixer characters, real weapon models third- and first-person incl. knife, first-person arms with grip poses (task #29, sub-cycles 29a/29b/29c). With no active user directive, fall back to the autonomy mandate: pick the highest-value, lowest-risk feature from the README "Upcoming features" roadmap each cycle. New user "task:" messages always preempt the roadmap.
 
-1. **Dust2 fidelity rebuild** — redo `maps/dust2.ts` based on real dust2 reference data (radar overviews / community layout data from open sources) for faithful geometry: correct route proportions, heights, chokes, site shapes. Keep the `MapData` contract, the ASCII-grid format, and the BFS connectivity suite green. (Task #28)
-2. **Realistic characters & weapons with proper animations** — ditch the voxel/blocky aesthetic: realistic open-licensed rigged characters WITH animation clips (AnimationMixer pipeline replacing code-driven limb anim), first-person arms/hands on viewmodel weapons incl. knife, higher-fidelity weapon models. **License rule unchanged: CC0/public-domain strongly preferred; CC-BY only with attribution recorded in `assets/LICENSES.md`. Actual CS2/Valve assets are copyrighted — never use them; use closest open equivalents.** (Task #29)
-3. **Asset/license/perf ground rules carry over** — every asset credited in `assets/LICENSES.md`; keep repo weight reasonable (< ~30 MB added per cycle, discuss if more needed); keep 128 Hz sim headroom and 60 fps render on mid hardware.
+**Standing ground rules (carry over to every cycle):**
+- **Licenses**: CC0/public-domain strongly preferred; CC-BY only with attribution recorded in `assets/LICENSES.md`. Actual CS2/Valve assets are copyrighted — never use them; use closest open equivalents. Never commit Mixamo files.
+- Every asset credited in `assets/LICENSES.md`; keep repo weight reasonable (< ~30 MB added per cycle, discuss if more needed); keep 128 Hz sim headroom and 60 fps render on mid hardware.
 
 ---
 
@@ -34,7 +34,7 @@ Work through this standing track cycle by cycle with the agent workflow until ex
 
 - **Stack**: Bun 1.3, TypeScript strict (`tsc --noEmit` = `bun run check`), three@0.184. NO Vite.
 - **Entry**: `index.html` → `src/main.ts` — fixed-step simulation at 128 Hz with accumulator loop; render at RAF. Exported `clock.now` (game-time seconds) is THE time source for all game logic.
-- **Validation gate**: `bun run check && bun test && bun run build` — all three must pass before any commit. Tests baseline is **955 tests green**; never let the suite shrink. (Two known intermittents — re-run once before treating as a regression: "F2: guard facing", "Flash blindness re-acquire".)
+- **Validation gate**: `bun run check && bun test && bun run build` — all three must pass before any commit. Tests baseline is **973 tests green**; never let the suite shrink. (Two known intermittents — re-run once before treating as a regression: "F2: guard facing", "Flash blindness re-acquire".)
 - **Dev server**: `bun run dev` → http://localhost:3000 (`scripts/dev.ts`, per-request Bun.build — works on Bun 1.1+)
 - **Repo**: https://github.com/kream0/clodstrike
 
@@ -61,7 +61,7 @@ src/
                     #   + grenade equip/throw state machine (updateGrenadeEquip)
   grenades.ts       # GrenadeManager — HE/flash/smoke projectiles, bounce physics,
                     #   detonation, smoke LOS queries, blindness; pooled meshes
-  viewmodel.ts      # First-person weapons_v2 GLB models for all 30 ids incl. knife (procedural fallback) + bob/sway/kick/reload anims
+  viewmodel.ts      # First-person weapons_v2 GLBs for all 30 ids incl. knife + rigged arms w/ grip poses (procedural fallback) + bob/sway/kick/reload anims
   effects.ts        # Pooled tracers, impacts, blood, muzzle flash, decals, explosion
   audio.ts          # Web Audio positional synthesis (gunshots, steps, bomb, stings)
   characters.ts     # Rigged GLTF chars (Quaternius), AnimationMixer FSM, wrist weapons (procedural fallback)
@@ -130,7 +130,7 @@ Every agent prompt must include:
 ### Validation gate (full)
 
 1. `bun run check` — zero TypeScript errors
-2. `bun test` — **955 or more** tests green (never let the suite shrink)
+2. `bun test` — **973 or more** tests green (never let the suite shrink)
 3. `bun run build` — completes; warn if bundle grows past 1.5 MB (baseline ~1.1 MB)
 4. Browser smoke where possible (pointer-lock caveat — see Known gotchas)
 
