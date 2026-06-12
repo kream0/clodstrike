@@ -171,7 +171,7 @@ bun install
 |:---|:---|
 | `bun run dev` | Dev server at http://localhost:3000 — fresh bundle on every reload (works on Bun 1.1+) |
 | `bun run check` | TypeScript type-check only (`tsc --noEmit`) |
-| `bun test` | Run the test suite (1090 tests) |
+| `bun test` | Run the test suite (1114 tests) |
 | `bun run build` | Bundle for production into `dist/` (~1.1 MB) |
 
 ## Controls
