@@ -23,19 +23,34 @@ Each slot has two files in `textures/`:
 
 ## Models
 
-All weapon GLBs in `models/weapons/` are from the **CC0 Flat Guns** packs by **Pichuliru**, published under CC0 1.0 Universal (Public Domain Dedication).
+This section covers all 3-D model files in `assets/models/`.
 
-| File | Source File | Pack | Pack Page | License | Downloaded |
-|---|---|---|---|---|---|
-| glock.glb | Pistol_Compact_West.glb | CC0 Flat Guns West | https://opengameart.org/content/cc0-flat-guns-west | CC0 1.0 | 2026-06-11 |
-| usp.glb | Pistol_Full_West.glb | CC0 Flat Guns West | https://opengameart.org/content/cc0-flat-guns-west | CC0 1.0 | 2026-06-11 |
-| deagle.glb | Pistol_Full_East.glb | CC0 Flat Guns East | https://opengameart.org/content/cc0-flat-guns-east | CC0 1.0 | 2026-06-11 |
-| ak47.glb | Rifle_Assault_East.glb | CC0 Flat Guns East | https://opengameart.org/content/cc0-flat-guns-east | CC0 1.0 | 2026-06-11 |
-| m4a4.glb | Rifle_Assault_West.glb | CC0 Flat Guns West | https://opengameart.org/content/cc0-flat-guns-west | CC0 1.0 | 2026-06-11 |
-| awp.glb | Sniper_Rifle_West.glb | CC0 Flat Guns West | https://opengameart.org/content/cc0-flat-guns-west | CC0 1.0 | 2026-06-11 |
+### Rigged Characters — models/rigged/
 
-Note: The knife weapon slot remains procedural (no style-matched CC0 knife model available in these packs).
+| File | Source File | License | Author |
+|---|---|---|---|
+| ct_operator.gltf | Swat.gltf (Ultimate Modular Men Pack) | CC0 1.0 | Quaternius |
+| t_phoenix.gltf | Punk.gltf (Ultimate Modular Men Pack) | CC0 1.0 | Quaternius |
 
+Full attribution in the **Rigged Characters (v2)** section below.
+
+### Weapon Props — models/weapons_v2/
+
+The `models/weapons_v2/` directory contains 9 static GLBs from Quaternius, used for both first-person viewmodel and third-person wrist attachments. The earlier placeholder weapon GLBs have been removed from this repository.
+
+| File | License | Author |
+|---|---|---|
+| pistol.glb | CC0 1.0 | Quaternius |
+| revolver.glb | CC0 1.0 | Quaternius |
+| smg.glb | CC0 1.0 | Quaternius |
+| scifi_smg.glb | CC0 1.0 | Quaternius |
+| shotgun.glb | CC0 1.0 | Quaternius |
+| assault_rifle.glb | CC0 1.0 | Quaternius |
+| assault_rifle_2.glb | CC0 1.0 | Quaternius |
+| sniper_rifle.glb | CC0 1.0 | Quaternius |
+| knife.glb | CC0 1.0 | Quaternius |
+
+Full attribution (Poly Pizza source pages and resource IDs) in the **Weapons v2** section below.
 
 ## Rigged Characters (v2) — models/rigged/
 

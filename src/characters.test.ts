@@ -13,6 +13,7 @@ import {
   THIRD_PERSON_WEAPON_PATHS,
   THIRD_PERSON_WEAPON_FILES,
   MODEL_YAW_OFFSET,
+  BAKED_PROP_NODES,
   normalizeHeight,
   deathRotationZ,
   pickLocomotionClip,
@@ -174,6 +175,24 @@ describe('MODEL_YAW_OFFSET', () => {
 
   it('equals Math.PI (180° flip to align glTF +Z model to game -Z forward)', () => {
     expect(MODEL_YAW_OFFSET).toBeCloseTo(Math.PI, 10);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// BAKED_PROP_NODES — pure data, no GLTF loading required
+// ---------------------------------------------------------------------------
+
+describe('BAKED_PROP_NODES', () => {
+  it('is exported as a Set', () => {
+    expect(BAKED_PROP_NODES).toBeInstanceOf(Set);
+  });
+
+  it("contains 'Pistol' (ct_operator.gltf baked-in prop)", () => {
+    expect(BAKED_PROP_NODES.has('Pistol')).toBe(true);
+  });
+
+  it('is non-empty', () => {
+    expect(BAKED_PROP_NODES.size).toBeGreaterThan(0);
   });
 });
 

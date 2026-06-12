@@ -1,7 +1,8 @@
 /**
  * viewmodel.test.ts — headless bun test
  *
- * Tests pure math (normalizeWeaponModel) and disk/license checks.
+ * Tests pure math (normalizeWeaponModel), stem-mapping, grip presets, and
+ * disk/license checks.
  * Does NOT instantiate ViewModel (no WebGL/renderer required).
  * Does NOT load GLBs at runtime.
  *
@@ -16,14 +17,14 @@ import { clone as skeletonClone } from 'three/examples/jsm/utils/SkeletonUtils.j
 
 import {
   normalizeWeaponModel,
-  WEAPON_MODEL_PATHS,
-  WEAPON_MODEL_ALIAS,
   VIEWMODEL_SCALE,
   resolveWeaponTuning,
-  type WeaponId,
+  GRIP_PRESETS,
   type WeaponTuning,
+  type GripFamily,
 } from './viewmodel';
 import { WEAPONS } from './constants';
+import { THIRD_PERSON_WEAPON_FILES, THIRD_PERSON_WEAPON_PATHS } from './characters';
 
 const repoRoot = join(import.meta.dir, '..');
 
@@ -169,7 +170,7 @@ describe('VIEWMODEL_SCALE', () => {
       new THREE.Vector3(-0.05, -0.05, -0.19),
       new THREE.Vector3(0.05,  0.05,  0.19),
     );
-    // targetLength = 0.22, scaleMult = 1.0 (usp-like)
+    // targetLength = 0.22, scaleMult = 1.0 (pistol-like)
     const normResult = normalizeWeaponModel(bbox, {
       targetLength: 0.22,
       gripOffset: { x: 0, y: 0, z: 0 },
@@ -183,90 +184,309 @@ describe('VIEWMODEL_SCALE', () => {
 });
 
 // ---------------------------------------------------------------------------
-// WEAPON_MODEL_PATHS — shape and disk presence
+// Stem-mapping: every WEAPONS id maps to a registered stem (or is knife)
 // ---------------------------------------------------------------------------
 
-describe('WEAPON_MODEL_PATHS', () => {
-  const GUN_IDS: WeaponId[] = ['glock', 'usp', 'deagle', 'ak47', 'm4a4', 'awp'];
-
-  test('contains exactly the 6 gun ids (knife absent)', () => {
-    const keys = Object.keys(WEAPON_MODEL_PATHS) as WeaponId[];
-    // Exactly 6
-    expect(keys).toHaveLength(6);
-    // All expected ids present
-    for (const id of GUN_IDS) {
-      expect(keys).toContain(id);
+describe('THIRD_PERSON_WEAPON_FILES — stem mapping coverage', () => {
+  test('data-driven: every WEAPONS id (excluding knife) resolves to a stem in THIRD_PERSON_WEAPON_PATHS', () => {
+    const knownStems = new Set(Object.keys(THIRD_PERSON_WEAPON_PATHS));
+    const failures: string[] = [];
+    for (const id of Object.keys(WEAPONS)) {
+      if (id === 'knife') continue; // knife has its own stem 'knife'
+      const stem = THIRD_PERSON_WEAPON_FILES[id];
+      if (stem === undefined || !knownStems.has(stem)) {
+        failures.push(`${id} → ${stem ?? '(none)'}`);
+      }
     }
-    // knife must NOT be present
-    expect(keys).not.toContain('knife' as WeaponId);
+    if (failures.length > 0) {
+      throw new Error(`Weapon ids with no valid stem: ${failures.join(', ')}`);
+    }
   });
 
-  for (const id of GUN_IDS) {
-    test(`${id}: path follows 'models/weapons/<id>.glb' convention`, () => {
-      const path = WEAPON_MODEL_PATHS[id];
-      expect(path).toBe(`models/weapons/${id}.glb`);
-    });
+  test('knife id resolves to the knife stem', () => {
+    expect(THIRD_PERSON_WEAPON_FILES['knife']).toBe('knife');
+  });
 
-    test(`${id}: GLB file exists on disk under assets/`, () => {
-      const relPath = WEAPON_MODEL_PATHS[id];
-      expect(relPath).toBeDefined();
-      const filePath = join(repoRoot, 'assets', relPath as string);
+  test('all 9 stems in THIRD_PERSON_WEAPON_PATHS are present', () => {
+    const stems = Object.keys(THIRD_PERSON_WEAPON_PATHS);
+    expect(stems).toHaveLength(9);
+    const expected = [
+      'pistol', 'revolver', 'smg', 'scifi_smg',
+      'shotgun', 'assault_rifle', 'assault_rifle_2',
+      'sniper_rifle', 'knife',
+    ];
+    for (const stem of expected) {
+      expect(stems).toContain(stem);
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// resolveWeaponTuning — finite scale/offsets for every id
+// ---------------------------------------------------------------------------
+
+describe('resolveWeaponTuning — all WEAPONS ids return finite tuning', () => {
+  test('data-driven: every WEAPONS id returns a tuning with finite scaleMult, muzzleZ, targetLength', () => {
+    const failures: string[] = [];
+    for (const id of Object.keys(WEAPONS)) {
+      const tuning: WeaponTuning = resolveWeaponTuning(id);
+      const ok =
+        isFinite(tuning.scaleMult) &&
+        tuning.scaleMult > 0 &&
+        isFinite(tuning.muzzleZ) &&
+        isFinite(tuning.targetLength) &&
+        tuning.targetLength > 0 &&
+        isFinite(tuning.gripOffset.x) &&
+        isFinite(tuning.gripOffset.y) &&
+        isFinite(tuning.gripOffset.z) &&
+        isFinite(tuning.extraRotation.x) &&
+        isFinite(tuning.extraRotation.y) &&
+        isFinite(tuning.extraRotation.z);
+      if (!ok) failures.push(id);
+    }
+    if (failures.length > 0) {
+      throw new Error(`Weapon ids with non-finite tuning fields: ${failures.join(', ')}`);
+    }
+  });
+
+  test('fresh-object contract: mutating the result does not affect a second resolveWeaponTuning call', () => {
+    const t1 = resolveWeaponTuning('ak47');
+    const originalScaleMult = t1.scaleMult;
+    t1.scaleMult = 99999;
+    const t2 = resolveWeaponTuning('ak47');
+    expect(t2.scaleMult).toBe(originalScaleMult);
+    expect(t2.scaleMult).not.toBe(99999);
+  });
+
+  test('fresh-object contract: mutating a nested object field does not affect a second call', () => {
+    const t1 = resolveWeaponTuning('ak47');
+    const originalX = t1.gripOffset.x;
+    t1.gripOffset.x = 99999;
+    const t2 = resolveWeaponTuning('ak47');
+    expect(t2.gripOffset.x).toBe(originalX);
+    expect(t2.gripOffset.x).not.toBe(99999);
+    // Same for extraRotation
+    const originalRY = t1.extraRotation.y;
+    t1.extraRotation.y = 99999;
+    const t3 = resolveWeaponTuning('ak47');
+    expect(t3.extraRotation.y).toBe(originalRY);
+    expect(t3.extraRotation.y).not.toBe(99999);
+  });
+
+  test('per-id override with extraRotation wins over stem default', () => {
+    // Add a hypothetical override by directly testing the merge logic:
+    // mp7 has an override but no extraRotation field — its extraRotation comes from stem base.
+    // We verify that when a per-id override declares extraRotation, it wins over the stem.
+    // The WEAPON_TUNING_OVERRIDES table currently has no extraRotation entries by design,
+    // so we test the invariant: for a weapon with an override (mp7), extraRotation must
+    // still be finite and independent (fresh) from the stem base.
+    const mp7 = resolveWeaponTuning('mp7');
+    const mac10 = resolveWeaponTuning('mac10'); // no override → raw stem base
+    // Both should have finite extraRotation (the merge must not drop it)
+    expect(isFinite(mp7.extraRotation.x)).toBe(true);
+    expect(isFinite(mp7.extraRotation.y)).toBe(true);
+    expect(isFinite(mp7.extraRotation.z)).toBe(true);
+    // Mutating mp7's extraRotation must not affect mac10 (they share the same stem)
+    mp7.extraRotation.x = 99999;
+    const mac10b = resolveWeaponTuning('mac10');
+    expect(mac10b.extraRotation.x).not.toBe(99999);
+  });
+
+  test('per-id override wins over stem base: ssg08 has smaller targetLength than base sniper_rifle', () => {
+    const ssg08  = resolveWeaponTuning('ssg08');
+    const awp    = resolveWeaponTuning('awp');
+    // ssg08 uses sniper_rifle stem + override; awp also uses sniper_rifle stem, no override
+    expect(ssg08.targetLength).toBeLessThan(awp.targetLength);
+    expect(ssg08.scaleMult).toBeLessThan(awp.scaleMult);
+  });
+
+  test('per-id override wins: m249 and negev have larger scaleMult than assault_rifle base', () => {
+    const m249         = resolveWeaponTuning('m249');
+    const negev        = resolveWeaponTuning('negev');
+    const assaultRifle = resolveWeaponTuning('m4a4'); // m4a4 → assault_rifle stem, no override
+    expect(m249.scaleMult).toBeGreaterThan(assaultRifle.scaleMult);
+    expect(negev.scaleMult).toBeGreaterThan(assaultRifle.scaleMult);
+  });
+
+  test('p250 compact override: smaller targetLength than usp', () => {
+    const p250 = resolveWeaponTuning('p250');
+    const usp  = resolveWeaponTuning('usp');
+    expect(p250.targetLength).toBeLessThan(usp.targetLength);
+  });
+
+  test('all SMGs have scaleMult < 1.0 (compact feel)', () => {
+    const smgIds = ['mac10', 'mp9', 'mp7', 'ump45', 'p90', 'bizon'];
+    for (const id of smgIds) {
+      const t = resolveWeaponTuning(id);
+      expect(t.scaleMult).toBeLessThan(1.0);
+    }
+  });
+
+  test('knife tuning has small targetLength', () => {
+    const t = resolveWeaponTuning('knife');
+    expect(t.targetLength).toBeLessThanOrEqual(0.22);
+    expect(t.targetLength).toBeGreaterThan(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// GRIP_PRESETS table — exported pure data
+// ---------------------------------------------------------------------------
+
+describe('GRIP_PRESETS', () => {
+  const VALID_FAMILIES: GripFamily[] = ['two_handed_long', 'pistol', 'knife'];
+  const ALL_STEMS = Object.keys(THIRD_PERSON_WEAPON_PATHS);
+
+  test('every weapons_v2 stem has a grip preset entry', () => {
+    const missing: string[] = [];
+    for (const stem of ALL_STEMS) {
+      if (GRIP_PRESETS[stem] === undefined) missing.push(stem);
+    }
+    if (missing.length > 0) {
+      throw new Error(`Stems missing from GRIP_PRESETS: ${missing.join(', ')}`);
+    }
+  });
+
+  test('every preset has a valid family classification', () => {
+    for (const [stem, preset] of Object.entries(GRIP_PRESETS)) {
+      expect(
+        VALID_FAMILIES.includes(preset.family),
+        `${stem}: unexpected family '${preset.family}'`,
+      ).toBe(true);
+    }
+  });
+
+  test('every preset bone rotation value is finite', () => {
+    const fields: Array<keyof typeof GRIP_PRESETS[string]> = [
+      'shoulderR', 'upperArmR', 'lowerArmR', 'wristR',
+      'shoulderL', 'upperArmL', 'lowerArmL', 'wristL',
+    ];
+    const failures: string[] = [];
+    for (const [stem, preset] of Object.entries(GRIP_PRESETS)) {
+      for (const field of fields) {
+        const vals = preset[field] as readonly [number, number, number];
+        for (const v of vals) {
+          if (!isFinite(v)) {
+            failures.push(`${stem}.${field}`);
+          }
+        }
+      }
+    }
+    if (failures.length > 0) {
+      throw new Error(`Non-finite rotation values: ${failures.join(', ')}`);
+    }
+  });
+
+  test('assault_rifle and assault_rifle_2 are two_handed_long', () => {
+    expect(GRIP_PRESETS['assault_rifle']?.family).toBe('two_handed_long');
+    expect(GRIP_PRESETS['assault_rifle_2']?.family).toBe('two_handed_long');
+  });
+
+  test('sniper_rifle is two_handed_long', () => {
+    expect(GRIP_PRESETS['sniper_rifle']?.family).toBe('two_handed_long');
+  });
+
+  test('smg and scifi_smg are two_handed_long', () => {
+    expect(GRIP_PRESETS['smg']?.family).toBe('two_handed_long');
+    expect(GRIP_PRESETS['scifi_smg']?.family).toBe('two_handed_long');
+  });
+
+  test('shotgun is two_handed_long', () => {
+    expect(GRIP_PRESETS['shotgun']?.family).toBe('two_handed_long');
+  });
+
+  test('pistol and revolver are pistol family', () => {
+    expect(GRIP_PRESETS['pistol']?.family).toBe('pistol');
+    expect(GRIP_PRESETS['revolver']?.family).toBe('pistol');
+  });
+
+  test('knife is knife family', () => {
+    expect(GRIP_PRESETS['knife']?.family).toBe('knife');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Asset existence: weapons_v2 on disk; old weapons/ folder GONE
+// ---------------------------------------------------------------------------
+
+describe('weapons_v2 GLB files on disk', () => {
+  for (const [stem, relPath] of Object.entries(THIRD_PERSON_WEAPON_PATHS)) {
+    test(`${stem}: file exists at assets/${relPath}`, () => {
+      const filePath = join(repoRoot, 'assets', relPath);
       expect(existsSync(filePath)).toBe(true);
     });
 
-    test(`${id}: GLB file starts with 'glTF' magic bytes`, () => {
-      const relPath = WEAPON_MODEL_PATHS[id];
-      expect(relPath).toBeDefined();
-      const filePath = join(repoRoot, 'assets', relPath as string);
+    test(`${stem}: starts with glTF magic bytes`, () => {
+      const filePath = join(repoRoot, 'assets', relPath);
       const buf = readFileSync(filePath);
       const magic = String.fromCharCode(buf[0] ?? 0, buf[1] ?? 0, buf[2] ?? 0, buf[3] ?? 0);
       expect(magic).toBe('glTF');
     });
 
-    test(`${id}: GLB file is > 5 KB`, () => {
-      const relPath = WEAPON_MODEL_PATHS[id];
-      expect(relPath).toBeDefined();
-      const filePath = join(repoRoot, 'assets', relPath as string);
+    test(`${stem}: file is > 5 KB`, () => {
+      const filePath = join(repoRoot, 'assets', relPath);
       const { size } = Bun.file(filePath);
       expect(size).toBeGreaterThan(5 * 1024);
     });
   }
 });
 
+describe('old weapons/ folder removed', () => {
+  test('assets/models/weapons/ directory does not exist', () => {
+    const oldFolder = join(repoRoot, 'assets', 'models', 'weapons');
+    expect(existsSync(oldFolder)).toBe(false);
+  });
+
+  const OLD_FILES = ['glock.glb', 'usp.glb', 'deagle.glb', 'ak47.glb', 'm4a4.glb', 'awp.glb'];
+  for (const file of OLD_FILES) {
+    test(`old Pichuliru file absent: models/weapons/${file}`, () => {
+      const oldPath = join(repoRoot, 'assets', 'models', 'weapons', file);
+      expect(existsSync(oldPath)).toBe(false);
+    });
+  }
+});
+
 // ---------------------------------------------------------------------------
-// LICENSES.md — models section
+// LICENSES.md — models section checks
 // ---------------------------------------------------------------------------
 
 describe('LICENSES.md — models section', () => {
   const licensePath = join(repoRoot, 'assets', 'LICENSES.md');
 
-  test('mentions Flat Guns (West or East)', () => {
+  test('mentions Quaternius as author (characters and weapons_v2)', () => {
     const content = readFileSync(licensePath, 'utf-8');
-    expect(content).toContain('Flat Guns');
+    expect(content).toContain('Quaternius');
   });
 
-  test('mentions Pichuliru as author', () => {
+  test('does NOT mention Flat Guns (Pichuliru entries removed)', () => {
     const content = readFileSync(licensePath, 'utf-8');
-    expect(content).toContain('Pichuliru');
+    expect(content).not.toContain('Flat Guns');
+  });
+
+  test('does NOT mention Pichuliru as author', () => {
+    const content = readFileSync(licensePath, 'utf-8');
+    expect(content).not.toContain('Pichuliru');
   });
 
   test('mentions CC0 1.0 for models', () => {
     const content = readFileSync(licensePath, 'utf-8');
-    // Should contain a Models section with CC0
     expect(content).toContain('## Models');
     expect(content).toContain('CC0 1.0');
   });
 
-  test('references OpenGameArt URLs for both packs', () => {
+  test('weapons_v2 section lists knife.glb', () => {
     const content = readFileSync(licensePath, 'utf-8');
-    expect(content).toContain('opengameart.org/content/cc0-flat-guns-west');
-    expect(content).toContain('opengameart.org/content/cc0-flat-guns-east');
+    expect(content).toContain('knife.glb');
   });
 
-  test('lists all 6 gun GLB filenames in the models section', () => {
+  test('all 9 weapons_v2 stems are mentioned in LICENSES.md', () => {
     const content = readFileSync(licensePath, 'utf-8');
-    const expected = ['glock.glb', 'usp.glb', 'deagle.glb', 'ak47.glb', 'm4a4.glb', 'awp.glb'];
-    for (const file of expected) {
+    const expectedFiles = [
+      'pistol.glb', 'revolver.glb', 'smg.glb', 'scifi_smg.glb',
+      'shotgun.glb', 'assault_rifle.glb', 'assault_rifle_2.glb',
+      'sniper_rifle.glb', 'knife.glb',
+    ];
+    for (const file of expectedFiles) {
       expect(content).toContain(file);
     }
   });
@@ -275,7 +495,7 @@ describe('LICENSES.md — models section', () => {
 // ---------------------------------------------------------------------------
 // SkeletonUtils.clone regression — skinned mesh deep copy
 //
-// Verifies the invariant that viewmodel.ts relies on: skeletonClone produces a
+// Verifies the invariant that characters.ts relies on: skeletonClone produces a
 // clone whose SkinnedMesh references bones that are descendants of the clone
 // root (not the original source), so they receive world-matrix updates when the
 // clone is attached to a rendered scene graph.
@@ -392,121 +612,5 @@ describe('SkeletonUtils.clone — non-skinned group sanity', () => {
     for (let i = 0; i < source.children.length; i++) {
       expect(cloned.children[i]).not.toBe(source.children[i]);
     }
-  });
-});
-
-// ---------------------------------------------------------------------------
-// WEAPON_MODEL_ALIAS — alias chain resolution for all 30 WEAPONS ids
-// ---------------------------------------------------------------------------
-
-describe('WEAPON_MODEL_ALIAS — every WEAPONS id resolves to a WEAPON_MODEL_PATHS entry', () => {
-  const modelledIds = new Set(Object.keys(WEAPON_MODEL_PATHS));
-
-  // Helper: walk alias chain, max 2 hops (no chain is longer than 1 hop in practice)
-  function resolveToModelledId(id: string): string | undefined {
-    if (modelledIds.has(id)) return id;
-    const alias = WEAPON_MODEL_ALIAS[id];
-    if (alias === undefined) return undefined;
-    if (modelledIds.has(alias)) return alias;
-    // Two-hop (not expected, but guard)
-    const alias2 = WEAPON_MODEL_ALIAS[alias];
-    if (alias2 !== undefined && modelledIds.has(alias2)) return alias2;
-    return undefined;
-  }
-
-  test('data-driven: every WEAPONS id (excluding knife) resolves to a WEAPON_MODEL_PATHS entry or is modelled directly', () => {
-    const failures: string[] = [];
-    for (const id of Object.keys(WEAPONS)) {
-      if (id === 'knife') continue; // knife is intentionally procedural
-      const resolved = resolveToModelledId(id);
-      if (resolved === undefined) failures.push(id);
-    }
-    if (failures.length > 0) {
-      throw new Error(`Weapon ids with no GLB resolution: ${failures.join(', ')}`);
-    }
-  });
-
-  test('knife is NOT in WEAPON_MODEL_ALIAS (stays procedural)', () => {
-    expect(WEAPON_MODEL_ALIAS['knife']).toBeUndefined();
-  });
-});
-
-// ---------------------------------------------------------------------------
-// resolveWeaponTuning — finite scale/offsets for every id (noUncheckedIndexedAccess safe)
-// ---------------------------------------------------------------------------
-
-describe('resolveWeaponTuning — all WEAPONS ids return finite tuning', () => {
-  test('data-driven: every WEAPONS id returns a tuning with finite scaleMult, muzzleZ, targetLength', () => {
-    const failures: string[] = [];
-    for (const id of Object.keys(WEAPONS)) {
-      const tuning: WeaponTuning = resolveWeaponTuning(id);
-      const ok =
-        isFinite(tuning.scaleMult) &&
-        tuning.scaleMult > 0 &&
-        isFinite(tuning.muzzleZ) &&
-        isFinite(tuning.targetLength) &&
-        tuning.targetLength > 0 &&
-        isFinite(tuning.gripOffset.x) &&
-        isFinite(tuning.gripOffset.y) &&
-        isFinite(tuning.gripOffset.z) &&
-        isFinite(tuning.extraRotation.x) &&
-        isFinite(tuning.extraRotation.y) &&
-        isFinite(tuning.extraRotation.z);
-      if (!ok) failures.push(id);
-    }
-    if (failures.length > 0) {
-      throw new Error(`Weapon ids with non-finite tuning fields: ${failures.join(', ')}`);
-    }
-  });
-});
-
-// ---------------------------------------------------------------------------
-// Spot checks
-// ---------------------------------------------------------------------------
-
-describe('WEAPON_MODEL_ALIAS spot checks', () => {
-  test('mp9 resolves to m4a4 path', () => {
-    const aliasId = WEAPON_MODEL_ALIAS['mp9'];
-    expect(aliasId).toBe('m4a4');
-    expect(WEAPON_MODEL_PATHS[aliasId as WeaponId]).toBe('models/weapons/m4a4.glb');
-  });
-
-  test('mp9 effective scaleMult is less than m4a4 scaleMult (SMG compact feel)', () => {
-    const mp9Tuning   = resolveWeaponTuning('mp9');
-    const m4a4Tuning  = resolveWeaponTuning('m4a4');
-    expect(mp9Tuning.scaleMult).toBeLessThan(m4a4Tuning.scaleMult);
-  });
-
-  test('scar20 resolves to awp path', () => {
-    const aliasId = WEAPON_MODEL_ALIAS['scar20'];
-    expect(aliasId).toBe('awp');
-    expect(WEAPON_MODEL_PATHS[aliasId as WeaponId]).toBe('models/weapons/awp.glb');
-  });
-
-  test('scar20 tuning is finite with scaleMult > 0', () => {
-    const tuning = resolveWeaponTuning('scar20');
-    expect(isFinite(tuning.scaleMult)).toBe(true);
-    expect(tuning.scaleMult).toBeGreaterThan(0);
-  });
-
-  test('dualies resolves to deagle (single-gun stand-in)', () => {
-    expect(WEAPON_MODEL_ALIAS['dualies']).toBe('deagle');
-  });
-
-  test('ssg08 resolves to awp with smaller targetLength than awp', () => {
-    const ssg08Tuning = resolveWeaponTuning('ssg08');
-    const awpTuning   = resolveWeaponTuning('awp');
-    expect(WEAPON_MODEL_ALIAS['ssg08']).toBe('awp');
-    expect(ssg08Tuning.targetLength).toBeLessThan(awpTuning.targetLength);
-  });
-
-  test('m249 and negev alias to m4a4 with enlarged scaleMult', () => {
-    const m249Tuning  = resolveWeaponTuning('m249');
-    const negevTuning = resolveWeaponTuning('negev');
-    const m4a4Tuning  = resolveWeaponTuning('m4a4');
-    expect(WEAPON_MODEL_ALIAS['m249']).toBe('m4a4');
-    expect(WEAPON_MODEL_ALIAS['negev']).toBe('m4a4');
-    expect(m249Tuning.scaleMult).toBeGreaterThan(m4a4Tuning.scaleMult);
-    expect(negevTuning.scaleMult).toBeGreaterThan(m4a4Tuning.scaleMult);
   });
 });

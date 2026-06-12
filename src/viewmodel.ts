@@ -1,67 +1,19 @@
 import * as THREE from 'three';
-import { clone as skeletonClone } from 'three/examples/jsm/utils/SkeletonUtils.js';
+import type { GLTF } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import type { Vec3, GrenadeType } from './types';
+import { THIRD_PERSON_WEAPON_FILES } from './characters';
 
 // ---------------------------------------------------------------------------
 // Weapon ID type (union of all weapon ids from constants.ts WEAPONS table)
 // ---------------------------------------------------------------------------
 
-export type WeaponId = 'knife' | 'glock' | 'usp' | 'deagle' | 'ak47' | 'm4a4' | 'awp';
-
-// ---------------------------------------------------------------------------
-// Model path registry — 6 gun ids only (knife stays procedural)
-// ---------------------------------------------------------------------------
-
-export const WEAPON_MODEL_PATHS: Readonly<Partial<Record<WeaponId, string>>> = {
-  glock:  'models/weapons/glock.glb',
-  usp:    'models/weapons/usp.glb',
-  deagle: 'models/weapons/deagle.glb',
-  ak47:   'models/weapons/ak47.glb',
-  m4a4:   'models/weapons/m4a4.glb',
-  awp:    'models/weapons/awp.glb',
-} as const;
-
-// ---------------------------------------------------------------------------
-// Weapon model alias table — maps new weapon ids to an existing modeled id.
-// Resolution order in _applyCurrentWeaponVisual:
-//   1. exact id in WEAPON_MODEL_PATHS  (modeled id, use directly)
-//   2. WEAPON_MODEL_ALIAS lookup        (use aliased id's path + tuning with override)
-//   3. procedural fallback              (no GLB loaded or load failed)
-// ---------------------------------------------------------------------------
-
-export const WEAPON_MODEL_ALIAS: Readonly<Record<string, WeaponId>> = {
-  // Rifles
-  famas:  'm4a4',
-  aug:    'm4a4',
-  galil:  'ak47',
-  sg553:  'ak47',
-  ssg08:  'awp',
-  g3sg1:  'awp',
-  scar20: 'awp',
-
-  // Pistols
-  p250:      'usp',
-  fiveseven: 'usp',
-  tec9:      'glock',
-  // Dual Berettas: single-gun stand-in — deagle model used as a large pistol proxy
-  dualies:   'deagle',
-
-  // SMGs — all alias to m4a4, compact feel via reduced scale override
-  mac10:  'm4a4',
-  mp9:    'm4a4',
-  mp7:    'm4a4',
-  ump45:  'm4a4',
-  p90:    'm4a4',
-  bizon:  'm4a4',
-
-  // Heavy
-  nova:    'ak47',
-  xm1014:  'ak47',
-  sawedoff:'ak47',
-  mag7:    'ak47',
-  m249:    'm4a4',
-  negev:   'm4a4',
-} as const;
+export type WeaponId =
+  | 'knife'
+  | 'glock' | 'usp' | 'deagle' | 'dualies' | 'p250' | 'fiveseven' | 'tec9'
+  | 'ak47' | 'm4a4' | 'famas' | 'aug' | 'galil' | 'sg553'
+  | 'awp' | 'ssg08' | 'g3sg1' | 'scar20'
+  | 'mac10' | 'mp9' | 'mp7' | 'ump45' | 'p90' | 'bizon'
+  | 'nova' | 'xm1014' | 'sawedoff' | 'mag7' | 'm249' | 'negev';
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -82,6 +34,141 @@ const VM_OFFSET = new THREE.Vector3(0.25, -0.26, -0.45);
 const GUNMETAL  = 0x2a2a2e;
 const GUN_DARK  = 0x1a1a1c;
 const GUN_WOOD  = 0x5a3a1a;
+
+// ---------------------------------------------------------------------------
+// Grip preset table — bone-rotation presets for first-person arms.
+// (Arms are currently SKIPPED — Quaternius models have no isolated arm mesh;
+//  body-hide approach would render the full torso in camera view.)
+// Exported as testable pure data for future use.
+// ---------------------------------------------------------------------------
+
+export type GripFamily = 'two_handed_long' | 'pistol' | 'knife';
+
+export interface GripPreset {
+  family: GripFamily;
+  /** Shoulder.R local rotation (Euler XYZ radians). */
+  shoulderR: readonly [number, number, number];
+  /** UpperArm.R local rotation (Euler XYZ radians). */
+  upperArmR: readonly [number, number, number];
+  /** LowerArm.R local rotation (Euler XYZ radians). */
+  lowerArmR: readonly [number, number, number];
+  /** Wrist.R local rotation (Euler XYZ radians). */
+  wristR: readonly [number, number, number];
+  /** Shoulder.L local rotation (Euler XYZ radians). */
+  shoulderL: readonly [number, number, number];
+  /** UpperArm.L local rotation (Euler XYZ radians). */
+  upperArmL: readonly [number, number, number];
+  /** LowerArm.L local rotation (Euler XYZ radians). */
+  lowerArmL: readonly [number, number, number];
+  /** Wrist.L local rotation (Euler XYZ radians). */
+  wristL: readonly [number, number, number];
+}
+
+/** Per-stem grip preset. Every stem in THIRD_PERSON_WEAPON_PATHS must appear here. */
+export const GRIP_PRESETS: Readonly<Record<string, GripPreset>> = {
+  // ─── Two-handed long guns ────────────────────────────────────────────────
+  assault_rifle: {
+    family:    'two_handed_long',
+    shoulderR: [-0.3,  0.0,  0.0],
+    upperArmR: [ 0.5,  0.2, -0.3],
+    lowerArmR: [ 0.8,  0.0,  0.0],
+    wristR:    [-0.1,  0.0,  0.0],
+    shoulderL: [-0.3,  0.0,  0.0],
+    upperArmL: [ 0.5, -0.2,  0.3],
+    lowerArmL: [ 0.8,  0.0,  0.0],
+    wristL:    [-0.1,  0.0,  0.0],
+  },
+  assault_rifle_2: {
+    family:    'two_handed_long',
+    shoulderR: [-0.3,  0.0,  0.0],
+    upperArmR: [ 0.5,  0.2, -0.3],
+    lowerArmR: [ 0.8,  0.0,  0.0],
+    wristR:    [-0.1,  0.0,  0.0],
+    shoulderL: [-0.3,  0.0,  0.0],
+    upperArmL: [ 0.5, -0.2,  0.3],
+    lowerArmL: [ 0.8,  0.0,  0.0],
+    wristL:    [-0.1,  0.0,  0.0],
+  },
+  sniper_rifle: {
+    family:    'two_handed_long',
+    shoulderR: [-0.25, 0.0,  0.0],
+    upperArmR: [ 0.6,  0.2, -0.3],
+    lowerArmR: [ 0.8,  0.0,  0.0],
+    wristR:    [-0.1,  0.0,  0.0],
+    shoulderL: [-0.25, 0.0,  0.0],
+    upperArmL: [ 0.6, -0.2,  0.3],
+    lowerArmL: [ 0.8,  0.0,  0.0],
+    wristL:    [-0.1,  0.0,  0.0],
+  },
+  smg: {
+    family:    'two_handed_long',
+    shoulderR: [-0.3,  0.0,  0.0],
+    upperArmR: [ 0.45, 0.2, -0.3],
+    lowerArmR: [ 0.75, 0.0,  0.0],
+    wristR:    [-0.1,  0.0,  0.0],
+    shoulderL: [-0.3,  0.0,  0.0],
+    upperArmL: [ 0.45,-0.2,  0.3],
+    lowerArmL: [ 0.75, 0.0,  0.0],
+    wristL:    [-0.1,  0.0,  0.0],
+  },
+  scifi_smg: {
+    family:    'two_handed_long',
+    shoulderR: [-0.3,  0.0,  0.0],
+    upperArmR: [ 0.45, 0.2, -0.3],
+    lowerArmR: [ 0.75, 0.0,  0.0],
+    wristR:    [-0.1,  0.0,  0.0],
+    shoulderL: [-0.3,  0.0,  0.0],
+    upperArmL: [ 0.45,-0.2,  0.3],
+    lowerArmL: [ 0.75, 0.0,  0.0],
+    wristL:    [-0.1,  0.0,  0.0],
+  },
+  shotgun: {
+    family:    'two_handed_long',
+    shoulderR: [-0.3,  0.0,  0.0],
+    upperArmR: [ 0.5,  0.2, -0.3],
+    lowerArmR: [ 0.8,  0.0,  0.0],
+    wristR:    [-0.1,  0.0,  0.0],
+    shoulderL: [-0.3,  0.0,  0.0],
+    upperArmL: [ 0.5, -0.2,  0.3],
+    lowerArmL: [ 0.8,  0.0,  0.0],
+    wristL:    [-0.1,  0.0,  0.0],
+  },
+  // ─── Pistols (right-hand grip, left forward support) ─────────────────────
+  pistol: {
+    family:    'pistol',
+    shoulderR: [-0.2,  0.0,  0.0],
+    upperArmR: [ 0.4,  0.1, -0.2],
+    lowerArmR: [ 0.7,  0.0,  0.0],
+    wristR:    [ 0.0,  0.0,  0.0],
+    shoulderL: [-0.2,  0.0,  0.0],
+    upperArmL: [ 0.3, -0.1,  0.2],
+    lowerArmL: [ 0.6,  0.0,  0.0],
+    wristL:    [ 0.0,  0.0,  0.0],
+  },
+  revolver: {
+    family:    'pistol',
+    shoulderR: [-0.2,  0.0,  0.0],
+    upperArmR: [ 0.4,  0.1, -0.2],
+    lowerArmR: [ 0.7,  0.0,  0.0],
+    wristR:    [ 0.0,  0.0,  0.0],
+    shoulderL: [-0.2,  0.0,  0.0],
+    upperArmL: [ 0.3, -0.1,  0.2],
+    lowerArmL: [ 0.6,  0.0,  0.0],
+    wristL:    [ 0.0,  0.0,  0.0],
+  },
+  // ─── Knife (right hand forward, low grip) ────────────────────────────────
+  knife: {
+    family:    'knife',
+    shoulderR: [-0.1,  0.0,  0.0],
+    upperArmR: [ 0.3,  0.0, -0.1],
+    lowerArmR: [ 0.5,  0.0,  0.0],
+    wristR:    [ 0.2, -0.3,  0.0],
+    shoulderL: [ 0.0,  0.0,  0.0],
+    upperArmL: [ 0.1,  0.0,  0.0],
+    lowerArmL: [ 0.2,  0.0,  0.0],
+    wristL:    [ 0.0,  0.0,  0.0],
+  },
+} as const;
 
 // ---------------------------------------------------------------------------
 // Per-weapon procedural mesh factories (box-based fallback)
@@ -143,6 +230,28 @@ function buildKnife(): THREE.Group {
   g.add(box(0.018, 0.10, 0.20, 0x9090a0, 0, 0.02, -0.08));
   // Handle
   g.add(box(0.032, 0.06, 0.10, GUN_WOOD, 0, -0.01, 0.06));
+  return g;
+}
+
+function buildSMG(): THREE.Group {
+  const g = new THREE.Group();
+  // Compact body
+  g.add(box(0.050, 0.075, 0.30, GUNMETAL, 0, 0, 0));
+  // Short barrel
+  g.add(box(0.028, 0.028, 0.08, GUN_DARK, 0, 0.005, -0.19));
+  // Magazine
+  g.add(box(0.040, 0.12, 0.05, GUN_DARK, 0, -0.09, 0.04));
+  return g;
+}
+
+function buildShotgun(): THREE.Group {
+  const g = new THREE.Group();
+  // Body
+  g.add(box(0.060, 0.085, 0.42, GUNMETAL, 0, 0, 0));
+  // Barrel pair
+  g.add(box(0.042, 0.036, 0.12, GUN_DARK, 0, 0.006, -0.27));
+  // Stock
+  g.add(box(0.052, 0.072, 0.13, GUN_WOOD, 0, -0.01, 0.24));
   return g;
 }
 
@@ -226,7 +335,7 @@ export function normalizeWeaponModel(
 }
 
 // ---------------------------------------------------------------------------
-// Per-weapon tuning table
+// Per-weapon tuning table (keyed by weapons_v2 file stem)
 // Single place to tweak offsets/rotation/scale after playtesting.
 // ---------------------------------------------------------------------------
 
@@ -243,104 +352,108 @@ export interface WeaponTuning {
   muzzleZ: number;
 }
 
-const WEAPON_TUNING: Record<string, WeaponTuning> = {
-  glock: {
+// Stem-level base tuning (one entry per weapons_v2 file stem)
+const STEM_TUNING: Record<string, WeaponTuning> = {
+  pistol: {
     targetLength: 0.22,
     gripOffset: { x: 0, y: 0, z: 0 },
     extraRotation: { x: 0, y: 0, z: 0 },
     scaleMult: 1.0,
     muzzleZ: -0.14,
   },
-  usp: {
-    targetLength: 0.22,
-    gripOffset: { x: 0, y: 0, z: 0 },
-    extraRotation: { x: 0, y: 0, z: 0 },
-    scaleMult: 1.0,
-    muzzleZ: -0.14,
-  },
-  deagle: {
+  revolver: {
     targetLength: 0.22,
     gripOffset: { x: 0, y: 0, z: 0 },
     extraRotation: { x: 0, y: 0, z: 0 },
     scaleMult: 1.1,
     muzzleZ: -0.14,
   },
-  ak47: {
+  smg: {
+    targetLength: 0.30,
+    gripOffset: { x: 0, y: 0, z: 0 },
+    extraRotation: { x: 0, y: 0, z: 0 },
+    scaleMult: 0.82,
+    muzzleZ: -0.22,
+  },
+  scifi_smg: {
+    targetLength: 0.32,
+    gripOffset: { x: 0, y: 0, z: 0 },
+    extraRotation: { x: 0, y: 0, z: 0 },
+    scaleMult: 0.84,
+    muzzleZ: -0.24,
+  },
+  shotgun: {
+    targetLength: 0.38,
+    gripOffset: { x: 0, y: 0, z: 0 },
+    extraRotation: { x: 0, y: 0, z: 0 },
+    scaleMult: 1.0,
+    muzzleZ: -0.30,
+  },
+  assault_rifle: {
     targetLength: 0.38,
     gripOffset: { x: 0, y: 0, z: 0 },
     extraRotation: { x: 0, y: 0, z: 0 },
     scaleMult: 1.0,
     muzzleZ: -0.32,
   },
-  m4a4: {
+  assault_rifle_2: {
     targetLength: 0.38,
     gripOffset: { x: 0, y: 0, z: 0 },
     extraRotation: { x: 0, y: 0, z: 0 },
     scaleMult: 1.0,
     muzzleZ: -0.32,
   },
-  awp: {
+  sniper_rifle: {
     targetLength: 0.60,
     gripOffset: { x: 0, y: 0, z: 0 },
     extraRotation: { x: 0, y: 0, z: 0 },
     scaleMult: 1.0,
     muzzleZ: -0.45,
   },
+  knife: {
+    targetLength: 0.20,
+    gripOffset: { x: 0, y: 0, z: 0 },
+    extraRotation: { x: 0, y: 0, z: 0 },
+    scaleMult: 1.0,
+    muzzleZ: -0.12,
+  },
 } satisfies Record<string, WeaponTuning>;
 
-// ---------------------------------------------------------------------------
-// Per-id tuning overrides for aliased weapons.
-// Only fields that differ from the aliased id's tuning need to be listed.
-// Resolution: alias tuning + override (spread operator) = effective tuning.
-// DRY: we do NOT copy-paste 23 full tuning rows; we patch only what differs.
-// ---------------------------------------------------------------------------
-
+// Per-id tuning overrides (only fields that differ from the stem base).
+// DRY: only patch what differs.
 interface TuningOverride {
   scaleMult?: number;
   muzzleZ?: number;
   targetLength?: number;
+  /** Optional per-id grip offset override (replaces stem value wholesale). */
+  gripOffset?: { x: number; y: number; z: number };
+  /** Optional per-id extra rotation override (replaces stem value wholesale). */
+  extraRotation?: { x: number; y: number; z: number };
 }
 
 const WEAPON_TUNING_OVERRIDES: Record<string, TuningOverride> = {
-  // --- Rifles aliased to m4a4 ---
-  // famas, aug: same size/feel as m4a4 — no override needed
-
-  // --- Rifles aliased to ak47 ---
-  // galil, sg553: same size/feel as ak47 — no override needed
-
-  // --- Snipers aliased to awp ---
-  // ssg08: shorter bolt-action (scout) — slightly smaller
+  // --- Snipers: ssg08 is shorter (scout) ---
   ssg08:  { scaleMult: 0.92, targetLength: 0.55, muzzleZ: -0.40 },
-  // g3sg1, scar20: auto-sniper — same visual length as AWP
-  g3sg1:  { scaleMult: 1.00 },
-  scar20: { scaleMult: 1.00 },
 
-  // --- Pistols aliased to usp ---
-  // p250: compact pistol
-  p250:      { scaleMult: 0.92, targetLength: 0.20, muzzleZ: -0.12 },
-  // fiveseven: similar to usp — no override needed
-  // tec9: aliased to glock — no override needed
+  // --- Pistols: compact variants ---
+  p250:   { scaleMult: 0.92, targetLength: 0.20, muzzleZ: -0.12 },
 
-  // --- SMGs aliased to m4a4 — compact feel: ~0.82× alias scale ---
-  mac10:  { scaleMult: 0.82, targetLength: 0.30, muzzleZ: -0.22 },
-  mp9:    { scaleMult: 0.82, targetLength: 0.30, muzzleZ: -0.22 },
+  // --- SMGs: per-weapon feel ---
   mp7:    { scaleMult: 0.84, targetLength: 0.32, muzzleZ: -0.24 },
   ump45:  { scaleMult: 0.86, targetLength: 0.34, muzzleZ: -0.26 },
   p90:    { scaleMult: 0.88, targetLength: 0.36, muzzleZ: -0.28 },
   bizon:  { scaleMult: 0.84, targetLength: 0.32, muzzleZ: -0.24 },
 
-  // --- Heavy: shotguns aliased to ak47 — slightly larger (+1.05×) ---
-  nova:    { scaleMult: 1.05, muzzleZ: -0.30 },
-  xm1014:  { scaleMult: 1.05, muzzleZ: -0.30 },
-  sawedoff:{ scaleMult: 0.98, targetLength: 0.32, muzzleZ: -0.24 },
-  mag7:    { scaleMult: 1.02, targetLength: 0.36, muzzleZ: -0.28 },
+  // --- Shotguns: sawed-off is compact ---
+  sawedoff: { scaleMult: 0.98, targetLength: 0.32, muzzleZ: -0.24 },
+  mag7:     { scaleMult: 1.02, targetLength: 0.36, muzzleZ: -0.28 },
 
-  // --- Heavy: MGs aliased to m4a4 — enlarged (+1.15×) ---
+  // --- Heavy: MGs enlarged ---
   m249:  { scaleMult: 1.15, targetLength: 0.44, muzzleZ: -0.36 },
   negev: { scaleMult: 1.15, targetLength: 0.44, muzzleZ: -0.36 },
 };
 
-// Fallback tuning for unknown ids (procedural fallback anyway)
+// Fallback tuning for unknown ids
 const DEFAULT_TUNING: WeaponTuning = {
   targetLength: 0.22,
   gripOffset: { x: 0, y: 0, z: 0 },
@@ -351,25 +464,36 @@ const DEFAULT_TUNING: WeaponTuning = {
 
 /**
  * Resolve effective tuning for any weapon id.
- * Order: exact entry in WEAPON_TUNING → alias tuning + per-id override → DEFAULT_TUNING.
- * Returns a fresh object; callers may not mutate WEAPON_TUNING or WEAPON_TUNING_OVERRIDES.
+ * Order: stem-level base tuning (via THIRD_PERSON_WEAPON_FILES) + per-id override → DEFAULT_TUNING.
+ * Returns a fresh object; callers may not mutate the internal tables.
  * Exported for tests.
  */
 export function resolveWeaponTuning(id: string): WeaponTuning {
-  // 1. Direct tuning entry (the 6 modelled ids)
-  const direct = WEAPON_TUNING[id];
-  if (direct !== undefined) return { ...direct };
-
-  // 2. Alias path: base tuning from alias + per-id override
-  const aliasId = WEAPON_MODEL_ALIAS[id];
-  if (aliasId !== undefined) {
-    const baseTuning = WEAPON_TUNING[aliasId] ?? DEFAULT_TUNING;
-    const override   = WEAPON_TUNING_OVERRIDES[id] ?? {};
-    return { ...baseTuning, ...override };
+  const stem = THIRD_PERSON_WEAPON_FILES[id];
+  const baseTuning: WeaponTuning =
+    (stem !== undefined ? STEM_TUNING[stem] : undefined) ?? DEFAULT_TUNING;
+  const override = WEAPON_TUNING_OVERRIDES[id];
+  if (override !== undefined) {
+    // Spread scalars; for object-typed fields produce fresh copies so callers
+    // cannot accidentally mutate the internal base table via the returned object.
+    const resolved: WeaponTuning = {
+      ...baseTuning,
+      ...override,
+      gripOffset: override.gripOffset !== undefined
+        ? { ...override.gripOffset }
+        : { ...baseTuning.gripOffset },
+      extraRotation: override.extraRotation !== undefined
+        ? { ...override.extraRotation }
+        : { ...baseTuning.extraRotation },
+    };
+    return resolved;
   }
-
-  // 3. Fallback
-  return DEFAULT_TUNING;
+  // No override — still return fresh nested objects to honour the fresh-object contract.
+  return {
+    ...baseTuning,
+    gripOffset:    { ...baseTuning.gripOffset },
+    extraRotation: { ...baseTuning.extraRotation },
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -476,8 +600,8 @@ export class ViewModel {
   /** Current weapon id */
   private _currentId = 'usp';
 
-  /** Preloaded models, set once by the integration layer */
-  private _models: Partial<Record<WeaponId, THREE.Object3D>> = {};
+  /** Preloaded weapons_v2 models keyed by file stem, set by setWeaponModelsV2. */
+  private _stemModels: Record<string, THREE.Object3D> = {};
 
   /** The currently active model node (GLB clone) or null when procedural */
   private _activeModel: THREE.Object3D | null = null;
@@ -506,15 +630,32 @@ export class ViewModel {
   }
 
   /**
-   * Called once (or whenever models are updated) after async GLB loading.
+   * Register preloaded weapons_v2 static GLB scenes keyed by file stem
+   * (e.g. 'pistol', 'assault_rifle', 'knife').
+   * Replaces the old setWeaponModels(Partial<Record<WeaponId, ...>>) API.
    * Idempotent — safe to call before or after any setWeapon() call.
-   * If called after setWeapon(), it will immediately swap in the model for
-   * the current weapon if one is now available.
+   * If called after setWeapon(), immediately swaps in the model for the current weapon.
    */
-  setWeaponModels(models: Partial<Record<WeaponId, THREE.Object3D>>): void {
-    this._models = models;
+  setWeaponModelsV2(models: Record<string, THREE.Object3D>): void {
+    this._stemModels = models;
     // Re-apply for the current weapon so the swap happens immediately
     this._applyCurrentWeaponVisual(this._currentId);
+  }
+
+  /**
+   * Arms asset registration — stub (arms are skipped: Quaternius models have no
+   * isolated arm/hand mesh; full-body hide-and-show would render the torso in camera).
+   * Exists so main.ts can unconditionally call it without a feature-flag.
+   */
+  setArmsAssets(_assets: { ct?: GLTF; t?: GLTF }): void {
+    // No-op: arms feature not yet implementable with these character assets.
+  }
+
+  /**
+   * Team switch for arm skin — stub matching setArmsAssets.
+   */
+  setArmsTeam(_team: 'CT' | 'T'): void {
+    // No-op: arms feature not yet implementable.
   }
 
   setWeapon(id: string): void {
@@ -723,8 +864,11 @@ export class ViewModel {
 
   /**
    * Attach either a normalized GLB clone or a procedural mesh for the given
-   * weapon id. Picks GLB when available in _models; otherwise falls back to
-   * procedural boxes.
+   * weapon id. Picks GLB stem model when available in _stemModels; otherwise
+   * falls back to procedural boxes.
+   *
+   * Resolution: weapon id → stem (via THIRD_PERSON_WEAPON_FILES) → GLB clone.
+   * weapons_v2 GLBs are static (not skinned) — plain .clone(true) is correct.
    */
   private _applyCurrentWeaponVisual(id: string): void {
     // Remove previous visuals before reattaching
@@ -733,21 +877,15 @@ export class ViewModel {
     const tuning = resolveWeaponTuning(id);
     this._muzzle.position.set(0, 0.02, tuning.muzzleZ);
 
-    // Resolve model source: exact id first, then alias, then procedural fallback.
-    const modelId: WeaponId = (id in WEAPON_MODEL_PATHS)
-      ? (id as WeaponId)
-      : (WEAPON_MODEL_ALIAS[id] ?? (id as WeaponId));
-    const sourceModel = this._models[modelId];
+    // Resolve stem for this weapon id
+    const stem = THIRD_PERSON_WEAPON_FILES[id];
+    const sourceModel = stem !== undefined ? this._stemModels[stem] : undefined;
 
     if (sourceModel !== undefined) {
       // --- GLB path ---
-      // Use SkeletonUtils.clone so the cloned skeleton's bones live inside the
-      // cloned subtree and receive world-matrix updates when the clone is in the
-      // scene graph.  THREE.Object3D.clone(true) shares the ORIGINAL skeleton
-      // (whose bones live in the never-rendered source gltf.scene), causing
-      // skinned vertices to transform to world origin and render nothing.
-      // SkeletonUtils.clone handles both skinned and non-skinned objects safely.
-      const modelClone: THREE.Object3D = skeletonClone(sourceModel);
+      // weapons_v2 models are static (no SkinnedMesh) — plain .clone(true) is correct.
+      // Do NOT use SkeletonUtils here; that's only for rigged meshes.
+      const modelClone: THREE.Object3D = sourceModel.clone(true);
 
       // Compute normalization
       const bbox = new THREE.Box3().setFromObject(sourceModel);
@@ -769,23 +907,30 @@ export class ViewModel {
       this._group.add(modelClone);
       this._activeModel = modelClone;
     } else {
-      // --- Procedural fallback (GLBs not loaded or load failed) ---
-      // Resolve shape family via alias so new weapon ids get a sensible mesh.
-      const shapeId = WEAPON_MODEL_ALIAS[id] ?? id;
+      // --- Procedural fallback (GLBs not loaded, load failed, or unknown id) ---
+      const shapeId = stem ?? id;
       let weaponMesh: THREE.Group;
 
       switch (shapeId) {
-        case 'ak47':
-        case 'm4a4':
+        case 'assault_rifle':
+        case 'assault_rifle_2':
           weaponMesh = buildRifle();
           break;
-        case 'awp':
+        case 'sniper_rifle':
           weaponMesh = buildAWP();
           break;
         case 'knife':
           weaponMesh = buildKnife();
           break;
+        case 'smg':
+        case 'scifi_smg':
+          weaponMesh = buildSMG();
+          break;
+        case 'shotgun':
+          weaponMesh = buildShotgun();
+          break;
         default:
+          // pistol, revolver, unknown
           weaponMesh = buildPistol();
           break;
       }

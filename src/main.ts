@@ -17,8 +17,6 @@ import type { ShotResult } from './combat';
 import { createCharacterMesh, updateCharacterMesh, CHARACTER_MODEL_PATHS, THIRD_PERSON_WEAPON_PATHS, setCharacterAssets, setThirdPersonWeaponModels } from './characters';
 import type { GLTF } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { ViewModel } from './viewmodel';
-import type { WeaponId } from './viewmodel';
-import { WEAPON_MODEL_PATHS } from './viewmodel';
 import { Effects } from './effects';
 import { audio } from './audio';
 import { Game } from './game';
@@ -98,7 +96,7 @@ function createCombatant(id: number, name: string, team: Team, isPlayer: boolean
 // Loading overlay helpers
 // ---------------------------------------------------------------------------
 
-const TOTAL_ASSETS = 33; // 8 color textures + 8 normals + 6 viewmodel GLBs + 9 weapons_v2 GLBs + 2 rigged character GlTFs
+const TOTAL_ASSETS = 27; // 8 color textures + 8 normals + 9 weapons_v2 GLBs (shared with viewmodel) + 2 rigged character GlTFs
 
 function createLoadingOverlay(): {
   overlay: HTMLDivElement;
@@ -204,7 +202,9 @@ async function boot(): Promise<void> {
 
   // ---------------------------------------------------------------------------
   // Asset loading — groups in parallel, each independent
-  // Total progress units: 8 color + 8 normals + 6 viewmodel GLBs + 9 weapons_v2 GLBs + 2 rigged GlTFs = 33
+  // Total progress units: 8 color + 8 normals + 9 weapons_v2 GLBs + 2 rigged GlTFs = 27
+  // weapons_v2 GLBs are shared between characters.ts (third-person wrist attachments)
+  // and viewmodel.ts (first-person weapon models) — loaded once, consumed by both.
   // ---------------------------------------------------------------------------
   let loadedCount = 0;
   function onAssetLoaded(n: number): void {
@@ -214,12 +214,12 @@ async function boot(): Promise<void> {
 
   let textures: LoadedTextures | undefined;
   let normals: Partial<Record<TextureSlot, THREE.Texture>> | undefined;
-  let loadedModels: Partial<Record<WeaponId, THREE.Object3D>> = {};
+  let sharedWeaponModels: Record<string, THREE.Object3D> = {};
   let ctGltfResult: GLTF | undefined;
   let tGltfResult:  GLTF | undefined;
 
   try {
-    const [texResult, normResult, modelResults, wpnResults, ctResult, tResult] = await Promise.allSettled([
+    const [texResult, normResult, wpnResults, ctResult, tResult] = await Promise.allSettled([
       // Group 1: 8 color textures — callback fires once per loaded texture
       loadAllTextures((_loaded, _total) => {
         onAssetLoaded(1);
@@ -228,17 +228,7 @@ async function boot(): Promise<void> {
       loadAllNormalTextures((_loaded, _total) => {
         onAssetLoaded(1);
       }),
-      // Group 3: 6 viewmodel weapon GLBs — each settles independently
-      Promise.allSettled(
-        (Object.entries(WEAPON_MODEL_PATHS) as [WeaponId, string][]).map(
-          async ([id, relPath]) => {
-            const gltf = await loadGLB(relPath);
-            onAssetLoaded(1);
-            return [id, gltf.scene] as [WeaponId, THREE.Object3D];
-          },
-        ),
-      ),
-      // Group 4: 9 third-person weapons_v2 GLBs
+      // Group 3: 9 weapons_v2 GLBs (shared viewmodel + third-person)
       Promise.allSettled(
         Object.entries(THIRD_PERSON_WEAPON_PATHS).map(
           async ([stem, relPath]) => {
@@ -248,13 +238,13 @@ async function boot(): Promise<void> {
           },
         ),
       ),
-      // Group 5: CT rigged character GlTF (1 progress unit)
+      // Group 4: CT rigged character GlTF (1 progress unit)
       (async (): Promise<GLTF> => {
         const gltf = await loadGLB(CHARACTER_MODEL_PATHS.ct);
         onAssetLoaded(1);
         return gltf;
       })(),
-      // Group 6: T rigged character GlTF (1 progress unit)
+      // Group 5: T rigged character GlTF (1 progress unit)
       (async (): Promise<GLTF> => {
         const gltf = await loadGLB(CHARACTER_MODEL_PATHS.t);
         onAssetLoaded(1);
@@ -289,31 +279,19 @@ async function boot(): Promise<void> {
       console.warn('[boot] Normal textures failed to load — no normals:', normResult.reason);
     }
 
-    // --- Viewmodel weapon GLBs ---
-    if (modelResults.status === 'fulfilled') {
-      for (const entry of modelResults.value) {
-        if (entry.status === 'fulfilled') {
-          const [id, obj] = entry.value;
-          loadedModels[id] = obj;
-        } else {
-          console.warn('[boot] Viewmodel weapon GLB failed to load:', entry.reason);
-        }
-      }
-    }
-
-    // --- Third-person weapons_v2 GLBs ---
-    const thirdPersonWeaponModels: Record<string, THREE.Object3D> = {};
+    // --- weapons_v2 GLBs — shared between third-person wrist attachments and first-person viewmodel ---
     if (wpnResults.status === 'fulfilled') {
       for (const entry of wpnResults.value) {
         if (entry.status === 'fulfilled') {
           const [stem, obj] = entry.value;
-          thirdPersonWeaponModels[stem] = obj;
+          sharedWeaponModels[stem] = obj;
         } else {
-          console.warn('[boot] Third-person weapon GLB failed to load:', entry.reason);
+          console.warn('[boot] Weapon GLB failed to load:', entry.reason);
         }
       }
     }
-    setThirdPersonWeaponModels(thirdPersonWeaponModels);
+    // Register with both consumers: characters.ts (third-person) + viewmodel (first-person)
+    setThirdPersonWeaponModels(sharedWeaponModels);
 
     // --- Rigged character GlTFs ---
     if (ctResult.status === 'fulfilled') {
@@ -382,8 +360,13 @@ async function boot(): Promise<void> {
   const grenadeManager = new GrenadeManager(scene, world);
 
   // --- ViewModel ---
+  // setWeaponModelsV2 shares the same weapons_v2 scenes already registered with
+  // setThirdPersonWeaponModels — no second load; both consumers reference the same objects.
+  // setArmsAssets is a no-op stub (arms skipped: no isolated arm mesh in these character GLTFs).
   const viewmodel = new ViewModel(camera);
-  viewmodel.setWeaponModels(loadedModels);
+  viewmodel.setWeaponModelsV2(sharedWeaponModels);
+  viewmodel.setArmsAssets({ ct: ctGltfResult, t: tGltfResult });
+  viewmodel.setArmsTeam(player.team);
   viewmodel.setWeapon(player.inventory.secondary?.def.id ?? 'usp');
 
   // --- GrenadeManager callbacks ---
@@ -469,6 +452,7 @@ async function boot(): Promise<void> {
     lastMatchOpts = opts;
     // Reset player to chosen team default loadout (Game will reassign on round start).
     player.team = opts.playerTeam;
+    viewmodel.setArmsTeam(opts.playerTeam);
     game.startMatch(opts, clock.now);
     // Instantiate BotManager after startMatch so combatants exist.
     botManager?.dispose();

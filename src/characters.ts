@@ -26,6 +26,13 @@ const FALL_DURATION = 0.25;
  */
 export const MODEL_YAW_OFFSET: number = Math.PI;
 
+/**
+ * Baked-in prop mesh node names that are embedded in the character GLTF but
+ * should never be visible in-game (they duplicate a wrist-attached weapon).
+ * Exported so tests can assert membership without loading GLTFs.
+ */
+export const BAKED_PROP_NODES: ReadonlySet<string> = new Set(['Pistol']);
+
 /** Reference walk speed for AnimationMixer timeScale (m/s). */
 const REF_WALK_SPEED = 2.6;
 /** Reference run speed for AnimationMixer timeScale (m/s). */
@@ -506,8 +513,12 @@ function buildRiggedMesh(assets: CharacterAssets): {
   // SkeletonUtils.clone creates an independent rig per instance
   const clonedRoot = SkeletonUtilsClone(assets.gltf.scene) as THREE.Object3D;
 
-  // Apply castShadow + frustumCulled=false on every SkinnedMesh
+  // Apply castShadow + frustumCulled=false on every SkinnedMesh;
+  // also hide any baked-in prop meshes that duplicate wrist-attached weapons.
   clonedRoot.traverse((child) => {
+    if (BAKED_PROP_NODES.has(child.name)) {
+      child.visible = false;
+    }
     if (child instanceof THREE.SkinnedMesh) {
       child.castShadow      = true;
       child.receiveShadow   = false;
