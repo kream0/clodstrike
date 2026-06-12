@@ -293,7 +293,7 @@ export class BotManager {
   // by a smoke volume. Null = no smoke system available (all segments clear).
   private _smokeQuery: ((a: Vec3, b: Vec3) => boolean) | null = null;
 
-  private readonly _mapData: MapData = DUST2;
+  private readonly _mapData: MapData;
 
   // F1: sticky retriever id when the bomb is dropped.
   private _retrieverId: number | null = null;
@@ -313,15 +313,17 @@ export class BotManager {
     world:      World,
     nav:        NavGrid,
     onBotShot?: (bot: Combatant, result: ShotResult) => void,
+    mapData:    MapData = DUST2,
   ) {
     this._game      = game;
     this._world     = world;
     this._nav       = nav;
     this._onBotShot = onBotShot;
+    this._mapData   = mapData;
 
     // F3: compute spawn-zone AABBs once from map data (+ margin).
-    this._ctSpawnZone = BotManager._buildSpawnZone(DUST2.spawns.ct);
-    this._tSpawnZone  = BotManager._buildSpawnZone(DUST2.spawns.t);
+    this._ctSpawnZone = BotManager._buildSpawnZone(mapData.spawns.ct);
+    this._tSpawnZone  = BotManager._buildSpawnZone(mapData.spawns.t);
   }
 
   /** Build an AABB over an array of spawn points plus SPAWN_ZONE_MARGIN. */

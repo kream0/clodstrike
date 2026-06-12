@@ -2,6 +2,7 @@ import * as THREE from 'three';
 import type { Combatant, Inventory, Vec3, Team, WeaponDef, WeaponState, SpawnPoint, MatchStats } from './types';
 import { WEAPONS, ECONOMY, RULES, BOT_NAMES, BOT_DIFFICULTY, TEAM_COLORS, GRENADES } from './constants';
 import { DUST2 } from './maps/dust2';
+import type { MapData } from './types';
 import type { World } from './world';
 import { gameEvents } from './combat';
 import { createCharacterMesh, updateCharacterMesh } from './characters';
@@ -104,6 +105,8 @@ export interface MatchOptions {
   playerTeam: Team;
   difficulty: Difficulty;
   botsPerTeam?: number; // default 4 teammates + 5 enemies (5v5 total)
+  /** Map id from the registry (e.g. 'dust2', 'mirage'). Defaults to 'dust2'. */
+  mapId?: string;
 }
 
 interface BombState {
@@ -228,6 +231,7 @@ export class Game {
 
   // ----- Private -----
   private _world: World;
+  private _map: MapData = DUST2;
   private _scene: THREE.Scene | null;
   private _botMeshes: Map<number, THREE.Group> = new Map();
   private _bombMesh:  THREE.Group | null = null;
@@ -307,6 +311,20 @@ export class Game {
       this._unsubDamage();
       this._unsubDamage = null;
     }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Map / world swap (called by main.ts before startMatch on map change)
+  // ---------------------------------------------------------------------------
+
+  /** Replace the World used for floor lookups and movement collision. */
+  setWorld(world: World): void {
+    this._world = world;
+  }
+
+  /** Replace the MapData used for spawn positions and bombsite checks. */
+  setMap(map: MapData): void {
+    this._map = map;
   }
 
   // ---------------------------------------------------------------------------
@@ -437,8 +455,8 @@ export class Game {
     this._roundStartAt  = 0;
 
     // Teleport everyone to spawns, reset health/vel/alive.
-    const ctSpawns = [...DUST2.spawns.ct];
-    const tSpawns  = [...DUST2.spawns.t];
+    const ctSpawns = [...this._map.spawns.ct];
+    const tSpawns  = [...this._map.spawns.t];
     let ctIdx = 0;
     let tIdx  = 0;
 
@@ -1085,7 +1103,7 @@ export class Game {
   // ---------------------------------------------------------------------------
 
   private _getActiveSite(pos: Vec3): 'A' | 'B' | null {
-    for (const site of DUST2.bombsites) {
+    for (const site of this._map.bombsites) {
       if (
         pos.x >= site.min.x && pos.x <= site.max.x &&
         pos.z >= site.min.z && pos.z <= site.max.z

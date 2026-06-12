@@ -3,7 +3,8 @@ import { RULES, GRENADES, ECONOMY, WEAPONS } from './constants';
 import { gameEvents } from './combat';
 import { isScoped, currentSpread } from './weapons';
 import { DUST2 } from './maps/dust2';
-import type { GrenadeType } from './types';
+import { MAPS, MAP_DISPLAY_NAMES, DEFAULT_MAP_ID } from './maps/index';
+import type { GrenadeType, MapData } from './types';
 
 // ---------------------------------------------------------------------------
 // CSS injected once
@@ -697,11 +698,7 @@ const HUD_CSS = `
 // Radar constants
 // ---------------------------------------------------------------------------
 
-const RADAR_SIZE    = 168;   // px
-const MAP_WORLD_W   = DUST2.grid[0]?.length ?? 96;  // derive from actual grid width
-const MAP_WORLD_H   = DUST2.grid.length;             // derive from actual grid height
-const MAP_ORIGIN_X  = -48;
-const MAP_ORIGIN_Z  = -44;
+const RADAR_SIZE = 168; // px
 
 // ---------------------------------------------------------------------------
 // HUD
@@ -759,8 +756,12 @@ export class HUD {
   private _setSens: ((v: number) => void) | null = null;
 
   // Menu selections.
-  private _menuTeam: 'CT' | 'T' = 'CT';
-  private _menuDiff: 'easy' | 'normal' | 'hard' = 'normal';
+  private _menuTeam:  'CT' | 'T' = 'CT';
+  private _menuDiff:  'easy' | 'normal' | 'hard' = 'normal';
+  private _menuMapId: string = DEFAULT_MAP_ID;
+
+  // Radar: current map used for background prerender and blip placement.
+  private _radarMap: MapData = DUST2;
 
   // Match-end stats screen.
   private _statsVisible = false;
@@ -1025,6 +1026,16 @@ export class HUD {
     this._updateSensDisplay();
   }
 
+  /**
+   * Switch the radar to render a different map. Call this after a map swap
+   * (before startMatch) so the radar background and coordinate transforms
+   * reflect the new map's grid and origin.
+   */
+  rerenderRadarBg(map: MapData): void {
+    this._radarMap = map;
+    this._prerenderRadarBg();
+  }
+
   notifyHit(killed: boolean, _headshot: boolean): void {
     this._hitmarkerTimer = killed ? 0.35 : 0.22;
     this._hitmarkerKill  = killed;
@@ -1251,6 +1262,14 @@ export class HUD {
     const startMenu = document.createElement('div');
     startMenu.id = 'hud-start-menu';
     startMenu.className = 'hud-menu-overlay';
+    // Build map picker buttons from the registry (order: dust2 first, then rest).
+    const mapPickerHtml = Object.entries(MAP_DISPLAY_NAMES)
+      .map(([id, label]) => {
+        const sel = id === DEFAULT_MAP_ID ? ' selected' : '';
+        return `<div class="diff-btn${sel}" data-map-id="${id}">${label}</div>`;
+      })
+      .join('');
+
     startMenu.innerHTML = `
       <div class="hud-menu-box">
         <h1>Clodstrike</h1>
@@ -1264,6 +1283,10 @@ export class HUD {
           <div class="diff-btn" data-diff="easy">Easy</div>
           <div class="diff-btn selected" data-diff="normal">Normal</div>
           <div class="diff-btn" data-diff="hard">Hard</div>
+        </div>
+        <h2>Map</h2>
+        <div class="diff-btns map-btns">
+          ${mapPickerHtml}
         </div>
         <button class="menu-btn primary" id="hud-start-btn">Start Match</button>
       </div>
@@ -1324,18 +1347,33 @@ export class HUD {
       });
     });
 
-    // Difficulty buttons.
-    menu.querySelectorAll<HTMLElement>('.diff-btn').forEach(btn => {
+    // Difficulty buttons (inside .diff-btns but NOT inside .map-btns).
+    const diffContainer = menu.querySelector<HTMLElement>('.diff-btns:not(.map-btns)');
+    diffContainer?.querySelectorAll<HTMLElement>('.diff-btn').forEach(btn => {
       btn.addEventListener('click', () => {
-        menu.querySelectorAll('.diff-btn').forEach(b => b.classList.remove('selected'));
+        diffContainer.querySelectorAll('.diff-btn').forEach(b => b.classList.remove('selected'));
         btn.classList.add('selected');
         this._menuDiff = btn.dataset.diff as 'easy' | 'normal' | 'hard';
       });
     });
 
+    // Map picker buttons (inside .map-btns).
+    const mapContainer = menu.querySelector<HTMLElement>('.map-btns');
+    mapContainer?.querySelectorAll<HTMLElement>('.diff-btn').forEach(btn => {
+      btn.addEventListener('click', () => {
+        mapContainer.querySelectorAll('.diff-btn').forEach(b => b.classList.remove('selected'));
+        btn.classList.add('selected');
+        this._menuMapId = btn.dataset.mapId ?? DEFAULT_MAP_ID;
+      });
+    });
+
     // Start button.
     menu.querySelector('#hud-start-btn')!.addEventListener('click', () => {
-      this.onStart?.({ playerTeam: this._menuTeam, difficulty: this._menuDiff });
+      this.onStart?.({
+        playerTeam: this._menuTeam,
+        difficulty:  this._menuDiff,
+        mapId:       this._menuMapId,
+      });
     });
   }
 
@@ -1778,10 +1816,11 @@ export class HUD {
   // ---------------------------------------------------------------------------
 
   private _prerenderRadarBg(): void {
+    const map    = this._radarMap;
     const canvas = this._radarBg;
     const ctx    = canvas.getContext('2d')!;
-    const cols   = MAP_WORLD_W;
-    const rows   = DUST2.grid.length;
+    const cols   = map.grid[0]?.length ?? 96;
+    const rows   = map.grid.length;
     const cellPx = RADAR_SIZE / Math.max(cols, rows);
 
     ctx.fillStyle = '#1a1008';
@@ -1789,8 +1828,8 @@ export class HUD {
 
     for (let row = 0; row < rows; row++) {
       for (let col = 0; col < cols; col++) {
-        const ch   = DUST2.grid[row]?.[col] ?? ' ';
-        const cell = DUST2.legend[ch];
+        const ch   = map.grid[row]?.[col] ?? ' ';
+        const cell = map.legend[ch];
         if (!cell || cell.wall) continue;
 
         const px = col * cellPx;
@@ -1813,26 +1852,31 @@ export class HUD {
     ctx.font      = `bold ${Math.round(cellPx * 4)}px sans-serif`;
     ctx.fillStyle = 'rgba(255,200,80,0.8)';
     ctx.textAlign = 'center';
-    for (const site of DUST2.bombsites) {
+    const originX = map.origin.x;
+    const originZ = map.origin.z;
+    for (const site of map.bombsites) {
       const wx = (site.min.x + site.max.x) / 2;
       const wz = (site.min.z + site.max.z) / 2;
-      const px = (wx - MAP_ORIGIN_X) / MAP_WORLD_W * RADAR_SIZE;
-      const pz = (wz - MAP_ORIGIN_Z) / DUST2.grid.length * RADAR_SIZE;
+      const px = (wx - originX) / cols * RADAR_SIZE;
+      const pz = (wz - originZ) / rows * RADAR_SIZE;
       ctx.fillText(site.name, px, pz);
     }
   }
 
   private _drawRadar(now: number): void {
-    const ctx   = this._radarCtx;
-    const game  = this._game;
-    const cols  = MAP_WORLD_W;
-    const rows  = DUST2.grid.length;
+    const ctx     = this._radarCtx;
+    const game    = this._game;
+    const map     = this._radarMap;
+    const cols    = map.grid[0]?.length ?? 96;
+    const rows    = map.grid.length;
+    const originX = map.origin.x;
+    const originZ = map.origin.z;
 
     // Draw pre-rendered background.
     ctx.drawImage(this._radarBg, 0, 0);
 
-    const toRadarX = (wx: number) => (wx - MAP_ORIGIN_X) / cols * RADAR_SIZE;
-    const toRadarY = (wz: number) => (wz - MAP_ORIGIN_Z) / rows * RADAR_SIZE;
+    const toRadarX = (wx: number) => (wx - originX) / cols * RADAR_SIZE;
+    const toRadarY = (wz: number) => (wz - originZ) / rows * RADAR_SIZE;
 
     const player = game.player;
     if (!player) return;

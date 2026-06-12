@@ -3,6 +3,8 @@ import type { Combatant, Inventory, WeaponDef, WeaponState } from './types';
 import type { Team } from './types';
 import { WEAPONS, MOVEMENT, ECONOMY } from './constants';
 import { DUST2 } from './maps/dust2';
+import { MAPS, DEFAULT_MAP_ID, resolveMap } from './maps/index';
+import type { MapData } from './types';
 import { World } from './world';
 import { Input } from './input';
 import { buildMapScene, setupEnvironment } from './builder';
@@ -328,14 +330,65 @@ async function boot(): Promise<void> {
   setupEnvironment(scene);
 
   // --- Map (with optional textures + normals) ---
-  const { group } = buildMapScene(DUST2, textures, normals);
-  scene.add(group);
+  // currentMapId / currentMap / currentGroup are mutable: updated on map swap.
+  let currentMapId: string = DEFAULT_MAP_ID;
+  let currentMap: MapData  = DUST2;
+  let currentGroup = buildMapScene(DUST2, textures, normals).group;
+  scene.add(currentGroup);
 
   // --- World (collision) ---
-  const world = new World(DUST2);
+  let world = new World(DUST2);
 
   // --- NavGrid (built once at boot from DUST2, shared by all BotManagers) ---
-  const navGrid = new NavGrid(DUST2);
+  let navGrid = new NavGrid(DUST2);
+
+  /**
+   * Swap the active map scene in-place.
+   * Removes the old group, disposes all geometries + materials inside it,
+   * builds fresh scene content from newMap, and rebuilds World + NavGrid.
+   * Textures/normals are already in memory — no re-download.
+   * Called by hud.onStart when the selected map differs from the current one.
+   */
+  function swapMap(newMapId: string): void {
+    if (newMapId === currentMapId) return;
+
+    // Tear down old map scene group.
+    scene.remove(currentGroup);
+    currentGroup.traverse((obj) => {
+      if (obj instanceof THREE.Mesh) {
+        obj.geometry.dispose();
+        if (Array.isArray(obj.material)) {
+          for (const m of obj.material) (m as THREE.Material).dispose();
+        } else {
+          (obj.material as THREE.Material).dispose();
+        }
+      }
+    });
+    const cloned = (currentGroup.userData.clonedTextures as THREE.Texture[] | undefined);
+    if (cloned) for (const t of cloned) t.dispose();
+
+    // Build new map scene.
+    const newMap = resolveMap(newMapId);
+    const { group: newGroup } = buildMapScene(newMap, textures, normals);
+    scene.add(newGroup);
+
+    // Rebuild World + NavGrid.
+    world   = new World(newMap);
+    navGrid = new NavGrid(newMap);
+    grenadeManager.setWorld(world);
+
+    // Update game's world and map references (spawn positions + bombsite checks).
+    game.setWorld(world);
+    game.setMap(newMap);
+
+    // Update HUD radar.
+    hud.rerenderRadarBg(newMap);
+
+    // Commit.
+    currentGroup = newGroup;
+    currentMap   = newMap;
+    currentMapId = newMapId;
+  }
 
   // --- Camera ---
   // FOV = 74°  (CS2 default 90° hor+ at 4:3 → 106.26° horiz at 16:9 → vertical ≈ 2·atan(tan(53.13°)/(16/9)) ≈ 73.74° → rounded to 74)
@@ -347,9 +400,11 @@ async function boot(): Promise<void> {
   const input = new Input(renderer.domElement);
 
   // --- Player combatant (owned by main; Game holds a reference) ---
+  // Initial position comes from the default map's CT spawn; Game._startRound()
+  // will re-position everyone at actual round start using the selected map spawns.
   const player = createCombatant(0, 'Player', 'CT', true);
   {
-    const spawn = DUST2.spawns.ct[0];
+    const spawn = currentMap.spawns.ct[0];
     const floorY = world.floorAt(spawn.x, spawn.z);
     player.pos = { x: spawn.x, y: isFinite(floorY) ? floorY : 0, z: spawn.z };
     player.yaw = spawn.angle;
@@ -467,13 +522,15 @@ async function boot(): Promise<void> {
   // --- HUD callbacks ---
   hud.onStart = (opts) => {
     lastMatchOpts = opts;
+    // Swap map if selection changed (builds new scene, world, navGrid, radar).
+    swapMap(opts.mapId ?? DEFAULT_MAP_ID);
     // Reset player to chosen team default loadout (Game will reassign on round start).
     player.team = opts.playerTeam;
     viewmodel.setArmsTeam(opts.playerTeam);
     game.startMatch(opts, clock.now);
     // Instantiate BotManager after startMatch so combatants exist.
     botManager?.dispose();
-    botManager = new BotManager(game, world, navGrid, onBotShot);
+    botManager = new BotManager(game, world, navGrid, onBotShot, currentMap);
     botManager.attach();
     botManager.setSmokeQuery((a, b) => grenadeManager.isSegmentSmoked(a, b));
     grenadeManager.reset();
@@ -499,9 +556,9 @@ async function boot(): Promise<void> {
   hud.onRestart = () => {
     if (lastMatchOpts) {
       game.restart(lastMatchOpts, clock.now);
-      // Reinstantiate BotManager after restart.
+      // Reinstantiate BotManager after restart (map unchanged — lastMatchOpts keeps mapId).
       botManager?.dispose();
-      botManager = new BotManager(game, world, navGrid, onBotShot);
+      botManager = new BotManager(game, world, navGrid, onBotShot, currentMap);
       botManager.attach();
       botManager.setSmokeQuery((a, b) => grenadeManager.isSegmentSmoked(a, b));
       grenadeManager.reset();

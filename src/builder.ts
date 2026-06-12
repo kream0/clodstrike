@@ -349,6 +349,7 @@ export function buildMapScene(
   }
 
   // --- Props ---
+  const clonedTextures: THREE.Texture[] = [];
   for (const prop of map.props) {
     const [px, py, pz] = prop.pos;
     const [sx, sy, sz] = prop.size;
@@ -361,6 +362,7 @@ export function buildMapScene(
       // Clone texture so we can set a different repeat independently.
       const tex = textures[slot].clone();
       tex.needsUpdate = true;
+      clonedTextures.push(tex);
       const tile = TILE_SIZES[slot];
       // For box props use world repeat; for cylinders use a fixed repeat.
       if (prop.kind === 'barrel') {
@@ -378,8 +380,10 @@ export function buildMapScene(
       });
       const normalTex = normals?.[slot];
       if (normalTex !== undefined) {
-        propMat.normalMap = normalTex.clone();
-        propMat.normalMap.needsUpdate = true;
+        const normalClone = normalTex.clone();
+        normalClone.needsUpdate = true;
+        clonedTextures.push(normalClone);
+        propMat.normalMap = normalClone;
       }
     } else {
       const color  = MAT_COLORS[matKey] ?? MAT_COLORS['wood'] ?? 0x8a6b46;
@@ -416,6 +420,7 @@ export function buildMapScene(
     group.add(mesh);
   }
 
+  group.userData.clonedTextures = clonedTextures;
   return { group };
 }
 

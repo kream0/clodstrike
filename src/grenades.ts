@@ -56,7 +56,7 @@ export type OnExplosionDamage   = (victim: Combatant, damage: number, thrower: C
 
 export class GrenadeManager {
   private readonly _scene: THREE.Scene;
-  private readonly _world: World;
+  private _world: World;
 
   // Live projectiles.
   private _projectiles: GrenadeProjectile[] = [];
@@ -87,6 +87,8 @@ export class GrenadeManager {
     this._world = world;
     this._initMeshPools();
   }
+
+  setWorld(world: World): void { this._world = world; }
 
   // ---------------------------------------------------------------------------
   // Pool initialisation
