@@ -222,13 +222,9 @@ Team-exclusive weapons are enforced at purchase time — a CT can never buy an A
 
 - **Halftime side swap** — teams exchange CT/T at round 13; economy resets.
 
-### Medium term
-
-
 ### Long term
 
-- **Multiplayer via WebSocket / WebRTC** — the `gameEvents` bus and `Combatant` model are already structured for networked sync.
-- **Workshop-style custom map loading** — load a `MapData`-shaped JSON at runtime; the same pipeline builds scene, navgrid, and spawns from it.
+- **Multiplayer via WebSocket / WebRTC** — the deterministic seeded 128 Hz sim + per-tick input model (built for replay) are the groundwork; netcode model TBD.
 - **Competitive ranking vs bots** — Elo-style rating adjusted per match against each difficulty tier.
 
 ---
@@ -247,7 +243,7 @@ bun install
 |:---|:---|
 | `bun run dev` | Dev server at http://localhost:3000 — fresh bundle on every reload (works on Bun 1.1+) |
 | `bun run check` | TypeScript type-check only (`tsc --noEmit`) |
-| `bun test` | Run the test suite (1143 tests) |
+| `bun test` | Run the test suite (1171 tests) |
 | `bun run build` | Bundle for production into `dist/` (~1.1 MB) |
 
 ## Controls
