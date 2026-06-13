@@ -208,6 +208,9 @@ const DEBUG_SPECTATE     = _urlParams.get('spectate') === '1';
  *  side-by-side comparison with a real screenshot. Bypasses all match flow. */
 const DEBUG_PHOTO        = _urlParams.get('photo');
 
+/** Render-only landing-dip spring angular frequency (rad/s). ~0.3 s settle, critically damped. */
+const LAND_DIP_OMEGA = 14;
+
 async function boot(): Promise<void> {
   const { setProgress, remove: removeOverlay } = createLoadingOverlay();
 
@@ -860,6 +863,15 @@ async function boot(): Promise<void> {
   // Track the previously equipped grenade type to detect changes for viewmodel sync.
   let prevEquippedGrenade: import('./types').GrenadeType | null = null;
 
+  // --- Render-only landing dip state ---
+  // Pure visual camera offset; never read by sim/combat/bots.
+  // landDipOffset: current downward offset (metres) applied to camera Y.
+  // landDipVel:    derivative for critically-damped spring decay toward 0.
+  let landDipOffset = 0;
+  let landDipVel    = 0;
+  // Pre-step vertical velocity cache (read-only snapshot before simulateMovement).
+  let _prevFallSpeed = 0; // downward speed = max(0, -vel.y) just before landing
+
   // --- Replay state ---
   const recorder = new ReplayRecorder();
   // Global tick counter (counts all sim ticks since the last startMatch/restart).
@@ -941,6 +953,8 @@ async function boot(): Promise<void> {
     deathCamPos      = null;
     deathCamTilt     = 0;
     deathCamEnterAt  = 0;
+    landDipOffset    = 0;
+    landDipVel       = 0;
     viewmodel.setVisible(true);
     hud.setSpectateInfo(null);
     hud.hideMenus();
@@ -988,6 +1002,8 @@ async function boot(): Promise<void> {
       deathCamPos      = null;
       deathCamTilt     = 0;
       deathCamEnterAt  = 0;
+      landDipOffset    = 0;
+      landDipVel       = 0;
       game.setSpectateHiddenBot(null);
       viewmodel.setVisible(true);
       hud.setSpectateInfo(null);
@@ -1065,6 +1081,8 @@ async function boot(): Promise<void> {
     deathCamPos         = null;
     deathCamTilt        = 0;
     deathCamEnterAt     = 0;
+    landDipOffset       = 0;
+    landDipVel          = 0;
     stepAccum           = 0;
     game.setSpectateHiddenBot(null);
     viewmodel.setVisible(true);
@@ -1171,10 +1189,12 @@ async function boot(): Promise<void> {
     // Player death.
     if (ev.victim === player) {
       game.onPlayerDied();
-      deathCamPos = new THREE.Vector3(player.pos.x, eyeY, player.pos.z);
-      deathCamTilt = 0;
+      deathCamPos   = new THREE.Vector3(player.pos.x, eyeY, player.pos.z);
+      deathCamTilt  = 0;
       deathCamEnterAt = clock.now;
       spectateTargetId = null;
+      landDipOffset = 0;
+      landDipVel    = 0;
       viewmodel.setVisible(false);
       viewmodel.setGrenadeView(null);
       prevEquippedGrenade = null;
@@ -1270,6 +1290,8 @@ async function boot(): Promise<void> {
     deathCamPos      = null;
     deathCamTilt     = 0;
     deathCamEnterAt  = 0;
+    landDipOffset    = 0;
+    landDipVel       = 0;
     game.setSpectateHiddenBot(null);
     hud.setSpectateInfo(null);
   });
@@ -1379,6 +1401,8 @@ async function boot(): Promise<void> {
     deathCamPos         = null;
     deathCamTilt        = 0;
     deathCamEnterAt     = 0;
+    landDipOffset       = 0;
+    landDipVel          = 0;
     globalTick          = 0;
     // Hide viewmodel — no first-person view in spectate mode.
     viewmodel.setVisible(false);
@@ -1777,6 +1801,10 @@ async function boot(): Promise<void> {
           crouch: input.isDown('ControlLeft'),
           walk:   input.isDown('ShiftLeft'),
         };
+        // Cache downward speed BEFORE the step so we know impact speed on landing.
+        // Read-only snapshot — never written back to sim.
+        _prevFallSpeed = Math.max(0, -player.vel.y);
+
         const moveEv = simulateMovement(player, intent, world, FIXED_DT, clock.now);
 
         // Footstep audio (player).
@@ -1791,6 +1819,17 @@ async function boot(): Promise<void> {
         if (moveEv.landed) {
           audio.land();
           stepAccum = 0;
+          // Trigger render-only landing dip proportional to impact speed.
+          // Curve: dip = s² × 0.004, capped at 0.18 m.
+          // At a normal jump (~4.8 m/s impact) → ~0.092 m; big drop (~7 m/s) → ~0.18 m.
+          // Steps/tiny hops (<1 m/s) → negligible (<0.004 m).
+          const dipMag = Math.min(_prevFallSpeed * _prevFallSpeed * 0.004, 0.18);
+          if (dipMag > 0.002) {
+            // Kick the spring downward; any in-progress dip is replaced (additive would
+            // compound on rapid re-lands, which would look wrong).
+            landDipOffset = dipMag;
+            landDipVel    = 0;
+          }
         }
       }
 
@@ -2004,6 +2043,27 @@ async function boot(): Promise<void> {
       eyeY = eyeY + (targetEyeY - eyeY) * Math.min(1, 10 * frameDt);
     }
 
+    // --- Render-only landing dip spring (alive player only) ---
+    // Critically-damped spring toward 0: angular freq ω = 14 rad/s → ~0.3 s settle.
+    // Only decays; never driven here — the sim tick sets landDipOffset/landDipVel on land.
+    if (player.alive && landDipOffset !== 0) {
+      // Forward Euler is only stable for dt < 1/ω (~71 ms). frameDt can hit the 0.1 s
+      // cap on tab hide/restore, so clamp the integration step to keep the spring stable
+      // (otherwise it overshoots negative and the ≥0 clamp pops the dip to zero).
+      const springDt = Math.min(frameDt, 0.05);
+      const springForce = -LAND_DIP_OMEGA * LAND_DIP_OMEGA * landDipOffset;
+      const dampForce   = -2 * LAND_DIP_OMEGA * landDipVel; // critical damping
+      landDipVel    += (springForce + dampForce) * springDt;
+      landDipOffset += landDipVel * springDt;
+      // Clamp offset to valid range and snap to zero when negligibly small.
+      if (landDipOffset < 0) { landDipOffset = 0; landDipVel = 0; }
+      if (landDipOffset < 0.0005) { landDipOffset = 0; landDipVel = 0; }
+    } else if (!player.alive) {
+      // Reset when dead so a stale dip can't carry over on respawn.
+      landDipOffset = 0;
+      landDipVel    = 0;
+    }
+
     // --- Scope FOV ---
     // Scope zoom (30°) keeps the same absolute value: the ratio 30/73 ≈ 41% of base
     // is deliberately kept as a fixed tight-zoom regardless of base FOV change.
@@ -2056,8 +2116,11 @@ async function boot(): Promise<void> {
         camera.position.copy(deathCamPos);
         camera.rotation.set(-deathCamTilt + punch.pitch, player.yaw + punch.yaw, 0, 'YXZ');
       } else {
-        camera.position.set(player.pos.x, eyeY, player.pos.z);
-        camera.rotation.set(player.pitch + punch.pitch, player.yaw + punch.yaw, 0, 'YXZ');
+        // Apply render-only landing dip: shift camera Y down and add a tiny forward pitch.
+        // Neither player.pos, player.pitch, nor punch is mutated — purely visual offset.
+        const dipPitch = landDipOffset * 0.3; // max ~0.054 rad (~3°) at full dip
+        camera.position.set(player.pos.x, eyeY - landDipOffset, player.pos.z);
+        camera.rotation.set(player.pitch + punch.pitch + dipPitch, player.yaw + punch.yaw, 0, 'YXZ');
       }
     }
 
