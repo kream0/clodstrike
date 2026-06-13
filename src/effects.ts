@@ -10,6 +10,8 @@ const IMPACT_COLOR  = 0xd8c49a;
 const BLOOD_COLOR   = 0x8a1010;
 const FLASH_COLOR   = 0xffffdd;
 const DECAL_COLOR   = 0x331100;
+const SPARK_COLOR   = 0xffd27a;
+const DUST_COLOR    = 0xb8a888;
 
 // ---------------------------------------------------------------------------
 // Dynamic flash light constants (tunable)
@@ -51,11 +53,22 @@ const POOL_IMPACTS  = 32;
 const POOL_BLOOD    = 16;
 const POOL_FLASH    = 8;
 const POOL_DECALS   = 64;
+const POOL_SPARKS   = 64;   // total spark mesh slots (~8 shots × 8 sparks each)
+const POOL_DUST     = 16;   // one puff per world impact
 
 const TRACER_LIFE   = 0.07;   // seconds
 const IMPACT_LIFE   = 0.25;
 const BLOOD_LIFE    = 0.35;
 const FLASH_LIFE    = 0.045;
+const SPARK_LIFE_MIN = 0.18;  // seconds — minimum spark life
+const SPARK_LIFE_MAX = 0.35;  // seconds — maximum spark life
+const DUST_LIFE     = 0.30;   // seconds
+const SPARKS_PER_IMPACT = 7;  // sparks emitted per world hit
+const SPARK_GRAVITY = 12;     // m/s² downward (cosmetic)
+const SPARK_SPEED_MIN = 1.5;  // m/s initial speed
+const SPARK_SPEED_MAX = 4.5;  // m/s initial speed
+const DUST_SCALE_START = 0.08; // world units
+const DUST_SCALE_END   = 0.40; // world units
 
 const MIN_TRACER_LEN = 3;     // meters — skip tracers shorter than this
 
@@ -78,6 +91,25 @@ interface FlashLight {
   life:    number;   // remaining life in seconds (≤0 = inactive)
   maxLife: number;
   peak:    number;   // intensity at life=maxLife
+}
+
+// ---------------------------------------------------------------------------
+// Spark particle — Particle + per-axis velocity (no per-frame heap alloc)
+// ---------------------------------------------------------------------------
+
+interface SparkParticle extends Particle {
+  vx: number;
+  vy: number;
+  vz: number;
+}
+
+// ---------------------------------------------------------------------------
+// Dust puff particle — Particle + start/end scale for expand-and-fade
+// ---------------------------------------------------------------------------
+
+interface DustParticle extends Particle {
+  startScale: number;
+  endScale:   number;
 }
 
 // ---------------------------------------------------------------------------
@@ -110,6 +142,14 @@ export class Effects {
   // Dynamic flash-light pool — created ONCE, NEVER added/removed at runtime.
   private _flashLights: FlashLight[] = [];
   private _flashLightIdx = 0;
+
+  // Impact spark pool — additive tiny boxes, world hits only.
+  private _sparks: SparkParticle[] = [];
+  private _sparkIdx = 0;
+
+  // Dust puff pool — additive quads that expand and fade, world hits only.
+  private _dust: DustParticle[] = [];
+  private _dustIdx = 0;
 
   constructor(scene: THREE.Scene) {
     this._scene = scene;
@@ -204,6 +244,45 @@ export class Effects {
       this._scene.add(light);
       this._flashLights.push({ light, life: 0, maxLife: 1, peak: 0 });
     }
+
+    // --- Impact sparks (world hits only) ---
+    // Tiny bright boxes with additive blending so bloom catches them.
+    const sparkGeo = new THREE.BoxGeometry(0.022, 0.022, 0.022);
+    const sparkMat = new THREE.MeshBasicMaterial({
+      color: SPARK_COLOR,
+      transparent: true,
+      depthWrite: false,
+      blending: THREE.AdditiveBlending,
+    });
+    for (let i = 0; i < POOL_SPARKS; i++) {
+      const mesh = new THREE.Mesh(sparkGeo, sparkMat.clone());
+      mesh.visible = false;
+      this._scene.add(mesh);
+      this._sparks.push({ mesh, life: -1, maxLife: SPARK_LIFE_MAX, vx: 0, vy: 0, vz: 0 });
+    }
+
+    // --- Dust puffs (world hits only) ---
+    // Additive grey-tan quads that expand and fade; positioned along the hit normal.
+    const dustGeo = new THREE.PlaneGeometry(1, 1); // scaled per-puff
+    const dustMat = new THREE.MeshBasicMaterial({
+      color: DUST_COLOR,
+      transparent: true,
+      depthWrite: false,
+      blending: THREE.AdditiveBlending,
+      side: THREE.DoubleSide,
+    });
+    for (let i = 0; i < POOL_DUST; i++) {
+      const mesh = new THREE.Mesh(dustGeo, dustMat.clone());
+      mesh.visible = false;
+      this._scene.add(mesh);
+      this._dust.push({
+        mesh,
+        life:       -1,
+        maxLife:    DUST_LIFE,
+        startScale: DUST_SCALE_START,
+        endScale:   DUST_SCALE_END,
+      });
+    }
   }
 
   update(dt: number): void {
@@ -214,6 +293,8 @@ export class Effects {
     if (this._expPoolsReady) this._updateExplosionPools(dt);
     if (this._grnPoolsReady) this._updateGrenadePool(dt);
     this._updateFlashLights(dt);
+    this._updateSparks(dt);
+    this._updateDust(dt);
   }
 
   private _updatePool(pool: Particle[], dt: number): void {
@@ -327,6 +408,11 @@ export class Effects {
 
     const m = mesh.material as THREE.MeshBasicMaterial;
     m.opacity = 1;
+
+    if (_surface === 'world') {
+      this._emitSparks(point, normal);
+      this._emitDust(point, normal);
+    }
   }
 
   blood(point: Vec3): void {
@@ -405,6 +491,149 @@ export class Effects {
       mesh.visible = false;
     }
     this._decalIdx = 0;
+  }
+
+  // ---------------------------------------------------------------------------
+  // Impact sparks + dust puff (world hits only, cosmetic, Math.random ok)
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Emit SPARKS_PER_IMPACT spark particles from a world-hit point.
+   * Each spark gets a velocity that is: surface-normal base direction
+   * + random hemisphere spread.  Gravity is integrated in _updateSparks.
+   * No heap allocation: reuses pooled SparkParticle objects.
+   */
+  private _emitSparks(point: Vec3, normal: Vec3): void {
+    // Build two arbitrary tangent vectors from the normal so we can spread
+    // sparks into a hemisphere around it.  Use a stable "up" fallback.
+    const nx = normal.x;
+    const ny = normal.y;
+    const nz = normal.z;
+
+    // Pick a vector not parallel to normal for cross-product.
+    const absDotUp = Math.abs(ny);
+    let tx: number, ty: number, tz: number;
+    if (absDotUp < 0.9) {
+      // cross(normal, worldUp)
+      tx =  nz;
+      ty =  0;
+      tz = -nx;
+    } else {
+      // cross(normal, worldRight)
+      tx =  0;
+      ty = -nz;
+      tz =  ny;
+    }
+    // Normalise tangent.
+    const tlen = Math.sqrt(tx * tx + ty * ty + tz * tz) || 1;
+    tx /= tlen; ty /= tlen; tz /= tlen;
+
+    // Bitangent = cross(normal, tangent).
+    const bx = ny * tz - nz * ty;
+    const by = nz * tx - nx * tz;
+    const bz = nx * ty - ny * tx;
+
+    for (let i = 0; i < SPARKS_PER_IMPACT; i++) {
+      const sp = this._sparks[this._sparkIdx % POOL_SPARKS];
+      this._sparkIdx = (this._sparkIdx + 1) % POOL_SPARKS;
+
+      // Random direction in the outward hemisphere: normal + spread.
+      const spreadAngle = Math.random() * Math.PI * 2;
+      const spreadRadius = Math.random() * 0.85; // 0..0.85 controls cone width
+      const dirX = nx + (Math.cos(spreadAngle) * tx + Math.sin(spreadAngle) * bx) * spreadRadius;
+      const dirY = ny + (Math.cos(spreadAngle) * ty + Math.sin(spreadAngle) * by) * spreadRadius;
+      const dirZ = nz + (Math.cos(spreadAngle) * tz + Math.sin(spreadAngle) * bz) * spreadRadius;
+      const dlen = Math.sqrt(dirX * dirX + dirY * dirY + dirZ * dirZ) || 1;
+
+      const speed = SPARK_SPEED_MIN + Math.random() * (SPARK_SPEED_MAX - SPARK_SPEED_MIN);
+      sp.vx = (dirX / dlen) * speed;
+      sp.vy = (dirY / dlen) * speed;
+      sp.vz = (dirZ / dlen) * speed;
+
+      const life = SPARK_LIFE_MIN + Math.random() * (SPARK_LIFE_MAX - SPARK_LIFE_MIN);
+      sp.life    = life;
+      sp.maxLife = life;
+
+      // Spawn at impact point (offset 1 cm along normal to avoid z-fight).
+      sp.mesh.position.set(
+        point.x + nx * 0.01,
+        point.y + ny * 0.01,
+        point.z + nz * 0.01,
+      );
+      sp.mesh.scale.set(1, 1, 1);
+      sp.mesh.visible = true;
+      (sp.mesh.material as THREE.MeshBasicMaterial).opacity = 1;
+    }
+  }
+
+  /**
+   * Emit a single dust puff at the impact point, offset along the normal,
+   * facing the normal direction.  Expands and fades over DUST_LIFE seconds.
+   * No heap allocation: reuses pooled DustParticle objects.
+   */
+  private _emitDust(point: Vec3, normal: Vec3): void {
+    const dp = this._dust[this._dustIdx % POOL_DUST];
+    this._dustIdx = (this._dustIdx + 1) % POOL_DUST;
+
+    dp.life    = DUST_LIFE;
+    dp.maxLife = DUST_LIFE;
+
+    // Place slightly off the surface along the normal.
+    dp.mesh.position.set(
+      point.x + normal.x * 0.04,
+      point.y + normal.y * 0.04,
+      point.z + normal.z * 0.04,
+    );
+    // Orient the quad to face along the normal (billboard toward the hit surface).
+    dp.mesh.lookAt(
+      point.x + normal.x,
+      point.y + normal.y,
+      point.z + normal.z,
+    );
+    dp.mesh.scale.set(DUST_SCALE_START, DUST_SCALE_START, 1);
+    dp.mesh.visible = true;
+    (dp.mesh.material as THREE.MeshBasicMaterial).opacity = 0.55;
+  }
+
+  /** Integrate spark velocities + gravity, fade opacity over life. */
+  private _updateSparks(dt: number): void {
+    for (const sp of this._sparks) {
+      if (sp.life < 0) continue;
+      sp.life -= dt;
+      if (sp.life <= 0) {
+        sp.life = -1;
+        sp.mesh.visible = false;
+        continue;
+      }
+      // Integrate velocity (gravity in -Y).
+      sp.vy -= SPARK_GRAVITY * dt;
+      sp.mesh.position.x += sp.vx * dt;
+      sp.mesh.position.y += sp.vy * dt;
+      sp.mesh.position.z += sp.vz * dt;
+
+      // Fade to transparent; clamp to [0,1].
+      const t = sp.life / sp.maxLife; // 1→0
+      (sp.mesh.material as THREE.MeshBasicMaterial).opacity = t;
+    }
+  }
+
+  /** Expand and fade dust puffs over their lifetime. */
+  private _updateDust(dt: number): void {
+    for (const dp of this._dust) {
+      if (dp.life < 0) continue;
+      dp.life -= dt;
+      if (dp.life <= 0) {
+        dp.life = -1;
+        dp.mesh.visible = false;
+        continue;
+      }
+      const t = dp.life / dp.maxLife; // 1→0; we want scale to grow as t falls
+      const s = dp.startScale + (dp.endScale - dp.startScale) * (1 - t);
+      dp.mesh.scale.set(s, s, 1);
+      // Opacity fades but also eases-in at the start to avoid a harsh pop.
+      const opacity = t * t * 0.55; // quadratic fade-out
+      (dp.mesh.material as THREE.MeshBasicMaterial).opacity = opacity;
+    }
   }
 
   // ---------------------------------------------------------------------------
