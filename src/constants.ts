@@ -1071,6 +1071,30 @@ export const RULES = {
   HEAD_ARMOR_NEEDS_HELMET: true,
 };
 
+/**
+ * Post-processing / render-quality config (RENDER-ONLY — never read by the sim).
+ * Consumed by src/postfx.ts. `?postfx=0` overrides `postFxDefault` at boot.
+ *
+ * exposure ~1.0 keeps the existing builder lighting (Hemisphere 0.9 + sun 1.4)
+ * looking correct under ACES filmic tonemapping — higher washes out the sand,
+ * lower goes muddy. bloom.threshold is kept HIGH so only genuine highlights
+ * (muzzle flash, specular, sky disc) glow rather than the bright sandy ground.
+ */
+export const GRAPHICS = {
+  /** Enable post-processing by default (overridable with ?postfx=0). */
+  postFxDefault: true,
+  /** ACES filmic tonemapping exposure (renderer.toneMappingExposure). */
+  exposure: 1.0,
+  bloom: {
+    /** Overall glow intensity. */
+    strength: 0.6,
+    /** Glow spread radius. */
+    radius: 0.4,
+    /** Luminance threshold above which pixels bloom (high = only real highlights). */
+    threshold: 0.85,
+  },
+};
+
 export const TEAM_COLORS: Record<Team, number> = {
   CT: 0x4f7cc9,
   T: 0xc9a23f,

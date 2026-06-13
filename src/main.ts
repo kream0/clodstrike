@@ -1,7 +1,7 @@
 import * as THREE from 'three';
 import type { Combatant, Inventory, WeaponDef, WeaponState } from './types';
 import type { Team } from './types';
-import { WEAPONS, MOVEMENT, ECONOMY } from './constants';
+import { WEAPONS, MOVEMENT, ECONOMY, GRAPHICS } from './constants';
 import { DUST2 } from './maps/dust2';
 import { DUST2_POINTS, DUST2_OPENINGS, DUST2_REGIONS } from './maps/dust2_truth';
 import type { Landmark } from './maps/dust2_truth';
@@ -39,6 +39,7 @@ import { makeMatchSeed } from './rng';
 import { ReplayRecorder, ReplayCursor } from './replay';
 import type { ReplayTickInput, ReplayLog } from './replay';
 import { RankStore } from './ranking';
+import { PostFX } from './postfx';
 
 // ---------------------------------------------------------------------------
 // Game-time clock (seconds) — advanced by fixed-step simulation.
@@ -708,6 +709,12 @@ async function boot(): Promise<void> {
   camera.rotation.order = 'YXZ';
   scene.add(camera);
 
+  // --- Post-processing (RENDER-ONLY: ACES tonemap + bloom + FXAA) ---
+  // Falls back to direct renderer.render() if construction fails (postfx.ok=false)
+  // or if disabled via ?postfx=0. Never affects sim/RNG/clock.
+  const postfx = new PostFX(renderer, scene, camera);
+  const postFxEnabled = _urlParams.get('postfx') !== '0' && GRAPHICS.postFxDefault;
+
   // --- Input ---
   const input = new Input(renderer.domElement);
 
@@ -1321,6 +1328,7 @@ async function boot(): Promise<void> {
     camera.updateProjectionMatrix();
     renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1.5));
     renderer.setSize(window.innerWidth, window.innerHeight);
+    postfx.setSize(window.innerWidth, window.innerHeight);
   });
 
   // ---------------------------------------------------------------------------
@@ -1655,7 +1663,7 @@ async function boot(): Promise<void> {
       camera.position.set(player.pos.x, eyeY, player.pos.z);
       camera.rotation.set(player.pitch, player.yaw, 0, 'YXZ');
 
-      renderer.render(scene, camera);
+      if (postfx.ok && postFxEnabled) postfx.render(); else renderer.render(scene, camera);
       input.endFrame();
       return; // Skip live-play logic below.
     }
@@ -2068,7 +2076,7 @@ async function boot(): Promise<void> {
       scoped,
     });
 
-    renderer.render(scene, camera);
+    if (postfx.ok && postFxEnabled) postfx.render(); else renderer.render(scene, camera);
 
     // --- Debug readout (read renderer.info AFTER render so counts are current) ---
     if (debugVisible && debugTimer >= 0.25) {
