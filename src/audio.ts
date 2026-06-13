@@ -27,11 +27,51 @@ const WEAPON_TONES: Record<string, WeaponTone> = {
   knife:  { bpFreq: 2400, lpFreq: 5000, duration: 0.08, subFreq: 0,   gain: 0.4 },
 };
 
+// ---------------------------------------------------------------------------
+// Reverb / spatial-depth tuning constants (kept local — don't export)
+// ---------------------------------------------------------------------------
+
+/** Wet level sent to the reverb bus from positional sounds (neutral baseline). */
+const REVERB_WET_BASE  = 0.18;
+
+/** Distance (metres) at which LP cutoff is fully open (~16 kHz). */
+const DIST_NEAR        = 6;
+/** Distance (metres) at which LP cutoff is at its floor. */
+const DIST_FAR         = 90;
+/** LP cutoff (Hz) for a sound at or beyond DIST_FAR. */
+const DIST_CUTOFF_FLOOR = 900;
+/** LP cutoff (Hz) for a sound at or below DIST_NEAR. */
+const DIST_CUTOFF_OPEN  = 16000;
+
+// ---------------------------------------------------------------------------
+// Helper: map distance → lowpass cutoff
+// ---------------------------------------------------------------------------
+function distanceCutoff(dist: number): number {
+  if (dist <= DIST_NEAR)  return DIST_CUTOFF_OPEN;
+  if (dist >= DIST_FAR)   return DIST_CUTOFF_FLOOR;
+  // Exponential falloff between near and far.
+  const t = (dist - DIST_NEAR) / (DIST_FAR - DIST_NEAR); // 0..1
+  return DIST_CUTOFF_OPEN * Math.pow(DIST_CUTOFF_FLOOR / DIST_CUTOFF_OPEN, t);
+}
+
 export class GameAudio {
   private _ctx: AudioCtxType | null = null;
   private _master: GainNode | null  = null;
   private _masterVol = 0.35;
   private _unlocked  = false;
+
+  // Reverb bus (built lazily in unlock())
+  private _reverbSend: GainNode | null    = null;
+  private _convolver: ConvolverNode | null = null;
+
+  // Cached listener position for distance LP (updated every frame by updateListener).
+  // null until the first updateListener — distance LP stays fully open meanwhile.
+  private _listenerPos: { x: number; y: number; z: number } | null = null;
+
+  // Pre-allocated scratch vectors for updateListener (no per-frame allocation).
+  private readonly _scratchPos = new THREE.Vector3();
+  private readonly _scratchFwd = new THREE.Vector3();
+  private readonly _scratchUp  = new THREE.Vector3();
 
   // ---------------------------------------------------------------------------
   // Lifecycle
@@ -50,8 +90,60 @@ export class GameAudio {
         void ctx.resume();
       }
       this._unlocked = true;
+
+      // Build the reverb bus OFF the pointer-lock gesture handler: the IR fill
+      // loop can exceed the synchronous gesture budget on exotic high-sample-rate
+      // devices and break pointer-lock. The ctx is already created/resumed here,
+      // so building the bus async is safe — `_reverbSend` stays null until ready
+      // and positional sounds fall back to dry cleanly in the meantime.
+      setTimeout(() => this._buildReverb(ctx, master), 0);
     } catch {
       // WebAudio not available (e.g. test environment) — silently no-op.
+    }
+  }
+
+  /**
+   * Create convolver + reverb send, synthesize an impulse response, wire up.
+   * Wrapped in try/catch so any failure leaves audio working DRY.
+   */
+  private _buildReverb(ctx: AudioCtxType, master: GainNode): void {
+    try {
+      const sr      = ctx.sampleRate;
+      const irLen   = Math.ceil(sr * 1.3);   // ~1.3 s impulse response
+      const ir      = ctx.createBuffer(2, irLen, sr);
+      const decayExp = 3.0;
+
+      for (let ch = 0; ch < 2; ch++) {
+        const data = ir.getChannelData(ch);
+        let prev = 0;
+        for (let i = 0; i < irLen; i++) {
+          const envelope = Math.pow(1 - i / irLen, decayExp);
+          // White noise sample.
+          const raw = (Math.random() * 2 - 1) * envelope;
+          // One-pole lowpass blend to darken the tail (α = 0.25 → each sample
+          // is 75% current + 25% previous, softening harsh HF content).
+          const smoothed = raw * 0.75 + prev * 0.25;
+          data[i] = smoothed;
+          prev = smoothed;
+        }
+      }
+
+      const convolver = ctx.createConvolver();
+      convolver.buffer = ir;
+
+      // Reverb send gain = global wet level.
+      const reverbSend = ctx.createGain();
+      reverbSend.gain.value = REVERB_WET_BASE;
+
+      reverbSend.connect(convolver);
+      convolver.connect(master);
+
+      this._convolver  = convolver;
+      this._reverbSend = reverbSend;
+    } catch {
+      // Reverb unavailable — fall back to DRY (no-op).
+      this._reverbSend = null;
+      this._convolver  = null;
     }
   }
 
@@ -63,10 +155,19 @@ export class GameAudio {
   updateListener(camera: THREE.Camera): void {
     if (!this._ctx || !this._unlocked) return;
     const listener = this._ctx.listener;
-    const pos = new THREE.Vector3();
+    const pos = this._scratchPos;
     camera.getWorldPosition(pos);
-    const fwd = new THREE.Vector3(0, 0, -1).applyQuaternion(camera.quaternion);
-    const up  = new THREE.Vector3(0, 1,  0).applyQuaternion(camera.quaternion);
+    const fwd = this._scratchFwd.set(0, 0, -1).applyQuaternion(camera.quaternion);
+    const up  = this._scratchUp.set(0, 1,  0).applyQuaternion(camera.quaternion);
+
+    // Cache listener world position for distance-based LP in positional sounds.
+    if (this._listenerPos) {
+      this._listenerPos.x = pos.x;
+      this._listenerPos.y = pos.y;
+      this._listenerPos.z = pos.z;
+    } else {
+      this._listenerPos = { x: pos.x, y: pos.y, z: pos.z };
+    }
 
     if (listener.positionX !== undefined) {
       listener.positionX.setValueAtTime(pos.x, this._ctx.currentTime);
@@ -85,6 +186,80 @@ export class GameAudio {
   }
 
   // ---------------------------------------------------------------------------
+  // Internal: attach a positional panner (with reverb send + distance LP)
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Given a terminal node in a chain that should be spatialized, appends:
+   *   terminalNode → panner → master
+   *   panner → (reverbScaled) → reverbSend   [if reverb available]
+   * Also sets `distLp.frequency` to the distance-based cutoff if provided.
+   *
+   * @param ctx         AudioContext
+   * @param terminal    Last AudioNode in the dry chain (e.g. the gain/lp node)
+   * @param pos         World position of the sound
+   * @param pannerCfg   distanceModel / refDistance / maxDistance / rolloffFactor
+   * @param reverbMul   Multiplier on the reverb send (0 = no reverb, 1 = full)
+   * @param distLp      Optional existing lowpass node whose frequency to override
+   */
+  private _attachPanner(
+    ctx: AudioCtxType,
+    terminal: AudioNode,
+    pos: Vec3,
+    pannerCfg: { distanceModel: DistanceModelType; refDistance: number; maxDistance: number; rolloffFactor?: number },
+    reverbMul: number,
+    distLp?: BiquadFilterNode,
+  ): PannerNode {
+    const now = ctx.currentTime;
+
+    // Distance-based LP cutoff. Only apply the override once we have a real
+    // listener position; before the first updateListener leave the cutoff fully
+    // OPEN (its default) rather than risk muffling a sound placed far from origin.
+    const lp = this._listenerPos;
+    if (distLp && lp) {
+      const dx = pos.x - lp.x;
+      const dy = pos.y - lp.y;
+      const dz = pos.z - lp.z;
+      const dist = Math.sqrt(dx * dx + dy * dy + dz * dz);
+      distLp.frequency.setValueAtTime(distanceCutoff(dist), now);
+    }
+
+    const panner = ctx.createPanner();
+    panner.panningModel  = 'HRTF';
+    panner.distanceModel = pannerCfg.distanceModel;
+    panner.refDistance   = pannerCfg.refDistance;
+    panner.maxDistance   = pannerCfg.maxDistance;
+    panner.rolloffFactor = pannerCfg.rolloffFactor ?? 1;
+    panner.positionX.setValueAtTime(pos.x, now);
+    panner.positionY.setValueAtTime(pos.y, now);
+    panner.positionZ.setValueAtTime(pos.z, now);
+
+    const master = this._master!; // caller already checked master != null
+    terminal.connect(panner);
+    panner.connect(master);
+
+    // Route to reverb send when available and reverbMul > 0.
+    const reverbSend = this._reverbSend;
+    if (reverbSend && reverbMul > 0) {
+      if (reverbMul === 1) {
+        panner.connect(reverbSend);
+      } else {
+        // Scale the wet contribution per-sound without touching the global send gain.
+        // Clamp to ≤ 1.0: a >1 send (explosion 1.3, heBoom 1.2) can clip the
+        // convolver bus at point-blank range on some browsers. The "explosions
+        // sound wetter" effect comes from their larger signal amplitude into the
+        // bus, not from a >1 send — so this is purely a safety clamp.
+        const wetScale = ctx.createGain();
+        wetScale.gain.value = Math.min(reverbMul, 1.0);
+        panner.connect(wetScale);
+        wetScale.connect(reverbSend);
+      }
+    }
+
+    return panner;
+  }
+
+  // ---------------------------------------------------------------------------
   // Noise burst synthesis
   // ---------------------------------------------------------------------------
 
@@ -94,6 +269,7 @@ export class GameAudio {
     lpFreq: number,
     gainVal: number,
     pos?: Vec3,
+    reverbMul = 1.0,
   ): void {
     const ctx = this._ctx;
     const master = this._master;
@@ -125,18 +301,12 @@ export class GameAudio {
     bp.connect(lp);
 
     if (pos) {
-      const panner = ctx.createPanner();
-      panner.panningModel    = 'HRTF';
-      panner.distanceModel   = 'inverse';
-      panner.refDistance     = 6;
-      panner.maxDistance     = 90;
-      panner.rolloffFactor   = 1;
-      panner.positionX.setValueAtTime(pos.x, now);
-      panner.positionY.setValueAtTime(pos.y, now);
-      panner.positionZ.setValueAtTime(pos.z, now);
       lp.connect(gain);
-      gain.connect(panner);
-      panner.connect(master);
+      this._attachPanner(ctx, gain, pos,
+        { distanceModel: 'inverse', refDistance: 6, maxDistance: 90 },
+        reverbMul,
+        lp,  // pass the lp so its cutoff gets set from distance
+      );
     } else {
       lp.connect(gain);
       gain.connect(master);
@@ -201,7 +371,8 @@ export class GameAudio {
 
   gunshot(weaponId: string, pos?: Vec3): void {
     const tone = WEAPON_TONES[weaponId] ?? WEAPON_TONES['usp'];
-    this._noise(tone.duration, tone.bpFreq, tone.lpFreq, tone.gain, pos);
+    // Gunshots are loud — full reverb (mul=1.0).
+    this._noise(tone.duration, tone.bpFreq, tone.lpFreq, tone.gain, pos, 1.0);
 
     if (tone.subFreq > 0) {
       this._tone(tone.subFreq, tone.duration * 0.6, 0.25);
@@ -248,20 +419,16 @@ export class GameAudio {
     gain.gain.exponentialRampToValueAtTime(0.001, now + 0.06);
 
     src.connect(lp);
+    lp.connect(gain);
 
     if (pos) {
-      const panner = ctx.createPanner();
-      panner.distanceModel = 'inverse';
-      panner.refDistance   = 4;
-      panner.maxDistance   = 30;
-      panner.positionX.setValueAtTime(pos.x, now);
-      panner.positionY.setValueAtTime(pos.y, now);
-      panner.positionZ.setValueAtTime(pos.z, now);
-      lp.connect(gain);
-      gain.connect(panner);
-      panner.connect(master);
+      // Footsteps: subtle reverb (mul=0.45), distance LP overrides the existing lp.
+      this._attachPanner(ctx, gain, pos,
+        { distanceModel: 'inverse', refDistance: 4, maxDistance: 30 },
+        0.45,
+        lp,
+      );
     } else {
-      lp.connect(gain);
       gain.connect(master);
     }
 
@@ -296,15 +463,12 @@ export class GameAudio {
     lp.connect(gain);
 
     if (pos) {
-      const panner = ctx.createPanner();
-      panner.distanceModel = 'inverse';
-      panner.refDistance   = 5;
-      panner.maxDistance   = 40;
-      panner.positionX.setValueAtTime(pos.x, now);
-      panner.positionY.setValueAtTime(pos.y, now);
-      panner.positionZ.setValueAtTime(pos.z, now);
-      gain.connect(panner);
-      panner.connect(master);
+      // Land thud: moderate reverb (mul=0.6), with distance LP.
+      this._attachPanner(ctx, gain, pos,
+        { distanceModel: 'inverse', refDistance: 5, maxDistance: 40 },
+        0.6,
+        lp,
+      );
     } else {
       gain.connect(master);
     }
@@ -336,16 +500,18 @@ export class GameAudio {
     osc.connect(gain);
 
     if (pos) {
-      const panner = ctx.createPanner();
-      panner.panningModel  = 'HRTF';
-      panner.distanceModel = 'inverse';
-      panner.refDistance   = 8;
-      panner.maxDistance   = 80;
-      panner.positionX.setValueAtTime(pos.x, now);
-      panner.positionY.setValueAtTime(pos.y, now);
-      panner.positionZ.setValueAtTime(pos.z, now);
-      gain.connect(panner);
-      panner.connect(master);
+      // Bomb beep: subtle reverb (mul=0.5). Add distance LP via a fresh filter.
+      const distLp = ctx.createBiquadFilter();
+      distLp.type = 'lowpass';
+      // Default open; _attachPanner will override from distance.
+      distLp.frequency.value = DIST_CUTOFF_OPEN;
+
+      gain.connect(distLp);
+      this._attachPanner(ctx, distLp, pos,
+        { distanceModel: 'inverse', refDistance: 8, maxDistance: 80 },
+        0.5,
+        distLp,
+      );
     } else {
       gain.connect(master);
     }
@@ -429,22 +595,19 @@ export class GameAudio {
     lp.connect(gain);
 
     if (pos) {
-      const panner = ctx.createPanner();
-      panner.distanceModel = 'inverse';
-      panner.refDistance   = 20;
-      panner.maxDistance   = 200;
-      panner.positionX.setValueAtTime(pos.x, now);
-      panner.positionY.setValueAtTime(pos.y, now);
-      panner.positionZ.setValueAtTime(pos.z, now);
-      gain.connect(panner);
-      panner.connect(master);
+      // Explosions: high reverb (mul=1.3 — the biggest impact sounds get most space).
+      this._attachPanner(ctx, gain, pos,
+        { distanceModel: 'inverse', refDistance: 20, maxDistance: 200 },
+        1.3,
+        lp,
+      );
     } else {
       gain.connect(master);
     }
     src.start(now);
     src.stop(now + dur + 0.05);
 
-    // Sub-sine drop.
+    // Sub-sine drop — dry, non-positional.
     const sub = ctx.createOscillator();
     sub.type = 'sine';
     sub.frequency.setValueAtTime(90, now);
@@ -514,7 +677,7 @@ export class GameAudio {
 
     src.connect(lp);
     lp.connect(gain);
-    gain.connect(master);
+    gain.connect(master);  // DRY — UI sound, no reverb
     src.start(now);
     src.stop(now + 0.1);
   }
@@ -556,25 +719,26 @@ export class GameAudio {
     hp.type            = 'highpass';
     hp.frequency.value = 1400;
 
+    // Distance LP on the output of the hp chain.
+    const distLp = ctx.createBiquadFilter();
+    distLp.type            = 'lowpass';
+    distLp.frequency.value = DIST_CUTOFF_OPEN;
+
     const gain = ctx.createGain();
     gain.gain.setValueAtTime(vol, now);
     gain.gain.exponentialRampToValueAtTime(0.001, now + dur);
 
     src.connect(bp);
     bp.connect(hp);
+    hp.connect(distLp);
+    distLp.connect(gain);
 
-    const panner = ctx.createPanner();
-    panner.panningModel  = 'HRTF';
-    panner.distanceModel = 'inverse';
-    panner.refDistance   = 5;
-    panner.maxDistance   = 40;
-    panner.positionX.setValueAtTime(pos.x, now);
-    panner.positionY.setValueAtTime(pos.y, now);
-    panner.positionZ.setValueAtTime(pos.z, now);
-
-    hp.connect(gain);
-    gain.connect(panner);
-    panner.connect(master);
+    // Grenade bounce: light reverb (mul=0.55) — small metallic tick.
+    this._attachPanner(ctx, gain, pos,
+      { distanceModel: 'inverse', refDistance: 5, maxDistance: 40 },
+      0.55,
+      distLp,
+    );
     src.start(now);
     src.stop(now + dur + 0.02);
   }
@@ -616,7 +780,7 @@ export class GameAudio {
     src.connect(bp);
     bp.connect(lp);
     lp.connect(gain);
-    gain.connect(master);
+    gain.connect(master);  // DRY — player-local action sound
     src.start(now);
     src.stop(now + dur + 0.02);
   }
@@ -652,19 +816,16 @@ export class GameAudio {
     src.connect(lp);
     lp.connect(gain);
 
-    const panner = ctx.createPanner();
-    panner.distanceModel = 'inverse';
-    panner.refDistance   = 12;
-    panner.maxDistance   = 120;
-    panner.positionX.setValueAtTime(pos.x, now);
-    panner.positionY.setValueAtTime(pos.y, now);
-    panner.positionZ.setValueAtTime(pos.z, now);
-    gain.connect(panner);
-    panner.connect(master);
+    // HE boom: high reverb (mul=1.2) — impactful explosion.
+    this._attachPanner(ctx, gain, pos,
+      { distanceModel: 'inverse', refDistance: 12, maxDistance: 120 },
+      1.2,
+      lp,
+    );
     src.start(now);
     src.stop(now + dur + 0.05);
 
-    // Sub-sine drop — lighter than bomb.
+    // Sub-sine drop — lighter than bomb, stays dry.
     const sub = ctx.createOscillator();
     sub.type = 'sine';
     sub.frequency.setValueAtTime(70, now);
@@ -713,16 +874,12 @@ export class GameAudio {
     hp.connect(lp);
     lp.connect(gain);
 
-    const panner = ctx.createPanner();
-    panner.panningModel  = 'HRTF';
-    panner.distanceModel = 'inverse';
-    panner.refDistance   = 8;
-    panner.maxDistance   = 60;
-    panner.positionX.setValueAtTime(pos.x, now);
-    panner.positionY.setValueAtTime(pos.y, now);
-    panner.positionZ.setValueAtTime(pos.z, now);
-    gain.connect(panner);
-    panner.connect(master);
+    // Flash pop: moderate reverb (mul=0.9) — crisp crack with some space.
+    this._attachPanner(ctx, gain, pos,
+      { distanceModel: 'inverse', refDistance: 8, maxDistance: 60 },
+      0.9,
+      lp,
+    );
     src.start(now);
     src.stop(now + dur + 0.02);
   }
@@ -811,15 +968,12 @@ export class GameAudio {
     bp.connect(lp);
     lp.connect(gain);
 
-    const panner = ctx.createPanner();
-    panner.distanceModel = 'inverse';
-    panner.refDistance   = 6;
-    panner.maxDistance   = 50;
-    panner.positionX.setValueAtTime(pos.x, now);
-    panner.positionY.setValueAtTime(pos.y, now);
-    panner.positionZ.setValueAtTime(pos.z, now);
-    gain.connect(panner);
-    panner.connect(master);
+    // Smoke pop: light reverb (mul=0.6) — soft hiss stays subtle.
+    this._attachPanner(ctx, gain, pos,
+      { distanceModel: 'inverse', refDistance: 6, maxDistance: 50 },
+      0.6,
+      lp,
+    );
     src.start(now);
     src.stop(now + dur + 0.05);
   }
