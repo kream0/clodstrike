@@ -539,10 +539,111 @@ function manualMerge(geos: THREE.BufferGeometry[]): THREE.BufferGeometry {
   return merged;
 }
 
+// ---------------------------------------------------------------------------
+// Skydome shader — gradient sky with a painted sun disc + glow halo.
+// Rendered BackSide on a large sphere so it sits behind all world geometry.
+// ---------------------------------------------------------------------------
+
+const SKY_VERT = /* glsl */`
+varying vec3 vWorldDir;
+void main() {
+  // Transform vertex to world space and pass normalized direction to fragment.
+  vec4 worldPos = modelMatrix * vec4(position, 1.0);
+  vWorldDir = normalize(worldPos.xyz);
+  // Expand to clip-space, then force z = w. This is the standard skybox/skydome
+  // trick (cf. three.js examples/jsm/objects/Sky.js): it pins the dome to the far
+  // plane AND defeats far-plane clipping, because GPU primitive clipping tests the
+  // shader's OUTPUT gl_Position (z <= w holds by construction). Consequently the
+  // dome radius and the camera position are irrelevant — do NOT "fix" this by
+  // attaching the dome to the camera or shrinking the radius; it is not a bug.
+  gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+  gl_Position.z = gl_Position.w;
+}
+`;
+
+const SKY_FRAG = /* glsl */`
+uniform vec3 uZenith;       // zenith sky colour
+uniform vec3 uHorizon;      // horizon/haze colour (matches scene fog)
+uniform vec3 uSunDir;       // normalised sun direction (world space)
+uniform vec3 uSunColor;     // sun disc + inner halo colour (HDR, > 1 ok)
+uniform vec3 uGlowColor;    // outer glow colour
+varying vec3 vWorldDir;
+
+void main() {
+  vec3 dir = normalize(vWorldDir);
+
+  // --- Gradient (vertical) ---
+  // t = 0 at horizon (dir.y = 0), 1 at zenith (dir.y = 1).
+  // Use a slightly compressed curve so the transition looks natural.
+  float t = clamp(dir.y * 1.8, 0.0, 1.0);
+  float tc = t * t * (3.0 - 2.0 * t); // smoothstep-like S-curve
+  vec3 skyColor = mix(uHorizon, uZenith, tc);
+
+  // --- Sun disc + glow ---
+  float cosAngle = dot(dir, uSunDir);
+  // Inner disc: full brightness within ~0.5 deg half-angle  (cos threshold ~0.9999)
+  float disc     = smoothstep(0.9996, 0.9999, cosAngle);
+  // Soft inner halo: falloff from ~0.5 deg to ~4 deg
+  float halo     = smoothstep(0.993,  0.9996, cosAngle) * (1.0 - disc);
+  // Outer atmospheric glow: very wide falloff (~4 to ~25 deg)
+  float glow     = pow(max(cosAngle, 0.0), 6.0) * (1.0 - disc - halo);
+
+  vec3 sunContrib = uSunColor * (disc + halo * 0.55) + uGlowColor * glow * 0.35;
+
+  // Clamp sun contribution to zero below the horizon so it doesn't light the
+  // lower hemisphere (the sun is above horizon for the dust2 sun position).
+  float aboveHorizon = clamp(dir.y * 10.0, 0.0, 1.0);
+  sunContrib *= aboveHorizon;
+
+  gl_FragColor = vec4(skyColor + sunContrib, 1.0);
+}
+`;
+
+// Precomputed normalised sun direction (matches DirectionalLight position below).
+// sun.position = (40, 70, 30), |v| = sqrt(1600 + 4900 + 900) = sqrt(7400) ≈ 86.02
+// MUST stay in sync with the DirectionalLight.position (40, 70, 30) set in
+// setupEnvironment — if that vector changes, update these three constants so the
+// painted sun disc keeps matching the shadow-casting light direction.
+const _sunLen = Math.sqrt(40 * 40 + 70 * 70 + 30 * 30);
+const SUN_DIR_X = 40 / _sunLen;
+const SUN_DIR_Y = 70 / _sunLen;
+const SUN_DIR_Z = 30 / _sunLen;
+
 export function setupEnvironment(scene: THREE.Scene): void {
-  scene.background = new THREE.Color(0x9fc3e8);
+  // Graceful fallback background colour (horizon haze) — shown if the skydome
+  // shader ever fails to compile or is not yet rendered.
+  scene.background = new THREE.Color(0xcfc1a0);
   scene.fog = new THREE.Fog(0xcfc1a0, 60, 160);
 
+  // --- Skydome ---
+  // Radius 270 m = 0.9 × camera far (300). Static, origin-centred.
+  // BackSide + depthWrite:false + frustumCulled:false so it always renders.
+  const skyGeo = new THREE.SphereGeometry(270, 32, 16);
+  const skyMat = new THREE.ShaderMaterial({
+    vertexShader:   SKY_VERT,
+    fragmentShader: SKY_FRAG,
+    uniforms: {
+      uZenith:   { value: new THREE.Color(0x5a8fc8) },
+      uHorizon:  { value: new THREE.Color(0xcfc1a0) },
+      uSunDir:   { value: new THREE.Vector3(SUN_DIR_X, SUN_DIR_Y, SUN_DIR_Z) },
+      uSunColor: { value: new THREE.Color(2.8, 2.6, 2.0) },  // HDR warm white — blooms
+      uGlowColor:{ value: new THREE.Color(1.2, 1.0, 0.6) },  // warm golden glow
+    },
+    side:        THREE.BackSide,
+    depthWrite:  false,
+    fog:         false,
+  });
+  const skyDome = new THREE.Mesh(skyGeo, skyMat);
+  skyDome.frustumCulled = false;
+  // Draw the dome first; with depthWrite:false + default LessEqualDepth either
+  // order already works, this just makes draw order deterministic and robust
+  // against any future depthFunc change.
+  skyDome.renderOrder    = -1;
+  skyDome.castShadow    = false;
+  skyDome.receiveShadow = false;
+  scene.add(skyDome);
+
+  // --- Lights ---
   const hemi = new THREE.HemisphereLight(0xbdd7f0, 0x8a7a5a, 0.9);
   scene.add(hemi);
 
