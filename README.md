@@ -112,6 +112,7 @@ Validation errors are shown in the menu (first 3 + count of remainder). JSON par
 - **Bullet-impact juice**: world hits throw a burst of additive sparks (which bloom) plus an expanding dust puff, on top of the existing impact mark + decal; body hits keep blood. All pooled, allocation-free in the hot path.
 - **Muzzle flashes & smoke**: every shot — player *and* bots — flashes with a dynamic light that briefly illuminates nearby geometry (enemy fire now visibly lights up tunnels), plus a faint smoke wisp drifting off the muzzle.
 - **Shell-casing ejection**: firing a gun flicks a brass casing out to the right of the muzzle — it tumbles, bounces once off the floor, and fades. Pooled, player-only (no bot clutter), and mirrored in replays.
+- **Grenade flight trails**: thrown grenades leave a short glowing arc, tinted by type (orange HE, white flash, grey smoke), so their path reads at a glance. Pooled and render-only (no effect on the deterministic grenade physics).
 - **Modernized HUD & menus**: translucent glass plates, tabular numerals, sand-gold accent, team-colored scoreplate/scoreboard, killfeed chips, buy-menu cards with keycap badges, segmented difficulty picker, low-health states — all still DOM + injected CSS, no images or fonts.
 - **Full credits**: every asset's source + license in [`assets/LICENSES.md`](./assets/LICENSES.md).
 
