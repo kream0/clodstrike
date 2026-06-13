@@ -1201,7 +1201,7 @@ async function boot(): Promise<void> {
   // --- Bot footstep positional audio ---
   gameEvents.on('footstep', (ev) => {
     if (ev.who !== player) {
-      audio.footstep(ev.who.pos);
+      audio.footstep(ev.who.pos, world.cellAt(ev.who.pos.x, ev.who.pos.z).mat);
     }
   });
 
@@ -1785,7 +1785,7 @@ async function boot(): Promise<void> {
           const stepThreshold = Math.sqrt(player.vel.x ** 2 + player.vel.z ** 2) > 3.5 ? 1.7 : 2.4;
           if (stepAccum >= stepThreshold) {
             stepAccum = 0;
-            audio.footstep();
+            audio.footstep(undefined, world.cellAt(player.pos.x, player.pos.z).mat);
           }
         }
         if (moveEv.landed) {

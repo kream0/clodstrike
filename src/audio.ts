@@ -54,6 +54,36 @@ function distanceCutoff(dist: number): number {
   return DIST_CUTOFF_OPEN * Math.pow(DIST_CUTOFF_FLOOR / DIST_CUTOFF_OPEN, t);
 }
 
+// Per-surface footstep timbre parameters.
+interface FootstepTimbre {
+  /** Lowpass cutoff Hz — controls overall brightness of the step. */
+  lpFreq:   number;
+  /** Peak gain at start of envelope. */
+  gain:     number;
+  /** Decay duration in seconds. */
+  decay:    number;
+  /** Optional tonal component: frequency (Hz) of a sine/triangle blip (0 = none). */
+  toneFreq: number;
+  /** Gain of the tonal component (0 = none). */
+  toneGain: number;
+}
+
+const FOOTSTEP_TIMBRES: Record<string, FootstepTimbre> = {
+  // Soft desert sand — muffled low thud, fast decay, pure noise (no tone).
+  sand:      { lpFreq: 240,  gain: 0.10, decay: 0.055, toneFreq: 0,   toneGain: 0 },
+  sandLight: { lpFreq: 300,  gain: 0.10, decay: 0.055, toneFreq: 0,   toneGain: 0 },
+  // Harder stone surface — snappier, brighter.
+  stone:     { lpFreq: 800,  gain: 0.13, decay: 0.045, toneFreq: 0,   toneGain: 0 },
+  // Concrete floor — mid between sand and stone.
+  floor:     { lpFreq: 500,  gain: 0.12, decay: 0.050, toneFreq: 0,   toneGain: 0 },
+  // Dark tunnel concrete — same as floor (reverb gives it the extra space).
+  dark:      { lpFreq: 500,  gain: 0.12, decay: 0.050, toneFreq: 0,   toneGain: 0 },
+  // Hollow wood — add a low-mid resonance blip.
+  wood:      { lpFreq: 600,  gain: 0.11, decay: 0.060, toneFreq: 180, toneGain: 0.06 },
+  // Metal — bright clang + high detuned partials.
+  metal:     { lpFreq: 3200, gain: 0.09, decay: 0.035, toneFreq: 820, toneGain: 0.07 },
+};
+
 export class GameAudio {
   private _ctx: AudioCtxType | null = null;
   private _master: GainNode | null  = null;
@@ -63,6 +93,16 @@ export class GameAudio {
   // Reverb bus (built lazily in unlock())
   private _reverbSend: GainNode | null    = null;
   private _convolver: ConvolverNode | null = null;
+
+  // Ambient wind bed (created once, deferred after unlock).
+  // _windSrc / _windLfoOsc are intentionally page-lifetime: started once and
+  // never stopped. unlock() is idempotent (`if (this._unlocked) return`) and
+  // _windStarted guards _startWind, so there is no recreate/duplicate path.
+  private _windStarted = false;
+  private _windSrc:     AudioBufferSourceNode | null = null;
+  private _windGain:    GainNode | null              = null;
+  private _windLfoOsc:  OscillatorNode | null        = null;
+  private _windLfoGain: GainNode | null              = null;
 
   // Cached listener position for distance LP (updated every frame by updateListener).
   // null until the first updateListener — distance LP stays fully open meanwhile.
@@ -97,6 +137,8 @@ export class GameAudio {
       // so building the bus async is safe — `_reverbSend` stays null until ready
       // and positional sounds fall back to dry cleanly in the meantime.
       setTimeout(() => this._buildReverb(ctx, master), 0);
+      // Start ambient wind after the gesture handler to keep pointer-lock budget.
+      setTimeout(() => this._startWind(ctx, master), 0);
     } catch {
       // WebAudio not available (e.g. test environment) — silently no-op.
     }
@@ -144,6 +186,73 @@ export class GameAudio {
       // Reverb unavailable — fall back to DRY (no-op).
       this._reverbSend = null;
       this._convolver  = null;
+    }
+  }
+
+  /**
+   * Build and start the ambient desert-wind bed. Called once, deferred after
+   * unlock(). Synthesized looping noise → gentle lowpass → very-low-gain node
+   * → master. An LFO slowly modulates the gain for a subtle swell effect.
+   * Wrapped in try/catch — failure leaves everything else working.
+   */
+  private _startWind(ctx: AudioCtxType, master: GainNode): void {
+    if (this._windStarted) return;  // guard against double-start
+    this._windStarted = true;
+    try {
+      const sr = ctx.sampleRate;
+      // 4-second noise loop buffer — long enough to avoid obvious periodicity.
+      const loopSec = 4;
+      const bufLen  = Math.ceil(sr * loopSec);
+      const buf     = ctx.createBuffer(1, bufLen, sr);
+      const data    = buf.getChannelData(0);
+      // Fill with white noise, apply a simple fade-loop crossfade so the
+      // loop point is seamless (last ~10 ms cross-fades to start).
+      const xfSamples = Math.ceil(sr * 0.01);
+      for (let i = 0; i < bufLen; i++) data[i] = Math.random() * 2 - 1;
+      for (let i = 0; i < xfSamples; i++) {
+        const t = i / xfSamples;
+        data[bufLen - xfSamples + i] = data[bufLen - xfSamples + i] * (1 - t) + data[i] * t;
+      }
+
+      const src = ctx.createBufferSource();
+      src.buffer = buf;
+      src.loop   = true;
+
+      // Gentle lowpass: desert wind is a low rumble/hiss, nothing bright.
+      const lp = ctx.createBiquadFilter();
+      lp.type            = 'lowpass';
+      lp.frequency.value = 550;
+      lp.Q.value         = 0.5;
+
+      // Master wind gain — very subtle bed.
+      const windGain = ctx.createGain();
+      windGain.gain.value = 0.055;
+
+      // Slow LFO (~0.08 Hz = one swell every ~12 s) modulates gain ±0.02 around centre.
+      const lfoOsc  = ctx.createOscillator();
+      lfoOsc.type            = 'sine';
+      lfoOsc.frequency.value = 0.08;
+
+      const lfoGain = ctx.createGain();
+      lfoGain.gain.value = 0.02;
+
+      lfoOsc.connect(lfoGain);
+      lfoGain.connect(windGain.gain);  // AudioParam as connection target
+
+      src.connect(lp);
+      lp.connect(windGain);
+      windGain.connect(master);  // NOT through reverb — ambient, non-positional
+
+      src.start();
+      lfoOsc.start();
+
+      // Store refs to avoid GC / duplicate allocation.
+      this._windSrc     = src;
+      this._windGain    = windGain;
+      this._windLfoOsc  = lfoOsc;
+      this._windLfoGain = lfoGain;
+    } catch {
+      // Wind unavailable — silent fallback, nothing breaks.
     }
   }
 
@@ -396,13 +505,26 @@ export class GameAudio {
     this._tone(1400, 0.03, 0.25);
   }
 
-  footstep(pos?: Vec3): void {
+  /**
+   * Play a footstep sound, optionally spatialized at `pos`.
+   * `surface` is the `CellLegend.mat` string from `world.cellAt(x,z).mat`; when
+   * undefined or unrecognized the generic concrete timbre is used (back-compat).
+   */
+  footstep(pos?: Vec3, surface?: string): void {
     const ctx    = this._ctx;
     const master = this._master;
     if (!ctx || !master || !this._unlocked) return;
 
+    // Resolve per-surface timbre; fall back to generic concrete parameters.
+    // hasOwnProperty (not `in`) so a stray mat like "constructor"/"toString"
+    // can't resolve to a prototype method and break the non-null assertion.
+    const tmb: FootstepTimbre = (surface !== undefined &&
+        Object.prototype.hasOwnProperty.call(FOOTSTEP_TIMBRES, surface))
+      ? FOOTSTEP_TIMBRES[surface]!
+      : { lpFreq: 400, gain: 0.12, decay: 0.06, toneFreq: 0, toneGain: 0 };
+
     const now    = ctx.currentTime;
-    const bufLen = Math.ceil(ctx.sampleRate * 0.06);
+    const bufLen = Math.ceil(ctx.sampleRate * tmb.decay);
     const buffer = ctx.createBuffer(1, bufLen, ctx.sampleRate);
     const data   = buffer.getChannelData(0);
     for (let i = 0; i < bufLen; i++) data[i] = Math.random() * 2 - 1;
@@ -412,18 +534,21 @@ export class GameAudio {
 
     const lp = ctx.createBiquadFilter();
     lp.type            = 'lowpass';
-    lp.frequency.value = 400;
+    lp.frequency.value = tmb.lpFreq;
 
     const gain = ctx.createGain();
-    gain.gain.setValueAtTime(0.12, now);
-    gain.gain.exponentialRampToValueAtTime(0.001, now + 0.06);
+    gain.gain.setValueAtTime(tmb.gain, now);
+    gain.gain.exponentialRampToValueAtTime(0.001, now + tmb.decay);
 
     src.connect(lp);
     lp.connect(gain);
 
+    // When positional, all components of the step (noise burst + tonal partials)
+    // share ONE panner so the whole sound arrives from the same direction.
+    let panner: PannerNode | null = null;
     if (pos) {
       // Footsteps: subtle reverb (mul=0.45), distance LP overrides the existing lp.
-      this._attachPanner(ctx, gain, pos,
+      panner = this._attachPanner(ctx, gain, pos,
         { distanceModel: 'inverse', refDistance: 4, maxDistance: 30 },
         0.45,
         lp,
@@ -433,7 +558,43 @@ export class GameAudio {
     }
 
     src.start(now);
-    src.stop(now + 0.07);
+    src.stop(now + tmb.decay + 0.01);
+
+    // Tonal component for wood (hollow resonance) and metal (ring/clang).
+    // Route each tonal gain node into the shared panner when positional, else to
+    // master — the tonal must come from the same direction as the noise burst.
+    if (tmb.toneFreq > 0 && tmb.toneGain > 0) {
+      const toneDest: AudioNode = panner ?? master;
+
+      const osc = ctx.createOscillator();
+      // Wood gets a low triangle blip; metal gets a sine partial.
+      osc.type            = (surface === 'metal') ? 'sine' : 'triangle';
+      osc.frequency.value = tmb.toneFreq;
+
+      const toneGainNode = ctx.createGain();
+      toneGainNode.gain.setValueAtTime(tmb.toneGain, now);
+      toneGainNode.gain.exponentialRampToValueAtTime(0.001, now + tmb.decay * 1.4);
+
+      osc.connect(toneGainNode);
+      toneGainNode.connect(toneDest);
+      osc.start(now);
+      osc.stop(now + tmb.decay * 1.4 + 0.01);
+
+      // For metal, add a detuned upper partial for the characteristic clang shimmer.
+      if (surface === 'metal') {
+        const osc2 = ctx.createOscillator();
+        osc2.type            = 'sine';
+        osc2.frequency.value = tmb.toneFreq * 1.87;  // inharmonic partial
+
+        const toneGain2 = ctx.createGain();
+        toneGain2.gain.setValueAtTime(tmb.toneGain * 0.5, now);
+        toneGain2.gain.exponentialRampToValueAtTime(0.001, now + tmb.decay * 1.2);
+        osc2.connect(toneGain2);
+        toneGain2.connect(toneDest);
+        osc2.start(now);
+        osc2.stop(now + tmb.decay * 1.2 + 0.01);
+      }
+    }
   }
 
   land(pos?: Vec3): void {
