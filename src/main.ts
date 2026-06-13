@@ -1525,12 +1525,36 @@ async function boot(): Promise<void> {
         : (!edgesConsumed && inp.mousePressed)
     );
 
+    let replayShotResult = null;
     if (playerAlive && !isFreeze) {
-      updateWeapon(player, world, game.combatants, {
+      replayShotResult = updateWeapon(player, world, game.combatants, {
         trigger,
         reloadPressed: reloadEdge,
         scopePressed:  !edgesConsumed && inp.mouse2Pressed,
       }, clock.now, FIXED_DT, game.rng.combat);
+    }
+
+    // Shell-casing for player shot during real-time replay playback only
+    // (skip during fast-forward — replayFfDone is false while FF is in progress).
+    if (replayShotResult !== null && replayFfDone) {
+      const replayActiveWs = player.inventory[player.inventory.activeSlot];
+      const replayDef = replayActiveWs?.def;
+      // Bullet weapons only — `category` is set on pistol/smg/heavy/rifle,
+      // undefined on knife (forward-safe against future melee weapons).
+      if (replayDef && !replayDef.isKnife && replayDef.category !== undefined) {
+        const cy = Math.cos(player.yaw);
+        const sy = Math.sin(player.yaw);
+        const rightX = cy;
+        const rightZ = -sy;
+        const eyeH = player.crouching ? MOVEMENT.EYE_CROUCH : MOVEMENT.EYE_STAND;
+        const casingOrigin = {
+          x: player.pos.x + rightX * 0.25,
+          y: player.pos.y + eyeH - 0.05,
+          z: player.pos.z + rightZ * 0.25,
+        };
+        const casingDir = { x: rightX, y: 0.5, z: rightZ };
+        effects.ejectCasing(casingOrigin, casingDir, player.pos.y);
+      }
     }
 
     game.update(FIXED_DT, clock.now);
@@ -2000,6 +2024,27 @@ async function boot(): Promise<void> {
         effects.muzzleFlash(muzzlePos);
         effects.tracer(muzzlePos, shotResult.endPoint);
         if (def) audio.gunshot(def.id);
+
+        // Shell-casing ejection — bullet weapons only. `category` is set on
+        // pistol/smg/heavy/rifle, undefined on knife (forward-safe against
+        // future melee weapons).
+        if (def && !def.isKnife && def.category !== undefined) {
+          // Right vector from yaw: forward = (-sin(yaw), 0, -cos(yaw)),
+          // right = cross(forward, up) = (cos(yaw), 0, -sin(yaw)).
+          const cy = Math.cos(player.yaw);
+          const sy = Math.sin(player.yaw);
+          const rightX = cy;
+          const rightZ = -sy;
+          // Origin: muzzle position offset 0.1 m to the right.
+          const casingOrigin = {
+            x: muzzlePos.x + rightX * 0.1,
+            y: muzzlePos.y,
+            z: muzzlePos.z + rightZ * 0.1,
+          };
+          // Eject direction: right + upward bias.
+          const casingDir = { x: rightX, y: 0.5, z: rightZ };
+          effects.ejectCasing(casingOrigin, casingDir, player.pos.y);
+        }
 
         if (shotResult.target !== null) {
           effects.blood(shotResult.endPoint);

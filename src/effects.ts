@@ -12,6 +12,7 @@ const FLASH_COLOR   = 0xffffdd;
 const DECAL_COLOR   = 0x331100;
 const SPARK_COLOR   = 0xffd27a;
 const DUST_COLOR    = 0xb8a888;
+const CASING_COLOR  = 0xd8a23a; // warm brass
 
 // ---------------------------------------------------------------------------
 // Dynamic flash light constants (tunable)
@@ -55,6 +56,7 @@ const POOL_FLASH    = 8;
 const POOL_DECALS   = 64;
 const POOL_SPARKS   = 64;   // total spark mesh slots (~8 shots × 8 sparks each)
 const POOL_DUST     = 16;   // one puff per world impact
+const POOL_CASINGS  = 16;   // rolling window — cosmetic only
 
 const TRACER_LIFE   = 0.07;   // seconds
 const IMPACT_LIFE   = 0.25;
@@ -69,6 +71,18 @@ const SPARK_SPEED_MIN = 1.5;  // m/s initial speed
 const SPARK_SPEED_MAX = 4.5;  // m/s initial speed
 const DUST_SCALE_START = 0.08; // world units
 const DUST_SCALE_END   = 0.40; // world units
+
+// Casing ejection constants
+const CASING_GRAVITY    = 9.8;  // m/s² — realistic tumble gravity
+const CASING_LIFE_MIN   = 1.2;  // seconds
+const CASING_LIFE_MAX   = 1.8;  // seconds
+const CASING_SPEED_MIN  = 2.0;  // m/s ejection speed
+const CASING_SPEED_MAX  = 3.5;  // m/s ejection speed
+const CASING_BOUNCE_DY  = 0.4;  // vy damping on floor bounce
+const CASING_BOUNCE_DXZ = 0.5;  // horizontal damping on bounce
+const CASING_SPIN_MIN   = 6;    // rad/s rotation speed minimum
+const CASING_SPIN_MAX   = 18;   // rad/s rotation speed maximum
+const CASING_FADE_START = 0.3;  // seconds before expiry when fade begins
 
 const MIN_TRACER_LEN = 3;     // meters — skip tracers shorter than this
 
@@ -113,6 +127,20 @@ interface DustParticle extends Particle {
 }
 
 // ---------------------------------------------------------------------------
+// Casing particle — Particle + velocity, angular spin, floor Y, bounce flag
+// ---------------------------------------------------------------------------
+
+interface CasingParticle extends Particle {
+  vx:      number;
+  vy:      number;
+  vz:      number;
+  spinX:   number;  // rad/s rotation around local X
+  spinZ:   number;  // rad/s rotation around local Z
+  floorY:  number;
+  bounced: boolean;
+}
+
+// ---------------------------------------------------------------------------
 // Effects
 // ---------------------------------------------------------------------------
 
@@ -150,6 +178,10 @@ export class Effects {
   // Dust puff pool — additive quads that expand and fade, world hits only.
   private _dust: DustParticle[] = [];
   private _dustIdx = 0;
+
+  // Shell-casing pool — cosmetic only, never affects sim.
+  private _casings: CasingParticle[] = [];
+  private _casingIdx = 0;
 
   constructor(scene: THREE.Scene) {
     this._scene = scene;
@@ -283,6 +315,28 @@ export class Effects {
         endScale:   DUST_SCALE_END,
       });
     }
+
+    // --- Shell casings (player gunshot, cosmetic only) ---
+    // Tiny brass cylinder: ~0.02 m radius, 0.045 m tall.
+    const casingGeo = new THREE.CylinderGeometry(0.010, 0.010, 0.045, 6);
+    const casingMat = new THREE.MeshBasicMaterial({
+      color: CASING_COLOR,
+      transparent: true,
+    });
+    for (let i = 0; i < POOL_CASINGS; i++) {
+      const mesh = new THREE.Mesh(casingGeo, casingMat.clone());
+      mesh.visible = false;
+      this._scene.add(mesh);
+      this._casings.push({
+        mesh,
+        life:    -1,
+        maxLife: CASING_LIFE_MAX,
+        vx: 0, vy: 0, vz: 0,
+        spinX: 0, spinZ: 0,
+        floorY:  0,
+        bounced: false,
+      });
+    }
   }
 
   update(dt: number): void {
@@ -295,6 +349,7 @@ export class Effects {
     this._updateFlashLights(dt);
     this._updateSparks(dt);
     this._updateDust(dt);
+    this._updateCasings(dt);
   }
 
   private _updatePool(pool: Particle[], dt: number): void {
@@ -633,6 +688,98 @@ export class Effects {
       // Opacity fades but also eases-in at the start to avoid a harsh pop.
       const opacity = t * t * 0.55; // quadratic fade-out
       (dp.mesh.material as THREE.MeshBasicMaterial).opacity = opacity;
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Shell-casing ejection (cosmetic, player only)
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Eject a brass shell casing to the right of the muzzle.
+   * `origin`   — world-space spawn position (muzzle + right offset).
+   * `ejectDir` — initial velocity direction (player right + slight upward bias).
+   * `floorY`   — world Y of the floor the casing should bounce on / settle onto.
+   * Math.random() is fine here; casings are never in the recorded replay frames.
+   */
+  ejectCasing(origin: Vec3, ejectDir: Vec3, floorY: number): void {
+    const cp = this._casings[this._casingIdx % POOL_CASINGS];
+    this._casingIdx = (this._casingIdx + 1) % POOL_CASINGS;
+
+    const speed = CASING_SPEED_MIN + Math.random() * (CASING_SPEED_MAX - CASING_SPEED_MIN);
+    // Normalise ejectDir (caller may pass an un-normalised sum).
+    const len = Math.sqrt(ejectDir.x * ejectDir.x + ejectDir.y * ejectDir.y + ejectDir.z * ejectDir.z) || 1;
+    // Add small random spread so casings don't stack identically.
+    const spreadScale = 0.15;
+    cp.vx = (ejectDir.x / len + (Math.random() - 0.5) * spreadScale) * speed;
+    cp.vy = (ejectDir.y / len + Math.random() * spreadScale)          * speed; // only upward spread
+    cp.vz = (ejectDir.z / len + (Math.random() - 0.5) * spreadScale) * speed;
+
+    cp.spinX = (Math.random() < 0.5 ? 1 : -1) * (CASING_SPIN_MIN + Math.random() * (CASING_SPIN_MAX - CASING_SPIN_MIN));
+    cp.spinZ = (Math.random() < 0.5 ? 1 : -1) * (CASING_SPIN_MIN + Math.random() * (CASING_SPIN_MAX - CASING_SPIN_MIN));
+    cp.floorY  = floorY;
+    cp.bounced = false;
+
+    const life = CASING_LIFE_MIN + Math.random() * (CASING_LIFE_MAX - CASING_LIFE_MIN);
+    cp.life    = life;
+    cp.maxLife = life;
+
+    cp.mesh.position.set(origin.x, origin.y, origin.z);
+    cp.mesh.rotation.set(Math.random() * Math.PI, Math.random() * Math.PI, Math.random() * Math.PI);
+    cp.mesh.visible = true;
+    (cp.mesh.material as THREE.MeshBasicMaterial).opacity = 1;
+  }
+
+  /** Integrate casing trajectories: gravity, one floor bounce, spin, fade. */
+  private _updateCasings(dt: number): void {
+    for (const cp of this._casings) {
+      if (cp.life < 0) continue;
+      cp.life -= dt;
+      if (cp.life <= 0) {
+        cp.life = -1;
+        cp.mesh.visible = false;
+        continue;
+      }
+
+      // Integrate gravity.
+      cp.vy -= CASING_GRAVITY * dt;
+
+      // Integrate position.
+      cp.mesh.position.x += cp.vx * dt;
+      cp.mesh.position.y += cp.vy * dt;
+      cp.mesh.position.z += cp.vz * dt;
+
+      // Floor collision — one bounce, then settle.
+      const casingFloor = cp.floorY + 0.022; // half casing height
+      if (cp.mesh.position.y < casingFloor && cp.vy < 0) {
+        cp.mesh.position.y = casingFloor;
+        if (!cp.bounced) {
+          // First bounce: reflect vy with damping.
+          cp.vy  = Math.abs(cp.vy) * CASING_BOUNCE_DY;
+          cp.vx *= CASING_BOUNCE_DXZ;
+          cp.vz *= CASING_BOUNCE_DXZ;
+          cp.spinX *= 0.6;
+          cp.spinZ *= 0.6;
+          cp.bounced = true;
+        } else {
+          // Settled: kill vertical, drain horizontal quickly.
+          cp.vy  = 0;
+          cp.vx *= Math.max(0, 1 - dt * 8);
+          cp.vz *= Math.max(0, 1 - dt * 8);
+          cp.spinX *= Math.max(0, 1 - dt * 6);
+          cp.spinZ *= Math.max(0, 1 - dt * 6);
+        }
+      }
+
+      // Angular rotation.
+      cp.mesh.rotation.x += cp.spinX * dt;
+      cp.mesh.rotation.z += cp.spinZ * dt;
+
+      // Fade opacity over the last CASING_FADE_START seconds.
+      if (cp.life < CASING_FADE_START) {
+        const t = cp.life / CASING_FADE_START; // 1→0
+        (cp.mesh.material as THREE.MeshBasicMaterial).opacity = t;
+      }
     }
   }
 
