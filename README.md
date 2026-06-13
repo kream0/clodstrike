@@ -210,6 +210,7 @@ Team-exclusive weapons are enforced at purchase time — a CT can never buy an A
 - **Ambient desert wind**: a faint continuous synthesized wind bed with a slow swell sits under everything for outdoor presence; never masks gunfire.
 - **Spatial reverb**: a master convolver bus fed by a procedurally-synthesized impulse response (no audio files) gives positional SFX a room tail — explosions/gunshots are wettest, footsteps driest, UI sounds stay fully dry. Built off the unlock gesture and degrades to dry if unsupported.
 - **Distance low-pass**: positional sounds are muffled by distance from the listener (near ≈ open, far ≈ 900 Hz) on top of the panner's attenuation, so a gunshot across the map reads as distant.
+- **Wall occlusion**: a line-of-sight check muffles enemy gunfire heard through walls (heavy low-pass + slight attenuation) versus crisp open-sight shots — a tactical cue for whether a shooter has a clear angle on you.
 - **Hit / headshot dings**: separate tones for body-hit confirmation and headshot.
 - **Bomb beeps**: accelerate as the timer counts down toward detonation. Positional — sound is louder near the bomb.
 - **Bomb plant, defuse, explosion** cues; round-end win/loss stings.
