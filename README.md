@@ -114,6 +114,7 @@ Validation errors are shown in the menu (first 3 + count of remainder). JSON par
 - **Shell-casing ejection**: firing a gun flicks a brass casing out to the right of the muzzle — it tumbles, bounces once off the floor, and fades. Pooled, player-only (no bot clutter), and mirrored in replays.
 - **Grenade flight trails**: thrown grenades leave a short glowing arc, tinted by type (orange HE, white flash, grey smoke), so their path reads at a glance. Pooled and render-only (no effect on the deterministic grenade physics).
 - **Modernized HUD & menus**: translucent glass plates, tabular numerals, sand-gold accent, team-colored scoreplate/scoreboard, killfeed chips, buy-menu cards with keycap badges, segmented difficulty picker, low-health states — all still DOM + injected CSS, no images or fonts.
+- **Headshot hitmarker**: the canvas hit-confirmation has four distinct states — body-hit (red), body-kill (gold), headshot-hit (white X + ring), headshot-kill (gold X + white ring) — so headshots read at a glance.
 - **Full credits**: every asset's source + license in [`assets/LICENSES.md`](./assets/LICENSES.md).
 
 ### Movement & gunplay
