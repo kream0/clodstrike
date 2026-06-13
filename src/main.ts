@@ -842,6 +842,12 @@ async function boot(): Promise<void> {
       z: bot.pos.z - cosY * 0.4,
     };
     effects.tracer(muzzle, result.endPoint);
+    // Muzzle flash (sprite + dynamic light + smoke) — skip during replay
+    // fast-forward so the 0.35 s smoke/flash pools aren't flooded with stale
+    // wisps before real-time playback begins. Live play: replayLog === null.
+    if (replayLog === null || replayFfDone) {
+      effects.muzzleFlash(muzzle);
+    }
     if (result.target !== null) {
       effects.blood(result.endPoint);
     } else if (result.surface !== null && result.normal !== null) {

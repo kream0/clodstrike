@@ -72,6 +72,15 @@ const SPARK_SPEED_MAX = 4.5;  // m/s initial speed
 const DUST_SCALE_START = 0.08; // world units
 const DUST_SCALE_END   = 0.40; // world units
 
+// Muzzle smoke — subtle grey wisps, normal alpha (not additive) to read as smoke
+const SMOKE_COLOR       = 0x9a9a96;
+const POOL_SMOKE        = 12;
+const SMOKE_LIFE        = 0.35;  // seconds — short, won't fog sustained auto-fire
+const SMOKE_SCALE_START = 0.06;  // world units at spawn
+const SMOKE_SCALE_END   = 0.35;  // world units at expiry
+const SMOKE_OPACITY_START = 0.35; // low initial alpha — subtle
+const SMOKE_DRIFT_UP    = 0.40;  // m/s upward drift
+
 // Casing ejection constants
 const CASING_GRAVITY    = 9.8;  // m/s² — realistic tumble gravity
 const CASING_LIFE_MIN   = 1.2;  // seconds
@@ -124,6 +133,14 @@ interface SparkParticle extends Particle {
 interface DustParticle extends Particle {
   startScale: number;
   endScale:   number;
+}
+
+// ---------------------------------------------------------------------------
+// Muzzle smoke particle — Particle + upward drift (no heap alloc)
+// ---------------------------------------------------------------------------
+
+interface SmokeParticle extends Particle {
+  vy: number;  // upward drift velocity (m/s), set per-emission
 }
 
 // ---------------------------------------------------------------------------
@@ -182,6 +199,10 @@ export class Effects {
   // Shell-casing pool — cosmetic only, never affects sim.
   private _casings: CasingParticle[] = [];
   private _casingIdx = 0;
+
+  // Muzzle smoke pool — soft grey quads, normal alpha blending.
+  private _smoke: SmokeParticle[] = [];
+  private _smokeIdx = 0;
 
   constructor(scene: THREE.Scene) {
     this._scene = scene;
@@ -316,6 +337,24 @@ export class Effects {
       });
     }
 
+    // --- Muzzle smoke wisps ---
+    // Soft grey quads with normal alpha (not additive) so they read as smoke,
+    // not a glow.  Short life + small pool self-limit fogging during auto-fire.
+    const smokeGeo = new THREE.PlaneGeometry(1, 1); // scaled per-emission
+    const smokeMat = new THREE.MeshBasicMaterial({
+      color:       SMOKE_COLOR,
+      transparent: true,
+      depthWrite:  false,
+      side:        THREE.DoubleSide,
+      // No AdditiveBlending — normal alpha so smoke appears grey, not bright.
+    });
+    for (let i = 0; i < POOL_SMOKE; i++) {
+      const mesh = new THREE.Mesh(smokeGeo, smokeMat.clone());
+      mesh.visible = false;
+      this._scene.add(mesh);
+      this._smoke.push({ mesh, life: -1, maxLife: SMOKE_LIFE, vy: 0 });
+    }
+
     // --- Shell casings (player gunshot, cosmetic only) ---
     // Tiny brass cylinder: ~0.02 m radius, 0.045 m tall.
     const casingGeo = new THREE.CylinderGeometry(0.010, 0.010, 0.045, 6);
@@ -350,6 +389,7 @@ export class Effects {
     this._updateSparks(dt);
     this._updateDust(dt);
     this._updateCasings(dt);
+    this._updateMuzzleSmoke(dt);
   }
 
   private _updatePool(pool: Particle[], dt: number): void {
@@ -517,6 +557,9 @@ export class Effects {
       MUZZLE_LIGHT_DECAY,
       MUZZLE_LIGHT_LIFE,
     );
+
+    // Smoke wisp — internal, cosmetic only.
+    this._emitMuzzleSmoke(worldPos);
   }
 
   addDecal(point: Vec3, normal: Vec3): void {
@@ -688,6 +731,62 @@ export class Effects {
       // Opacity fades but also eases-in at the start to avoid a harsh pop.
       const opacity = t * t * 0.55; // quadratic fade-out
       (dp.mesh.material as THREE.MeshBasicMaterial).opacity = opacity;
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Muzzle smoke (every muzzle flash — player + bots, cosmetic)
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Emit a single smoke wisp at the muzzle position.
+   * Placed at worldPos with a tiny random XZ jitter so repeat shots don't
+   * stack identically.  Starts small and faint; expands + drifts upward +
+   * fades over SMOKE_LIFE seconds.  No heap allocation.
+   */
+  private _emitMuzzleSmoke(worldPos: Vec3): void {
+    const sp = this._smoke[this._smokeIdx % POOL_SMOKE];
+    this._smokeIdx = (this._smokeIdx + 1) % POOL_SMOKE;
+
+    sp.life    = SMOKE_LIFE;
+    sp.maxLife = SMOKE_LIFE;
+    sp.vy      = SMOKE_DRIFT_UP + Math.random() * 0.15; // slight speed variation
+
+    const jx = (Math.random() - 0.5) * 0.06;
+    const jz = (Math.random() - 0.5) * 0.06;
+    sp.mesh.position.set(worldPos.x + jx, worldPos.y, worldPos.z + jz);
+
+    // Random billboard rotation so repeated shots don't overlap identically.
+    sp.mesh.rotation.z = Math.random() * Math.PI * 2;
+
+    sp.mesh.scale.set(SMOKE_SCALE_START, SMOKE_SCALE_START, 1);
+    sp.mesh.visible = true;
+    (sp.mesh.material as THREE.MeshBasicMaterial).opacity = SMOKE_OPACITY_START;
+  }
+
+  /** Expand, drift upward, and fade smoke wisps over their lifetime. */
+  private _updateMuzzleSmoke(dt: number): void {
+    for (const sp of this._smoke) {
+      if (sp.life < 0) continue;
+      sp.life -= dt;
+      if (sp.life <= 0) {
+        sp.life = -1;
+        sp.mesh.visible = false;
+        continue;
+      }
+
+      // t goes 1 → 0 as life drains.
+      const t = sp.life / sp.maxLife;
+
+      // Expand: lerp from start scale to end scale as t decreases.
+      const s = SMOKE_SCALE_START + (SMOKE_SCALE_END - SMOKE_SCALE_START) * (1 - t);
+      sp.mesh.scale.set(s, s, 1);
+
+      // Upward drift: integrate vy.
+      sp.mesh.position.y += sp.vy * dt;
+
+      // Fade: linear, from SMOKE_OPACITY_START to 0.
+      (sp.mesh.material as THREE.MeshBasicMaterial).opacity = SMOKE_OPACITY_START * t;
     }
   }
 
