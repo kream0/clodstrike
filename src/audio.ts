@@ -1076,6 +1076,206 @@ export class GameAudio {
     });
   }
 
+  /**
+   * Weapon deploy / draw foley — played when the player switches weapon slots.
+   * Non-positional (player's own action → straight to master, no panner).
+   * Cosmetic only — Math.random() allowed; zero sim/determinism impact.
+   *
+   * Sound design:
+   *  - All classes: a quick metallic snap (shaped noise) + a short soft whoosh.
+   *  - 'pistol': lighter/higher (brighter HP cutoff, shorter duration).
+   *  - 'rifle' / 'heavy': heavier/lower (deeper LP cutoff, slightly longer duration).
+   *  - 'knife': very light high tick.
+   *  - Default (smg / unknown): mid weight.
+   *
+   * @param weaponClass  WeaponDef.category ('pistol' | 'smg' | 'heavy' | 'rifle')
+   *                     or undefined for the generic deploy sound.
+   */
+  weaponDraw(weaponClass?: string): void {
+    const ctx    = this._ctx;
+    const master = this._master;
+    if (!ctx || !master || !this._unlocked) return;
+
+    const now = ctx.currentTime;
+
+    // Per-class tuning: [snapHpHz, snapLpHz, snapDur, snapGain, whooshBpHz, whooshDur, whooshGain]
+    // snap  = shaped noise burst (the "click/clack" of the weapon coming up)
+    // whoosh = brief filtered noise tail (the "swish" of the weapon moving)
+    let snapHp     = 1600;
+    let snapLp     = 6000;
+    let snapDur    = 0.025;
+    let snapGain   = 0.16;
+    let whooshBp   = 800;
+    let whooshDur  = 0.18;
+    let whooshGain = 0.06;
+
+    switch (weaponClass) {
+      case 'pistol':
+        // Lighter, higher frequency — pistol comes up quick.
+        snapHp     = 2200;
+        snapLp     = 9000;
+        snapDur    = 0.018;
+        snapGain   = 0.12;
+        whooshBp   = 1100;
+        whooshDur  = 0.13;
+        whooshGain = 0.045;
+        break;
+      case 'rifle':
+        // Heavier, mid-low — solid rifle raise.
+        snapHp     = 1100;
+        snapLp     = 4200;
+        snapDur    = 0.032;
+        snapGain   = 0.20;
+        whooshBp   = 600;
+        whooshDur  = 0.22;
+        whooshGain = 0.07;
+        break;
+      case 'heavy':
+        // Deepest / chunkiest — shotgun/machinegun weight.
+        snapHp     = 700;
+        snapLp     = 2800;
+        snapDur    = 0.040;
+        snapGain   = 0.24;
+        whooshBp   = 450;
+        whooshDur  = 0.25;
+        whooshGain = 0.08;
+        break;
+      case 'knife':
+        // Very light high tick.
+        snapHp     = 3000;
+        snapLp     = 12000;
+        snapDur    = 0.012;
+        snapGain   = 0.08;
+        whooshBp   = 1400;
+        whooshDur  = 0.10;
+        whooshGain = 0.03;
+        break;
+      // 'smg' and default: use the baseline values above.
+    }
+
+    // Small random jitter so repeated draws never sound identical.
+    const jitter = () => (Math.random() - 0.5) * 0.008; // ±4 ms
+
+    // --- Metallic snap (noise + HP + LP) ---
+    {
+      const t      = now + jitter();
+      const bufLen = Math.ceil(ctx.sampleRate * snapDur);
+      const buf    = ctx.createBuffer(1, bufLen, ctx.sampleRate);
+      const data   = buf.getChannelData(0);
+      for (let i = 0; i < bufLen; i++) data[i] = Math.random() * 2 - 1;
+
+      const src = ctx.createBufferSource();
+      src.buffer = buf;
+
+      const hp = ctx.createBiquadFilter();
+      hp.type            = 'highpass';
+      hp.frequency.value = snapHp;
+
+      const lp = ctx.createBiquadFilter();
+      lp.type            = 'lowpass';
+      lp.frequency.value = snapLp + Math.random() * snapLp * 0.15;
+
+      const g = ctx.createGain();
+      g.gain.setValueAtTime(snapGain, t);
+      g.gain.exponentialRampToValueAtTime(0.001, t + snapDur);
+
+      src.connect(hp);
+      hp.connect(lp);
+      lp.connect(g);
+      g.connect(master);
+      src.start(t);
+      src.stop(t + snapDur + 0.01);
+    }
+
+    // --- Soft whoosh (bandpass noise, ramp-up/down) ---
+    {
+      const delay  = snapDur * 0.4 + jitter();  // starts slightly after the snap
+      const t      = now + delay;
+      const bufLen = Math.ceil(ctx.sampleRate * whooshDur);
+      const buf    = ctx.createBuffer(1, bufLen, ctx.sampleRate);
+      const data   = buf.getChannelData(0);
+      for (let i = 0; i < bufLen; i++) data[i] = Math.random() * 2 - 1;
+
+      const src = ctx.createBufferSource();
+      src.buffer = buf;
+
+      const bp = ctx.createBiquadFilter();
+      bp.type            = 'bandpass';
+      bp.frequency.value = whooshBp * (0.9 + Math.random() * 0.2);
+      bp.Q.value         = 0.7;
+
+      const lp2 = ctx.createBiquadFilter();
+      lp2.type            = 'lowpass';
+      lp2.frequency.value = whooshBp * 2.2;
+
+      const g = ctx.createGain();
+      const peakAt = t + whooshDur * 0.25;
+      g.gain.setValueAtTime(0.001, t);
+      g.gain.linearRampToValueAtTime(whooshGain, peakAt);
+      g.gain.exponentialRampToValueAtTime(0.001, t + whooshDur);
+
+      src.connect(bp);
+      bp.connect(lp2);
+      lp2.connect(g);
+      g.connect(master);
+      src.start(t);
+      src.stop(t + whooshDur + 0.02);
+    }
+  }
+
+  /**
+   * Scope toggle click — a soft, very short click when scoping in or out.
+   * Non-positional (player-local UI sound → straight to master).
+   * Cosmetic only — Math.random() allowed; zero sim/determinism impact.
+   *
+   * Sound design:
+   *  - scopingIn = true:  slightly higher-pitched, brighter (lens clicking into place).
+   *  - scopingIn = false: lower/duller (lens releasing).
+   *  Both are very quiet (~0.08–0.12 s); subtle enough not to obscure game audio.
+   *
+   * @param scopingIn  true = player just scoped in; false = just un-scoped.
+   */
+  scopeToggle(scopingIn: boolean): void {
+    const ctx    = this._ctx;
+    const master = this._master;
+    if (!ctx || !master || !this._unlocked) return;
+
+    const now = ctx.currentTime;
+    const dur = 0.020 + Math.random() * 0.008; // 20–28 ms
+
+    // Scope in: brighter (HP=2400, LP=8000); scope out: duller (HP=800, LP=3000).
+    const hpFreq   = scopingIn ? 2400 : 800;
+    const lpFreq   = scopingIn ? 8000 : 3000;
+    const gainPeak = scopingIn ? 0.13  : 0.10;
+
+    const bufLen = Math.ceil(ctx.sampleRate * dur);
+    const buf    = ctx.createBuffer(1, bufLen, ctx.sampleRate);
+    const data   = buf.getChannelData(0);
+    for (let i = 0; i < bufLen; i++) data[i] = Math.random() * 2 - 1;
+
+    const src = ctx.createBufferSource();
+    src.buffer = buf;
+
+    const hp = ctx.createBiquadFilter();
+    hp.type            = 'highpass';
+    hp.frequency.value = hpFreq;
+
+    const lp = ctx.createBiquadFilter();
+    lp.type            = 'lowpass';
+    lp.frequency.value = lpFreq;
+
+    const g = ctx.createGain();
+    g.gain.setValueAtTime(gainPeak, now);
+    g.gain.exponentialRampToValueAtTime(0.001, now + dur);
+
+    src.connect(hp);
+    hp.connect(lp);
+    lp.connect(g);
+    g.connect(master);
+    src.start(now);
+    src.stop(now + dur + 0.01);
+  }
+
   /** Quick click for buy success. */
   buyClick(): void {
     this._click(0);

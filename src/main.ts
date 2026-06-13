@@ -923,6 +923,8 @@ async function boot(): Promise<void> {
   let lastMatchOpts: MatchOptions | null = null;
   // Track the previously equipped grenade type to detect changes for viewmodel sync.
   let prevEquippedGrenade: import('./types').GrenadeType | null = null;
+  // Scope-toggle sound: track previous scoped state to fire audio only on transitions.
+  let prevScoped = false;
 
   // --- Render-only landing dip state ---
   // Pure visual camera offset; never read by sim/combat/bots.
@@ -1009,6 +1011,7 @@ async function boot(): Promise<void> {
     botManager.setSmokeQuery((a, b) => grenadeManager.isSegmentSmoked(a, b));
     grenadeManager.reset();
     prevEquippedGrenade = null;
+    prevScoped = false;
     // Clear spectate state on new match.
     spectateTargetId = null;
     deathCamPos      = null;
@@ -1058,6 +1061,7 @@ async function boot(): Promise<void> {
       botManager.setSmokeQuery((a, b) => grenadeManager.isSegmentSmoked(a, b));
       grenadeManager.reset();
       prevEquippedGrenade = null;
+      prevScoped = false;
       // Clear spectate state on restart.
       spectateTargetId = null;
       deathCamPos      = null;
@@ -1810,6 +1814,11 @@ async function boot(): Promise<void> {
         viewmodel.setGrenadeView(null);
         const activeWs = player.inventory[player.inventory.activeSlot];
         viewmodel.setWeapon(activeWs?.def.id ?? player.inventory.activeSlot);
+        // Weapon-draw foley — cosmetic, live player only, no sim impact.
+        // Knife has no WeaponDef.category, so pass 'knife' explicitly to reach
+        // the dedicated knife sound path (otherwise it falls to the default).
+        const drawClass = player.inventory.activeSlot === 'knife' ? 'knife' : activeWs?.def.category;
+        audio.weaponDraw(drawClass);
       }
     }
 
@@ -2174,6 +2183,11 @@ async function boot(): Promise<void> {
     // Scope zoom (30°) keeps the same absolute value: the ratio 30/73 ≈ 41% of base
     // is deliberately kept as a fixed tight-zoom regardless of base FOV change.
     const scoped    = isScoped(player);
+    // Scope-toggle audio: fire once per edge (once per frame), cosmetic only.
+    if (scoped !== prevScoped) {
+      audio.scopeToggle(scoped);
+      prevScoped = scoped;
+    }
     const targetFov = scoped ? 30 : 74;
     currentFov += (targetFov - currentFov) * Math.min(1, 12 * frameDt);
     if (Math.abs(currentFov - targetFov) < 0.1) currentFov = targetFov;
