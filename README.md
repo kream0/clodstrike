@@ -118,6 +118,7 @@ Validation errors are shown in the menu (first 3 + count of remainder). JSON par
 - **CS-style movement** shared between player and bots: ground friction + acceleration, Quake air-strafe (air-accel cap 0.6 m/s wish-speed), jump velocity 5.75 m/s, gravity 15.24 m/s². Walk (×0.52) and crouch (×0.34) multipliers applied to the active weapon's base move speed.
 - **Swept AABB collision** axis-separated (Y → X → Z) against the grid height field and prop AABBs; step-up ≤ 0.5 m so players and bots hop onto crates and ledges without getting stuck.
 - **Tag-slow on hit**: taking damage cuts move speed to 50% for 0.5 s — penalises W-keying through gunfire.
+- **Landing dip**: a render-only camera dip on landing, scaled by fall speed (capped, critically-damped spring back in ~0.3 s) — pure visual feel that never touches aim or the simulation.
 - **2.5D DDA raycast** for hitscan: marches through grid cells first, then tests prop AABBs, returning surface normal, material, and hit distance.
 - **Crouch** lowers eye height from 1.64 m to 1.17 m; player AABB shrinks accordingly; bots correctly clear low-ceiling tunnel cells only when crouching.
 
