@@ -203,7 +203,8 @@ Team-exclusive weapons are enforced at purchase time — a CT can never buy an A
 
 - **Fully synthesized** with the Web Audio API — no audio files anywhere in the project.
 - **Per-weapon gunshots**: distinct oscillator + noise shapes per gun (AK crack vs M4 thud vs AWP boom vs pistol pop), positional attenuation from bot positions.
-- **Footsteps**: triggered by distance-threshold accumulator; walk vs run threshold; positional for bot footsteps.
+- **Surface-aware footsteps**: triggered by distance-threshold accumulator (walk vs run), positional, and the timbre changes with the material under the foot — soft dull thud on sand, sharp crack on stone, mid concrete, hollow knock on wood, bright ring on metal (looked up from the map cell at each step).
+- **Ambient desert wind**: a faint continuous synthesized wind bed with a slow swell sits under everything for outdoor presence; never masks gunfire.
 - **Spatial reverb**: a master convolver bus fed by a procedurally-synthesized impulse response (no audio files) gives positional SFX a room tail — explosions/gunshots are wettest, footsteps driest, UI sounds stay fully dry. Built off the unlock gesture and degrades to dry if unsupported.
 - **Distance low-pass**: positional sounds are muffled by distance from the listener (near ≈ open, far ≈ 900 Hz) on top of the panner's attenuation, so a gunshot across the map reads as distant.
 - **Hit / headshot dings**: separate tones for body-hit confirmation and headshot.
