@@ -827,6 +827,7 @@ export class HUD {
   // State.
   private _hitmarkerTimer   = 0;
   private _hitmarkerKill    = false;
+  private _hitmarkerHead    = false;
   private _dmgVigTimer      = 0;
   private _killFeedEntries: { el: HTMLElement; expireAt: number }[] = [];
   private _shotTimestamps   = new Map<number, number>(); // combatant.id → game-time
@@ -1176,9 +1177,10 @@ export class HUD {
     }
   }
 
-  notifyHit(killed: boolean, _headshot: boolean): void {
+  notifyHit(killed: boolean, headshot: boolean): void {
     this._hitmarkerTimer = killed ? 0.35 : 0.22;
     this._hitmarkerKill  = killed;
+    this._hitmarkerHead  = headshot;
   }
 
   notifyDamageFrom(dirYawDelta: number): void {
@@ -2063,14 +2065,27 @@ export class HUD {
     const length  = this._hitmarkerTimer > 0 && this._hitmarkerKill ? 10 : 7;
 
     if (this._hitmarkerTimer > 0) {
-      // Hitmarker: red X.
-      ctx.strokeStyle = this._hitmarkerKill ? '#ffcc44' : '#ff4444';
+      const kill = this._hitmarkerKill;
+      const head = this._hitmarkerHead;
+      // X size: kill=8, body=5; headshots get +2.
+      const s = (kill ? 8 : 5) + (head ? 2 : 0);
+      // Color: gold for kill, white for headshot-hit, red for body-hit.
+      const xColor = kill ? '#ffcc44' : head ? '#ffffff' : '#ff4444';
+      ctx.strokeStyle = xColor;
       ctx.lineWidth   = 2;
-      const s = this._hitmarkerKill ? 8 : 5;
       ctx.beginPath();
       ctx.moveTo(center - s, center - s); ctx.lineTo(center + s, center + s);
       ctx.moveTo(center + s, center - s); ctx.lineTo(center - s, center + s);
       ctx.stroke();
+      // Headshot accent: a small white ring around the X centre.
+      if (head) {
+        const ringR = s + 3;
+        ctx.strokeStyle = kill ? '#ffffff' : '#ffeeaa';
+        ctx.lineWidth   = 1;
+        ctx.beginPath();
+        ctx.arc(center, center, ringR, 0, Math.PI * 2);
+        ctx.stroke();
+      }
       return;
     }
 
