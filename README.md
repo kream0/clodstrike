@@ -216,6 +216,7 @@ Team-exclusive weapons are enforced at purchase time — a CT can never buy an A
 - **Per-class reload foley**: reloads are synthesized per weapon class — quick light clicks for pistols, a charging-handle snap for rifles, a chunky pump for shotguns/MGs — instead of one generic click.
 - **Weapon handling cues**: a per-class deploy "shink" when you switch weapons and a soft click when scoping in/out.
 - **Hit / headshot dings**: separate tones for body-hit confirmation and headshot.
+- **Player-hurt cue**: taking fire plays a low body thud scaled by the damage (distinct from the hit-confirm ding) — the bright ding now means *you* landed a hit, the thud means you got hit.
 - **Bomb beeps**: accelerate as the timer counts down toward detonation. Positional — sound is louder near the bomb.
 - **Bomb plant, defuse, explosion** cues; round-end win/loss stings.
 - `audio.unlock()` called on the first user gesture to satisfy the Web Audio autoplay policy.
