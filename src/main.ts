@@ -859,6 +859,57 @@ async function boot(): Promise<void> {
     const listenerEye = { x: player.pos.x, y: player.pos.y + eyeOffP, z: player.pos.z };
     const occ = world.lineOfSight(listenerEye, muzzle) ? 0 : 1;
     audio.gunshot(bot.inventory[bot.inventory.activeSlot]?.def.id ?? 'usp', bot.pos, occ);
+
+    // Near-miss bullet-whiz: play a supersonic crack when an enemy round snaps
+    // past the player without hitting them.  Read-only — no sim state mutation.
+    if ((replayLog === null || replayFfDone) && player.alive && result.target !== player) {
+      // Player head position (the point a bullet most closely threatens).
+      const headY = player.pos.y + (player.crouching ? MOVEMENT.EYE_CROUCH : MOVEMENT.EYE_STAND);
+      const hx = player.pos.x;
+      const hy = headY;
+      const hz = player.pos.z;
+
+      // Closest point on the bullet SEGMENT [muzzle → result.endPoint] to the head.
+      // Using point-to-segment projection (clamped to [0,1]) — NOT the infinite ray,
+      // so bullets that already terminated before reaching the player don't whiz.
+      const sx = result.endPoint.x - muzzle.x;
+      const sy = result.endPoint.y - muzzle.y;
+      const sz = result.endPoint.z - muzzle.z;
+      const segLenSq = sx * sx + sy * sy + sz * sz;
+
+      let closestX: number;
+      let closestY: number;
+      let closestZ: number;
+      if (segLenSq < 1e-6) {
+        // Degenerate (zero-length) segment — treat muzzle as the closest point.
+        closestX = muzzle.x;
+        closestY = muzzle.y;
+        closestZ = muzzle.z;
+      } else {
+        // t = dot(head - muzzle, seg) / |seg|^2, clamped to [0, 1].
+        const t = Math.max(0, Math.min(1,
+          ((hx - muzzle.x) * sx + (hy - muzzle.y) * sy + (hz - muzzle.z) * sz) / segLenSq,
+        ));
+        closestX = muzzle.x + t * sx;
+        closestY = muzzle.y + t * sy;
+        closestZ = muzzle.z + t * sz;
+      }
+
+      const cdx = hx - closestX;
+      const cdy = hy - closestY;
+      const cdz = hz - closestZ;
+      const missDist = Math.sqrt(cdx * cdx + cdy * cdy + cdz * cdz);
+
+      // Whiz when the closest-approach distance is within 2.0 m of the head
+      // (bullet was genuinely close) but more than 0.3 m away (avoids doubling
+      // with a hit — if result.target === player we already skip above, but a
+      // tiny floor prevents grazes from sounding like both a hit and a whiz).
+      const WHIZ_NEAR  = 2.0;  // metres — near-miss threshold
+      const WHIZ_FLOOR = 0.3;  // metres — minimum distance (no double-on-graze)
+      if (missDist < WHIZ_NEAR && missDist > WHIZ_FLOOR) {
+        audio.bulletWhiz({ x: closestX, y: closestY, z: closestZ });
+      }
+    }
   }
 
   // --- State ---

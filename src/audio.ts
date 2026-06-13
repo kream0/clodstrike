@@ -1200,6 +1200,99 @@ export class GameAudio {
   }
 
   /**
+   * Bullet near-miss crack — a short (~40–55 ms) supersonic snap played at the
+   * closest point on the bullet's flight path.  Two layered components:
+   *
+   *  1. Noise transient: white noise through a bandpass (centred ~3–4 kHz,
+   *     slight random variation) + lowpass at ~6 kHz → very fast exponential
+   *     decay.  Gives the sharp "crack" character.
+   *  2. Descending-pitch zip: a sawtooth oscillator sweeping from ~3.5 kHz
+   *     down to ~400 Hz over ~45 ms.  Adds the Doppler-ish "zip" tail.
+   *
+   * Both components share ONE panner at `pos` so the crack pans correctly to
+   * the side the bullet passed.  Moderate gain — audible but not overwhelming.
+   * All randomness via Math.random() (cosmetic; never on sim paths).
+   */
+  bulletWhiz(pos: Vec3): void {
+    const ctx    = this._ctx;
+    const master = this._master;
+    if (!ctx || !master || !this._unlocked) return;
+
+    const now = ctx.currentTime;
+
+    // Slight random variation in duration (40–55 ms) and bandpass center.
+    const dur      = 0.040 + Math.random() * 0.015;
+    const bpCenter = 3000 + Math.random() * 1200;  // 3000–4200 Hz
+
+    // --- Component 1: noise transient ---
+    const bufLen = Math.ceil(ctx.sampleRate * dur);
+    const buffer = ctx.createBuffer(1, bufLen, ctx.sampleRate);
+    const data   = buffer.getChannelData(0);
+    for (let i = 0; i < bufLen; i++) data[i] = Math.random() * 2 - 1;
+
+    const noiseSrc = ctx.createBufferSource();
+    noiseSrc.buffer = buffer;
+
+    const bp = ctx.createBiquadFilter();
+    bp.type            = 'bandpass';
+    bp.frequency.value = bpCenter;
+    bp.Q.value         = 2.0;
+
+    const noiseLp = ctx.createBiquadFilter();
+    noiseLp.type            = 'lowpass';
+    noiseLp.frequency.value = 6000;
+
+    const noiseGain = ctx.createGain();
+    noiseGain.gain.setValueAtTime(0.28, now);
+    noiseGain.gain.exponentialRampToValueAtTime(0.001, now + dur);
+
+    noiseSrc.connect(bp);
+    bp.connect(noiseLp);
+    noiseLp.connect(noiseGain);
+
+    // --- Component 2: descending-pitch zip ---
+    const zipStartFreq = 3200 + Math.random() * 500;   // ~3200–3700 Hz
+    const zipEndFreq   = 350  + Math.random() * 100;   // ~350–450 Hz
+    const zipDur       = dur + 0.005;                  // slightly longer tail
+
+    const zipOsc = ctx.createOscillator();
+    zipOsc.type = 'sawtooth';
+    zipOsc.frequency.setValueAtTime(zipStartFreq, now);
+    zipOsc.frequency.exponentialRampToValueAtTime(zipEndFreq, now + zipDur);
+
+    const zipGain = ctx.createGain();
+    zipGain.gain.setValueAtTime(0.10, now);
+    zipGain.gain.exponentialRampToValueAtTime(0.001, now + zipDur);
+
+    zipOsc.connect(zipGain);
+
+    // --- Shared panner: HRTF, short-to-medium range ---
+    // Build the panner manually (rather than using _attachPanner which expects
+    // a single terminal AudioNode) so we can fan two sources into it.
+    const distLp = ctx.createBiquadFilter();
+    distLp.type            = 'lowpass';
+    distLp.frequency.value = DIST_CUTOFF_OPEN;  // overridden by distance below
+
+    // Mix both components through the shared distLp → panner chain.
+    noiseGain.connect(distLp);
+    zipGain.connect(distLp);
+
+    // Use _attachPanner on distLp as the terminal node; it sets the distance LP
+    // frequency and routes panner → master (+ reverb send when available).
+    this._attachPanner(ctx, distLp, pos,
+      { distanceModel: 'inverse', refDistance: 3, maxDistance: 60, rolloffFactor: 1 },
+      0.35,   // light reverb — it's a transient crack, not a sustained explosion
+      distLp,
+    );
+
+    // Schedule sources.
+    noiseSrc.start(now);
+    noiseSrc.stop(now + dur + 0.02);
+    zipOsc.start(now);
+    zipOsc.stop(now + zipDur + 0.02);
+  }
+
+  /**
    * Smoke grenade pop — soft hiss burst ~0.8 s, positional.
    */
   smokePop(pos: Vec3): void {
