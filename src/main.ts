@@ -1228,7 +1228,7 @@ async function boot(): Promise<void> {
     if (ev.who === player) {
       const ws = player.inventory[player.inventory.activeSlot];
       viewmodel.onReloadStart(ws?.def.reloadTime ?? 2.5);
-      audio.reload();
+      audio.reload(ws?.def.category);
     }
   });
 

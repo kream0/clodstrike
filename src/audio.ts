@@ -601,9 +601,169 @@ export class GameAudio {
     this._click(0);
   }
 
-  reload(): void {
-    this._click(0);
-    this._click(0.12);
+  /**
+   * Per-weapon-class synthesized reload foley.
+   * Cosmetic only — Math.random() allowed; zero sim/determinism impact.
+   *
+   * @param weaponClass  WeaponDef.category — 'pistol' | 'smg' | 'heavy' | 'rifle'
+   *                     Omit (or pass undefined) for the generic enriched reload.
+   */
+  reload(weaponClass?: string): void {
+    const ctx    = this._ctx;
+    const master = this._master;
+    if (!ctx || !master || !this._unlocked) return;
+
+    const now = ctx.currentTime;
+
+    /**
+     * _reloadClick — a shaped noise burst used as mag/bolt click foley.
+     * Purpose-built inline (NOT a wrapper around _click/_noise): the reload
+     * stages need independent HP+LP shaping and per-stage gain/timing that the
+     * fixed-shape _click helper doesn't expose, so the chain is inlined here.
+     * hpFreq: highpass cutoff (higher = brighter / lighter click)
+     * lpFreq: lowpass  cutoff (lower  = duller  / heavier thunk)
+     * dur:    burst duration (seconds)
+     * gain:   peak gain
+     * delay:  seconds from now
+     */
+    const _reloadClick = (
+      hpFreq: number,
+      lpFreq: number,
+      dur: number,
+      gain: number,
+      delay: number,
+    ): void => {
+      const t      = now + delay;
+      const bufLen = Math.ceil(ctx.sampleRate * dur);
+      const buf    = ctx.createBuffer(1, bufLen, ctx.sampleRate);
+      const data   = buf.getChannelData(0);
+      for (let i = 0; i < bufLen; i++) data[i] = Math.random() * 2 - 1;
+
+      const src = ctx.createBufferSource();
+      src.buffer = buf;
+
+      const hp = ctx.createBiquadFilter();
+      hp.type            = 'highpass';
+      hp.frequency.value = hpFreq;
+
+      const lp = ctx.createBiquadFilter();
+      lp.type            = 'lowpass';
+      lp.frequency.value = lpFreq;
+
+      const g = ctx.createGain();
+      g.gain.setValueAtTime(gain, t);
+      g.gain.exponentialRampToValueAtTime(0.001, t + dur);
+
+      src.connect(hp);
+      hp.connect(lp);
+      lp.connect(g);
+      g.connect(master);
+      src.start(t);
+      src.stop(t + dur + 0.01);
+    };
+
+    /**
+     * _reloadTone — a brief metallic triangle blip for charging-handle snaps.
+     * Purpose-built inline (NOT a wrapper around _tone, which is sine-only):
+     * the metallic snap wants a triangle wave, so the chain is inlined here.
+     * freq:  oscillator frequency (Hz)
+     * dur:   tone duration
+     * gain:  peak gain
+     * delay: seconds from now
+     */
+    const _reloadTone = (
+      freq: number,
+      dur: number,
+      gain: number,
+      delay: number,
+    ): void => {
+      const t   = now + delay;
+      const osc = ctx.createOscillator();
+      osc.type            = 'triangle';
+      osc.frequency.value = freq;
+
+      const g = ctx.createGain();
+      g.gain.setValueAtTime(gain, t);
+      g.gain.exponentialRampToValueAtTime(0.001, t + dur);
+
+      osc.connect(g);
+      g.connect(master);
+      osc.start(t);
+      osc.stop(t + dur + 0.01);
+    };
+
+    // Small random variation for each call so repeated reloads don't sound identical.
+    const jitter = () => (Math.random() - 0.5) * 0.012; // ±6 ms timing jitter
+
+    switch (weaponClass) {
+
+      case 'pistol': {
+        // Quick + light, two-stage, ~0.35–0.4 s total.
+        // mag-out: bright, thin click (high HP, short burst).
+        _reloadClick(2200, 7000, 0.018 + Math.random() * 0.006, 0.12 + Math.random() * 0.04, 0 + jitter());
+        // mag-in: slightly lower/heavier but still light.
+        _reloadClick(1400, 5000, 0.022 + Math.random() * 0.006, 0.15 + Math.random() * 0.04, 0.17 + jitter());
+        // Slide snap (pistol slide forward after mag seat) — quick bright transient.
+        _reloadClick(2600, 9000, 0.012, 0.11 + Math.random() * 0.03, 0.31 + jitter());
+        break;
+      }
+
+      case 'smg': {
+        // Mid-weight, mag out/in + a light bolt, ~0.55 s.
+        // mag-out: mid click.
+        _reloadClick(1800, 6000, 0.022 + Math.random() * 0.006, 0.14 + Math.random() * 0.03, 0 + jitter());
+        // mag-in: heavier thunk.
+        _reloadClick(900, 3500, 0.030 + Math.random() * 0.008, 0.18 + Math.random() * 0.04, 0.20 + jitter());
+        // Bolt clack + subtle metallic tone — co-scheduled, so share ONE jittered
+        // time (separate jitter() calls would flam them ±12 ms apart).
+        const boltT = 0.42 + jitter();
+        _reloadClick(1500, 5500, 0.016 + Math.random() * 0.004, 0.10 + Math.random() * 0.03, boltT);
+        _reloadTone(1100 + Math.random() * 200, 0.025, 0.04 + Math.random() * 0.02, boltT);
+        break;
+      }
+
+      case 'rifle': {
+        // Heavier mag + charging-handle snap, ~0.65–0.8 s.
+        // NOTE: bolt-action snipers (awp/ssg08/scar20/g3sg1 — all category 'rifle')
+        // share this charging-handle foley. A deliberate, acceptable approximation:
+        // one representative magazine-reload sound covers the whole class.
+        // mag-out: solid mid-low click.
+        _reloadClick(1200, 4500, 0.028 + Math.random() * 0.008, 0.16 + Math.random() * 0.04, 0 + jitter());
+        // mag-in: heavy thunk with lower LP — the "snap" of the mag seating.
+        _reloadClick(700, 2800, 0.038 + Math.random() * 0.010, 0.22 + Math.random() * 0.04, 0.22 + jitter());
+        // Charging handle pull-back: brief mid-high.
+        _reloadClick(1600, 5000, 0.020 + Math.random() * 0.006, 0.13 + Math.random() * 0.03, 0.48 + jitter());
+        // Charging handle release: the distinctive metallic snap (click + pitched
+        // tone). Co-scheduled, so share ONE jittered time to fuse into one transient.
+        const chargeT = 0.60 + jitter();
+        _reloadClick(1800, 6500, 0.024 + Math.random() * 0.006, 0.16 + Math.random() * 0.04, chargeT);
+        _reloadTone(900 + Math.random() * 150, 0.035, 0.06 + Math.random() * 0.02, chargeT);
+        break;
+      }
+
+      case 'heavy': {
+        // Heaviest/chunkiest — low shell thunk + pump/bolt clack, ~0.5 s.
+        // Primary impact (low-LP high-gain chunk) + layered sub-tone rumble are
+        // co-scheduled, so share ONE jittered time to fuse into one heavy thunk.
+        const thunkT = jitter();
+        _reloadClick(300, 1400, 0.045 + Math.random() * 0.012, 0.28 + Math.random() * 0.05, thunkT);
+        _reloadTone(280 + Math.random() * 80, 0.050, 0.08 + Math.random() * 0.03, thunkT);
+        // Pump/bolt clack: shorter, slightly brighter (the action cycling).
+        _reloadClick(1000, 3800, 0.028 + Math.random() * 0.008, 0.18 + Math.random() * 0.04, 0.32 + jitter());
+        // Final metallic clank — bolt fully seated.
+        _reloadClick(1400, 4800, 0.018 + Math.random() * 0.006, 0.12 + Math.random() * 0.03, 0.46 + jitter());
+        break;
+      }
+
+      default: {
+        // Generic enriched reload (back-compat for undefined / unknown class).
+        // Three-stage: mag-out → mag-in → charge snap (better than original two bare clicks).
+        _reloadClick(1600, 5000, 0.022 + Math.random() * 0.006, 0.14 + Math.random() * 0.04, 0 + jitter());
+        _reloadClick(1000, 3500, 0.032 + Math.random() * 0.008, 0.18 + Math.random() * 0.04, 0.18 + jitter());
+        _reloadClick(1800, 6000, 0.018 + Math.random() * 0.006, 0.12 + Math.random() * 0.03, 0.40 + jitter());
+        break;
+      }
+    }
   }
 
   headshot(): void {
