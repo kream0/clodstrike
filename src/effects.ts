@@ -11,6 +11,41 @@ const BLOOD_COLOR   = 0x8a1010;
 const FLASH_COLOR   = 0xffffdd;
 const DECAL_COLOR   = 0x331100;
 
+// ---------------------------------------------------------------------------
+// Dynamic flash light constants (tunable)
+// Keep the pool SMALL — each always-present PointLight adds a per-fragment
+// light-loop cost even when its intensity is 0 (driver/three.js still
+// branches on it unless you call renderer.shadowMap.enabled = false globally).
+// 5 slots covers simultaneous muzzle-flash + HE/bomb + flashbang.
+// ---------------------------------------------------------------------------
+const FLASH_LIGHT_POOL       = 5;
+
+// Muzzle flash — warm, brief, modest radius
+const MUZZLE_LIGHT_COLOR     = 0xffd9a0;
+const MUZZLE_LIGHT_INTENSITY = 3.0;
+const MUZZLE_LIGHT_DISTANCE  = 8;       // meters
+const MUZZLE_LIGHT_DECAY     = 2;       // physically-based quadratic
+const MUZZLE_LIGHT_LIFE      = 0.045;   // seconds (matches sprite life)
+
+// Bomb / grenade explosion — warm orange, large radius
+const EXPLOSION_LIGHT_COLOR     = 0xff7a30;
+const EXPLOSION_LIGHT_INTENSITY = 12.0;
+const EXPLOSION_LIGHT_DISTANCE  = 26;   // meters
+const EXPLOSION_LIGHT_DECAY     = 2;
+const EXPLOSION_LIGHT_LIFE      = 0.22; // seconds
+
+// HE grenade — same colour, slightly smaller
+const HE_LIGHT_INTENSITY = 9.0;
+const HE_LIGHT_DISTANCE  = 22;          // meters
+const HE_LIGHT_LIFE      = 0.18;        // seconds
+
+// Flash-bang — pure white, widest radius
+const FLASH_BANG_LIGHT_COLOR     = 0xffffff;
+const FLASH_BANG_LIGHT_INTENSITY = 16.0;
+const FLASH_BANG_LIGHT_DISTANCE  = 30;  // meters
+const FLASH_BANG_LIGHT_DECAY     = 2;
+const FLASH_BANG_LIGHT_LIFE      = 0.15; // seconds
+
 const POOL_TRACERS  = 24;
 const POOL_IMPACTS  = 32;
 const POOL_BLOOD    = 16;
@@ -32,6 +67,17 @@ interface Particle {
   mesh:    THREE.Mesh;
   life:    number;   // remaining life in seconds (-1 = inactive)
   maxLife: number;
+}
+
+// ---------------------------------------------------------------------------
+// Pooled flash-light entry (dynamic PointLight, permanent scene member)
+// ---------------------------------------------------------------------------
+
+interface FlashLight {
+  light:   THREE.PointLight;
+  life:    number;   // remaining life in seconds (≤0 = inactive)
+  maxLife: number;
+  peak:    number;   // intensity at life=maxLife
 }
 
 // ---------------------------------------------------------------------------
@@ -60,6 +106,10 @@ export class Effects {
   // Decal pool (circles).
   private _decals: THREE.Mesh[] = [];
   private _decalIdx = 0;
+
+  // Dynamic flash-light pool — created ONCE, NEVER added/removed at runtime.
+  private _flashLights: FlashLight[] = [];
+  private _flashLightIdx = 0;
 
   constructor(scene: THREE.Scene) {
     this._scene = scene;
@@ -144,6 +194,16 @@ export class Effects {
       this._scene.add(mesh);
       this._decals.push(mesh);
     }
+
+    // --- Flash lights (permanent, intensity-modulated) ---
+    // All lights are added to the scene ONCE here and NEVER removed.
+    // Runtime mutations touch only position/color/intensity/distance.
+    for (let i = 0; i < FLASH_LIGHT_POOL; i++) {
+      const light = new THREE.PointLight(0xffffff, 0, 1, MUZZLE_LIGHT_DECAY);
+      light.castShadow = false; // point-light shadows are very expensive
+      this._scene.add(light);
+      this._flashLights.push({ light, life: 0, maxLife: 1, peak: 0 });
+    }
   }
 
   update(dt: number): void {
@@ -153,6 +213,7 @@ export class Effects {
     this._updatePool(this._flashes, dt);
     if (this._expPoolsReady) this._updateExplosionPools(dt);
     if (this._grnPoolsReady) this._updateGrenadePool(dt);
+    this._updateFlashLights(dt);
   }
 
   private _updatePool(pool: Particle[], dt: number): void {
@@ -167,6 +228,51 @@ export class Effects {
       const t = p.life / p.maxLife; // 1 at start, 0 at end
       const m = p.mesh.material as THREE.MeshBasicMaterial;
       m.opacity = t;
+    }
+  }
+
+  /**
+   * Grab the next pooled PointLight and configure it for a new flash pulse.
+   * Round-robin: if all slots are active, the oldest is recycled (rare).
+   * No heap allocation — only scalar field writes.
+   */
+  private _flashLight(
+    pos:          Vec3,
+    colorHex:     number,
+    peakIntensity: number,
+    distance:     number,
+    decay:        number,
+    maxLife:      number,
+  ): void {
+    const slot = this._flashLights[this._flashLightIdx % FLASH_LIGHT_POOL];
+    this._flashLightIdx = (this._flashLightIdx + 1) % FLASH_LIGHT_POOL;
+
+    slot.light.position.set(pos.x, pos.y, pos.z);
+    slot.light.color.setHex(colorHex);
+    slot.light.distance = distance;
+    slot.light.decay    = decay;
+    slot.light.intensity = peakIntensity;
+    slot.peak    = peakIntensity;
+    slot.maxLife = maxLife;
+    slot.life    = maxLife;
+  }
+
+  /**
+   * Decay all active flash lights.  No allocation; quadratic ease-out
+   * (t² curve) reads as a snappy pop then smooth tail.
+   */
+  private _updateFlashLights(dt: number): void {
+    for (const slot of this._flashLights) {
+      if (slot.life <= 0) continue;
+      slot.life -= dt;
+      if (slot.life <= 0) {
+        slot.life = 0;
+        slot.light.intensity = 0;
+        continue;
+      }
+      // t goes 1 → 0 as life drains; square it for quadratic ease-out.
+      const t = slot.life / slot.maxLife; // linear 1→0
+      slot.light.intensity = slot.peak * (t * t);
     }
   }
 
@@ -260,6 +366,16 @@ export class Effects {
 
     const m = mesh.material as THREE.MeshBasicMaterial;
     m.opacity = 1;
+
+    // Dynamic point-light pulse — illuminates nearby walls/geometry.
+    this._flashLight(
+      worldPos,
+      MUZZLE_LIGHT_COLOR,
+      MUZZLE_LIGHT_INTENSITY,
+      MUZZLE_LIGHT_DISTANCE,
+      MUZZLE_LIGHT_DECAY,
+      MUZZLE_LIGHT_LIFE,
+    );
   }
 
   addDecal(point: Vec3, normal: Vec3): void {
@@ -357,6 +473,16 @@ export class Effects {
 
   explosion(center: Vec3): void {
     this._initExplosionPools();
+
+    // Dynamic point-light — warm-orange burst illuminates the whole area.
+    this._flashLight(
+      { x: center.x, y: center.y + 1.5, z: center.z },
+      EXPLOSION_LIGHT_COLOR,
+      EXPLOSION_LIGHT_INTENSITY,
+      EXPLOSION_LIGHT_DISTANCE,
+      EXPLOSION_LIGHT_DECAY,
+      EXPLOSION_LIGHT_LIFE,
+    );
 
     // Flash quad — scale up fast.
     {
@@ -528,6 +654,16 @@ export class Effects {
   heExplosion(pos: Vec3): void {
     this._initGrenadePool();
 
+    // Dynamic point-light — same warm-orange colour as bomb, slightly smaller.
+    this._flashLight(
+      { x: pos.x, y: pos.y + 1.1, z: pos.z },
+      EXPLOSION_LIGHT_COLOR,
+      HE_LIGHT_INTENSITY,
+      HE_LIGHT_DISTANCE,
+      EXPLOSION_LIGHT_DECAY,
+      HE_LIGHT_LIFE,
+    );
+
     // Flash quad.
     {
       const p = this._grnFlash[this._grnFlashIdx % this._grnFlash.length];
@@ -584,6 +720,16 @@ export class Effects {
    */
   flashBurst(pos: Vec3): void {
     this._initGrenadePool();
+
+    // Dynamic point-light — pure white, very bright, widest radius.
+    this._flashLight(
+      { x: pos.x, y: pos.y + 0.5, z: pos.z },
+      FLASH_BANG_LIGHT_COLOR,
+      FLASH_BANG_LIGHT_INTENSITY,
+      FLASH_BANG_LIGHT_DISTANCE,
+      FLASH_BANG_LIGHT_DECAY,
+      FLASH_BANG_LIGHT_LIFE,
+    );
 
     const p = this._grnWhiteFlash[this._grnWhiteFlashIdx % this._grnWhiteFlash.length];
     this._grnWhiteFlashIdx = (this._grnWhiteFlashIdx + 1) % this._grnWhiteFlash.length;
