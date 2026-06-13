@@ -775,6 +775,84 @@ export class GameAudio {
   }
 
   /**
+   * "You got hit" body-impact cue — played when the PLAYER takes damage.
+   * Clearly distinct from the bright hitmarker tick:
+   *  - Low filtered-noise thud (LP ≤ 320 Hz) — the physical body-impact layer.
+   *  - Short low triangle/sine "oof" blip (~90–130 Hz) — the gut-punch tonal.
+   * Both layers are NON-POSITIONAL (straight to master — this is happening to you).
+   * Gain and tonal pitch scale with damage amount (heavier hit = louder + lower).
+   * Cosmetic only — Math.random() allowed; zero sim/determinism impact.
+   *
+   * @param amount  Damage value (0–100+). Defaults to 25 if omitted.
+   */
+  playerHurt(amount?: number): void {
+    const ctx    = this._ctx;
+    const master = this._master;
+    if (!ctx || !master || !this._unlocked) return;
+
+    const dmg = amount ?? 25;
+    // Normalise to 0–1 over 0–100 damage, hard-clamped at 1.
+    const t = Math.min(1, Math.max(0, dmg / 100));
+
+    const now = ctx.currentTime;
+
+    // --- Layer 1: low-frequency noise thud ---
+    // Gain: 0.18 at t=0 → 0.55 at t=1; duration: 0.10–0.18 s.
+    const thudGain = 0.18 + t * 0.37;
+    const thudDur  = 0.10 + t * 0.08;
+    const thudLp   = 220 + (1 - t) * 100;  // 320 Hz light hits → 220 Hz heavy hits
+
+    {
+      const bufLen = Math.ceil(ctx.sampleRate * thudDur);
+      const buffer = ctx.createBuffer(1, bufLen, ctx.sampleRate);
+      const data   = buffer.getChannelData(0);
+      for (let i = 0; i < bufLen; i++) data[i] = Math.random() * 2 - 1;
+
+      const src = ctx.createBufferSource();
+      src.buffer = buffer;
+
+      const lp = ctx.createBiquadFilter();
+      lp.type            = 'lowpass';
+      lp.frequency.value = thudLp;
+      lp.Q.value         = 0.8;
+
+      const gain = ctx.createGain();
+      gain.gain.setValueAtTime(thudGain, now);
+      gain.gain.exponentialRampToValueAtTime(0.001, now + thudDur);
+
+      src.connect(lp);
+      lp.connect(gain);
+      gain.connect(master);
+      src.start(now);
+      src.stop(now + thudDur + 0.02);
+    }
+
+    // --- Layer 2: low tonal "oof" blip ---
+    // Frequency: 130 Hz (light) → 90 Hz (heavy); gain: 0.12–0.32; dur: 0.06–0.12 s.
+    const oofFreq = 130 - t * 40;   // 130 Hz light → 90 Hz heavy
+    const oofGain = 0.12 + t * 0.20;
+    const oofDur  = 0.06 + t * 0.06;
+
+    {
+      const osc = ctx.createOscillator();
+      // Triangle wave: rounder/duller than sine, avoids bright ring of hitmarker.
+      osc.type            = 'triangle';
+      osc.frequency.setValueAtTime(oofFreq, now);
+      // Subtle pitch drop on heavier hits — the "thud" feeling.
+      osc.frequency.exponentialRampToValueAtTime(oofFreq * (0.75 - t * 0.15), now + oofDur);
+
+      const gain = ctx.createGain();
+      gain.gain.setValueAtTime(oofGain, now);
+      gain.gain.exponentialRampToValueAtTime(0.001, now + oofDur);
+
+      osc.connect(gain);
+      gain.connect(master);
+      osc.start(now);
+      osc.stop(now + oofDur + 0.01);
+    }
+  }
+
+  /**
    * Play a footstep sound, optionally spatialized at `pos`.
    * `surface` is the `CellLegend.mat` string from `world.cellAt(x,z).mat`; when
    * undefined or unrecognized the generic concrete timbre is used (back-compat).

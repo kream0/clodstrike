@@ -1276,7 +1276,7 @@ async function boot(): Promise<void> {
       const attackerBearing = Math.atan2(-dx, -dz);
       const delta = attackerBearing - player.yaw;
       hud.notifyDamageFrom(delta);
-      audio.hitmarker(); // damage feedback tick
+      audio.playerHurt(ev.amount);
     }
     if (ev.attacker === player && ev.victim !== player) {
       hud.notifyHit(false, ev.hitGroup === 'head');
