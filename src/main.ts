@@ -2231,6 +2231,11 @@ async function boot(): Promise<void> {
     }
 
     // --- Update systems ---
+    // Grenade flight trails — cosmetic render-path only, never touches sim.
+    // Math.random() is fine (Effects.grenadeTrail uses it for jitter).
+    for (const g of grenadeManager.activeProjectiles) {
+      effects.grenadeTrail(g.pos, g.type);
+    }
     effects.update(frameDt);
     game.updateVisuals(frameDt, clock.now);
     hud.update(clock.now, frameDt);

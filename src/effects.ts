@@ -390,6 +390,7 @@ export class Effects {
     this._updateDust(dt);
     this._updateCasings(dt);
     this._updateMuzzleSmoke(dt);
+    this._updateGrenadeTrail(dt);
   }
 
   private _updatePool(pool: Particle[], dt: number): void {
@@ -589,6 +590,15 @@ export class Effects {
       mesh.visible = false;
     }
     this._decalIdx = 0;
+
+    // Also retire any lingering grenade-trail segments so faint quads from a
+    // live session don't bleed into a subsequent replay/round.  Render-only.
+    for (const p of this._trails) {
+      p.life = -1;
+      p.mesh.visible = false;
+    }
+    this._trailIdx       = 0;
+    this._trailSpawnCall = 0;
   }
 
   // ---------------------------------------------------------------------------
@@ -1280,6 +1290,118 @@ export class Effects {
       const s  = ep._startScale + (ep._endScale - ep._startScale) * (1 - t);
       p.mesh.scale.set(s, s, 1);
       (p.mesh.material as THREE.MeshBasicMaterial).opacity = t * 0.85;
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Grenade flight trails (RENDER-ONLY — cosmetic, never affects sim)
+  // ---------------------------------------------------------------------------
+  // 24-slot pool of small additive quads placed at the grenade's current
+  // world position.  Each quad fades and shrinks over ~0.4 s so they form a
+  // short glowing arc behind the grenade.  Thinning is global via index
+  // parity (every other spawn) so density is consistent no matter how many
+  // grenades are in flight in a given frame.
+  // Per-kind tint: HE = warm orange, flash = white, smoke = grey.
+  // Math.random() is fine here (cosmetic path, never seeded sim).
+  // ---------------------------------------------------------------------------
+
+  private _trails:    Particle[] = [];
+  private _trailIdx = 0;
+  private _trailSpawnCall = 0; // counts every call; parity gates spawning
+  private _trailPoolReady = false;
+
+  // Hex color per grenade kind (keyed on the GrenadeType string).
+  private static readonly TRAIL_COLORS: Record<string, number> = {
+    he:    0xff8c30,  // warm orange
+    flash: 0xffffff,  // pure white
+    smoke: 0x8a9898,  // cool grey
+  };
+  private static readonly TRAIL_COLOR_DEFAULT = 0xff8c30; // fallback orange
+
+  private static readonly POOL_TRAILS    = 24;
+  private static readonly TRAIL_LIFE     = 0.40;   // seconds a segment stays visible
+  private static readonly TRAIL_SCALE_0  = 0.095;  // world units at spawn
+  private static readonly TRAIL_SCALE_1  = 0.025;  // world units at expiry (shrinks)
+
+  private _initTrailPool(): void {
+    if (this._trailPoolReady) return;
+    this._trailPoolReady = true;
+
+    // Tiny quads — billboard faces camera, additive so bloom catches them.
+    const geo = new THREE.PlaneGeometry(1, 1); // scale per-segment
+    const mat = new THREE.MeshBasicMaterial({
+      color:       Effects.TRAIL_COLOR_DEFAULT,
+      transparent: true,
+      depthWrite:  false,
+      blending:    THREE.AdditiveBlending,
+      side:        THREE.DoubleSide,
+    });
+    for (let i = 0; i < Effects.POOL_TRAILS; i++) {
+      const mesh = new THREE.Mesh(geo, mat.clone());
+      mesh.visible = false;
+      this._scene.add(mesh);
+      this._trails.push({ mesh, life: -1, maxLife: Effects.TRAIL_LIFE });
+    }
+  }
+
+  /**
+   * Spawn a single trail segment at `pos`.
+   * Called from the RENDER loop (not the sim tick).  Uses Math.random()
+   * for a small positional jitter so segments don't stack into a flat line.
+   * Thins globally via index parity (skips odd spawns) so density stays
+   * consistent regardless of how many grenades call this in a single frame.
+   */
+  grenadeTrail(pos: Vec3, kind?: string): void {
+    this._initTrailPool();
+
+    // Global thinning: emit on every other call (parity counter advances on
+    // every call regardless of grenade count → consistent density).
+    const skip = (this._trailSpawnCall++ & 1) === 1;
+    if (skip) return;
+
+    const p = this._trails[this._trailIdx % Effects.POOL_TRAILS];
+    this._trailIdx = (this._trailIdx + 1) % Effects.POOL_TRAILS;
+
+    p.life    = Effects.TRAIL_LIFE;
+    p.maxLife = Effects.TRAIL_LIFE;
+
+    const s = Effects.TRAIL_SCALE_0 + Math.random() * 0.015;
+    p.mesh.scale.set(s, s, 1);
+
+    // Tiny jitter so segments fan slightly rather than stacking.
+    const jx = (Math.random() - 0.5) * 0.04;
+    const jy = (Math.random() - 0.5) * 0.04;
+    const jz = (Math.random() - 0.5) * 0.04;
+    p.mesh.position.set(pos.x + jx, pos.y + jy, pos.z + jz);
+
+    // Random billboard spin so they don't all look identical.
+    p.mesh.rotation.z = Math.random() * Math.PI * 2;
+
+    const colorHex = kind !== undefined
+      ? (Effects.TRAIL_COLORS[kind] ?? Effects.TRAIL_COLOR_DEFAULT)
+      : Effects.TRAIL_COLOR_DEFAULT;
+    (p.mesh.material as THREE.MeshBasicMaterial).color.setHex(colorHex);
+    (p.mesh.material as THREE.MeshBasicMaterial).opacity = 0.8;
+    p.mesh.visible = true;
+  }
+
+  /** Fade and shrink trail segments — called from update(). */
+  private _updateGrenadeTrail(dt: number): void {
+    if (!this._trailPoolReady) return;
+    for (const p of this._trails) {
+      if (p.life < 0) continue;
+      p.life -= dt;
+      if (p.life <= 0) {
+        p.life = -1;
+        p.mesh.visible = false;
+        continue;
+      }
+      const t = p.life / p.maxLife; // 1 → 0
+      // Shrink toward TRAIL_SCALE_1.
+      const s = Effects.TRAIL_SCALE_1 + (Effects.TRAIL_SCALE_0 - Effects.TRAIL_SCALE_1) * t;
+      p.mesh.scale.set(s, s, 1);
+      // Fade out.
+      (p.mesh.material as THREE.MeshBasicMaterial).opacity = t * 0.8;
     }
   }
 }

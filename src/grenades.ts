@@ -348,6 +348,15 @@ export class GrenadeManager {
     return this._smokes;
   }
 
+  /**
+   * Read-only view of live in-flight projectiles for cosmetic render use only.
+   * Returns the internal array typed as readonly so callers cannot mutate it.
+   * No allocation, no rng — pure positional data for trail FX.
+   */
+  get activeProjectiles(): readonly GrenadeProjectile[] {
+    return this._projectiles;
+  }
+
   // ---------------------------------------------------------------------------
   // Public API — reset
   // ---------------------------------------------------------------------------
