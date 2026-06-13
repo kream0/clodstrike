@@ -201,6 +201,8 @@ Team-exclusive weapons are enforced at purchase time — a CT can never buy an A
 - **Fully synthesized** with the Web Audio API — no audio files anywhere in the project.
 - **Per-weapon gunshots**: distinct oscillator + noise shapes per gun (AK crack vs M4 thud vs AWP boom vs pistol pop), positional attenuation from bot positions.
 - **Footsteps**: triggered by distance-threshold accumulator; walk vs run threshold; positional for bot footsteps.
+- **Spatial reverb**: a master convolver bus fed by a procedurally-synthesized impulse response (no audio files) gives positional SFX a room tail — explosions/gunshots are wettest, footsteps driest, UI sounds stay fully dry. Built off the unlock gesture and degrades to dry if unsupported.
+- **Distance low-pass**: positional sounds are muffled by distance from the listener (near ≈ open, far ≈ 900 Hz) on top of the panner's attenuation, so a gunshot across the map reads as distant.
 - **Hit / headshot dings**: separate tones for body-hit confirmation and headshot.
 - **Bomb beeps**: accelerate as the timer counts down toward detonation. Positional — sound is louder near the bomb.
 - **Bomb plant, defuse, explosion** cues; round-end win/loss stings.
