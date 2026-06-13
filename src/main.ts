@@ -854,7 +854,11 @@ async function boot(): Promise<void> {
       effects.impact(result.endPoint, result.normal, 'world');
       effects.addDecal(result.endPoint, result.normal);
     }
-    audio.gunshot(bot.inventory[bot.inventory.activeSlot]?.def.id ?? 'usp', bot.pos);
+    // Occlusion: check LOS from player eye to bot muzzle (read-only, no sim impact).
+    const eyeOffP = player.crouching ? MOVEMENT.EYE_CROUCH : MOVEMENT.EYE_STAND;
+    const listenerEye = { x: player.pos.x, y: player.pos.y + eyeOffP, z: player.pos.z };
+    const occ = world.lineOfSight(listenerEye, muzzle) ? 0 : 1;
+    audio.gunshot(bot.inventory[bot.inventory.activeSlot]?.def.id ?? 'usp', bot.pos, occ);
   }
 
   // --- State ---

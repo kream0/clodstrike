@@ -34,6 +34,14 @@ const WEAPON_TONES: Record<string, WeaponTone> = {
 /** Wet level sent to the reverb bus from positional sounds (neutral baseline). */
 const REVERB_WET_BASE  = 0.18;
 
+// Wall-occlusion lowpass constants.
+/** LP cutoff (Hz) for a fully occluded (wall-blocked) positional gunshot. */
+const OCCLUDE_CUTOFF_HZ = 480;
+/** Minimum LP cutoff floor — even occluded shots stay audible. */
+const OCCLUDE_CUTOFF_FLOOR = 200;
+/** Gain attenuation multiplier at full occlusion (occlusion = 1). */
+const OCCLUDE_GAIN_MUL = 0.65;  // ×(1 - 0.35×1) = 0.65
+
 /** Distance (metres) at which LP cutoff is fully open (~16 kHz). */
 const DIST_NEAR        = 6;
 /** Distance (metres) at which LP cutoff is at its floor. */
@@ -425,6 +433,62 @@ export class GameAudio {
     src.stop(now + duration + 0.02);
   }
 
+  /**
+   * Variant of `_noise` for occluded positional shots.
+   * The LP cutoff is set to `lpFreq` (already the combined distance+occlusion value)
+   * and `_attachPanner` is called WITHOUT a distLp argument so the override is skipped —
+   * the caller is responsible for pre-computing the correct combined cutoff.
+   * Only called from `gunshot` when `pos` is defined and `occlusion > 0`.
+   */
+  private _noiseOccluded(
+    duration: number,
+    bpFreq: number,
+    lpFreq: number,
+    gainVal: number,
+    pos: Vec3,
+    reverbMul: number,
+  ): void {
+    const ctx = this._ctx;
+    const master = this._master;
+    if (!ctx || !master || !this._unlocked) return;
+
+    const now    = ctx.currentTime;
+    const bufLen = Math.ceil(ctx.sampleRate * duration);
+    const buffer = ctx.createBuffer(1, bufLen, ctx.sampleRate);
+    const data   = buffer.getChannelData(0);
+    for (let i = 0; i < bufLen; i++) data[i] = Math.random() * 2 - 1;
+
+    const src = ctx.createBufferSource();
+    src.buffer = buffer;
+
+    const bp = ctx.createBiquadFilter();
+    bp.type            = 'bandpass';
+    bp.frequency.value = bpFreq;
+    bp.Q.value         = 1.5;
+
+    const lp = ctx.createBiquadFilter();
+    lp.type            = 'lowpass';
+    lp.frequency.value = lpFreq;   // pre-computed combined cutoff — no further override
+
+    const gain = ctx.createGain();
+    gain.gain.setValueAtTime(gainVal, now);
+    gain.gain.exponentialRampToValueAtTime(0.001, now + duration);
+
+    src.connect(bp);
+    bp.connect(lp);
+    lp.connect(gain);
+
+    // Pass undefined for distLp → _attachPanner will NOT touch the LP frequency.
+    this._attachPanner(ctx, gain, pos,
+      { distanceModel: 'inverse', refDistance: 6, maxDistance: 90 },
+      reverbMul,
+      undefined,
+    );
+
+    src.start(now);
+    src.stop(now + duration + 0.02);
+  }
+
   private _tone(freq: number, duration: number, gainVal: number): void {
     const ctx    = this._ctx;
     const master = this._master;
@@ -478,11 +542,56 @@ export class GameAudio {
   // Public API
   // ---------------------------------------------------------------------------
 
-  gunshot(weaponId: string, pos?: Vec3): void {
-    const tone = WEAPON_TONES[weaponId] ?? WEAPON_TONES['usp'];
-    // Gunshots are loud — full reverb (mul=1.0).
-    this._noise(tone.duration, tone.bpFreq, tone.lpFreq, tone.gain, pos, 1.0);
+  /**
+   * Play a gunshot, optionally spatialized at `pos`.
+   *
+   * @param weaponId  Weapon id (matches WEAPON_TONES key; falls back to 'usp').
+   * @param pos       World position of the shooter.  Omit for the player's
+   *                  own gun (mono, no distance LP, no panner).
+   * @param occlusion 0 = clear line-of-sight (default, back-compat);
+   *                  1 = fully wall-blocked.  Values in between interpolate.
+   *                  Has no effect on non-positional (pos === undefined) calls.
+   */
+  gunshot(weaponId: string, pos?: Vec3, occlusion = 0): void {
+    const tone = WEAPON_TONES[weaponId] ?? WEAPON_TONES['usp']!;
 
+    // --- Occlusion: only for positional bot shots (pos defined, occlusion > 0). ---
+    if (pos !== undefined && occlusion > 0) {
+      const occ = Math.max(0, Math.min(1, occlusion));
+
+      // Distance-based cutoff (computed now to combine with occlusion cutoff).
+      let distCutoff = DIST_CUTOFF_OPEN;
+      const lp = this._listenerPos;
+      if (lp) {
+        const dx = pos.x - lp.x;
+        const dy = pos.y - lp.y;
+        const dz = pos.z - lp.z;
+        distCutoff = distanceCutoff(Math.sqrt(dx * dx + dy * dy + dz * dz));
+      }
+
+      // Occluded cutoff: lerp from fully-open toward the occlusion floor.
+      const occCutoff = DIST_CUTOFF_OPEN + occ * (OCCLUDE_CUTOFF_HZ - DIST_CUTOFF_OPEN);
+      // Take the more-muffled (lower) of distance vs occlusion cutoff; clamp to floor.
+      const finalCutoff = Math.max(
+        OCCLUDE_CUTOFF_FLOOR,
+        Math.min(distCutoff, occCutoff),
+      );
+
+      // Slightly reduced gain for occluded shots (less level through walls).
+      const gainMul = 1 - (1 - OCCLUDE_GAIN_MUL) * occ;
+      const occludedGain = tone.gain * gainMul;
+
+      // Use _noiseOccluded: sets the LP to finalCutoff and skips _attachPanner's
+      // distance-LP override (passes distLp undefined) so the pre-computed combined
+      // cutoff isn't clobbered.
+      this._noiseOccluded(tone.duration, tone.bpFreq, finalCutoff, occludedGain, pos, 1.0);
+    } else {
+      // Normal path — fully back-compat (occlusion 0 or non-positional).
+      // Gunshots are loud — full reverb (mul=1.0).
+      this._noise(tone.duration, tone.bpFreq, tone.lpFreq, tone.gain, pos, 1.0);
+    }
+
+    // Sub-oscillator (deagle/awp/ak47 body thud) — dry, always unchanged.
     if (tone.subFreq > 0) {
       this._tone(tone.subFreq, tone.duration * 0.6, 0.25);
     }
